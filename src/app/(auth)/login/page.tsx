@@ -1,0 +1,12 @@
+import { LoginForm } from "@/components/auth/login-form";
+
+/** Login page with stable server-rendered callback handling. */
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string }>;
+}) {
+  const resolvedSearchParams = await searchParams;
+
+  return <LoginForm callbackUrl={resolvedSearchParams.callbackUrl ?? "/"} />;
+}

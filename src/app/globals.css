@@ -1,0 +1,218 @@
+@import "tailwindcss";
+
+/* ─── Design Tokens (Light) ─────────────────────────── */
+:root {
+  --color-bg: #f8fafc;
+  --color-bg-elevated: #ffffff;
+  --color-bg-muted: #f1f5f9;
+  --color-bg-overlay: rgba(255, 255, 255, 0.85);
+  --color-bg-graph: #fafbfd;
+
+  --color-surface: #ffffff;
+  --color-surface-hover: #f8fafc;
+  --color-surface-active: #f1f5f9;
+
+  --color-border: #e2e8f0;
+  --color-border-muted: #f1f5f9;
+
+  --color-text: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #94a3b8;
+
+  --color-accent: #6366f1;
+  --color-accent-hover: #4f46e5;
+  --color-accent-muted: rgba(99, 102, 241, 0.12);
+
+  --color-danger: #ef4444;
+  --color-danger-muted: rgba(239, 68, 68, 0.12);
+
+  --color-node-bg: #ffffff;
+  --color-node-border: #e2e8f0;
+  --color-node-shadow: rgba(15, 23, 42, 0.06);
+
+  --color-edge-default: #94a3b8;
+
+  --color-grid-line: #f1f5f9;
+  --color-axis-bg: #f8fafc;
+  --color-axis-tick: #cbd5e1;
+  --color-axis-border: #e2e8f0;
+
+  --color-minimap-bg: rgba(248, 250, 252, 0.92);
+  --color-minimap-node: #94a3b8;
+  --color-minimap-viewport: rgba(99, 102, 241, 0.15);
+  --color-minimap-viewport-border: #6366f1;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 2px 8px rgba(15, 23, 42, 0.06), 0 4px 16px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 4px 16px rgba(15, 23, 42, 0.08), 0 8px 32px rgba(15, 23, 42, 0.04);
+  --shadow-node: 0 1px 3px rgba(15, 23, 42, 0.06), 0 2px 8px rgba(15, 23, 42, 0.04);
+  --shadow-node-hover: 0 4px 12px rgba(15, 23, 42, 0.1), 0 8px 24px rgba(15, 23, 42, 0.06);
+  --shadow-node-selected: 0 0 0 2px var(--color-accent), 0 4px 16px rgba(99, 102, 241, 0.2);
+
+  --blur-glass: 12px;
+
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ─── Dark Theme ────────────────────────────────────── */
+[data-theme="dark"] {
+  --color-bg: #0c0e14;
+  --color-bg-elevated: #151822;
+  --color-bg-muted: #1a1e2e;
+  --color-bg-overlay: rgba(21, 24, 34, 0.88);
+  --color-bg-graph: #0f1118;
+
+  --color-surface: #1a1e2e;
+  --color-surface-hover: #212638;
+  --color-surface-active: #2a3042;
+
+  --color-border: #2a3042;
+  --color-border-muted: #1e2336;
+
+  --color-text: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+
+  --color-accent: #818cf8;
+  --color-accent-hover: #6366f1;
+  --color-accent-muted: rgba(129, 140, 248, 0.14);
+
+  --color-danger: #f87171;
+  --color-danger-muted: rgba(248, 113, 113, 0.14);
+
+  --color-node-bg: #1a1e2e;
+  --color-node-border: #2a3042;
+  --color-node-shadow: rgba(0, 0, 0, 0.3);
+
+  --color-edge-default: #475569;
+
+  --color-grid-line: #1a1e2e;
+  --color-axis-bg: #0f1118;
+  --color-axis-tick: #334155;
+  --color-axis-border: #2a3042;
+
+  --color-minimap-bg: rgba(15, 17, 24, 0.92);
+  --color-minimap-node: #475569;
+  --color-minimap-viewport: rgba(129, 140, 248, 0.12);
+  --color-minimap-viewport-border: #818cf8;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.25), 0 4px 16px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.3), 0 8px 32px rgba(0, 0, 0, 0.2);
+  --shadow-node: 0 1px 3px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --shadow-node-hover: 0 4px 12px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.25);
+  --shadow-node-selected: 0 0 0 2px var(--color-accent), 0 4px 16px rgba(129, 140, 248, 0.25);
+}
+
+/* ─── Base Styles ───────────────────────────────────── */
+html {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Smooth theme transitions */
+body,
+body * {
+  transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+  transition-duration: 120ms;
+  transition-timing-function: ease;
+}
+
+/* Override for animated elements */
+.no-theme-transition,
+.no-theme-transition * {
+  transition: none !important;
+}
+
+/* ─── Scrollbar ─────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* ─── Graph SVG helpers ─────────────────────────────── */
+.graph-node {
+  cursor: pointer;
+  transition: filter 150ms ease;
+}
+.graph-node:hover {
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.1));
+}
+
+.connection-port {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.graph-node:hover .connection-port {
+  opacity: 1;
+}
+
+/* Sankey edge gradient animation */
+@keyframes flow {
+  from { stroke-dashoffset: 20; }
+  to { stroke-dashoffset: 0; }
+}
+.edge-flow-animated {
+  animation: flow 1s linear infinite;
+}
+
+/* ─── Due-date alert pulsation ──────────────────────── */
+@keyframes pulse-warning {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5); }
+  50% { box-shadow: 0 0 12px 4px rgba(245, 158, 11, 0.35); }
+}
+@keyframes pulse-critical {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  50% { box-shadow: 0 0 12px 4px rgba(239, 68, 68, 0.4); }
+}
+.pulse-warning {
+  animation: pulse-warning 2s ease-in-out infinite;
+  border-color: #f59e0b !important;
+}
+.pulse-critical {
+  animation: pulse-critical 1.5s ease-in-out infinite;
+  border-color: #ef4444 !important;
+}
+
+/* SVG pulsation for graph nodes */
+@keyframes svg-pulse-warning {
+  0%, 100% { filter: drop-shadow(0 0 0 rgba(245, 158, 11, 0)); }
+  50% { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.5)); }
+}
+@keyframes svg-pulse-critical {
+  0%, 100% { filter: drop-shadow(0 0 0 rgba(239, 68, 68, 0)); }
+  50% { filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.5)); }
+}
+.graph-node.pulse-warning {
+  animation: svg-pulse-warning 2s ease-in-out infinite;
+}
+.graph-node.pulse-critical {
+  animation: svg-pulse-critical 1.5s ease-in-out infinite;
+}
