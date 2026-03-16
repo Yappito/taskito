@@ -42,7 +42,14 @@ Node.js 22+ and npm are only needed if you want to work from a repository checko
 
 This repository now uses a single Docker Compose path based on [docker-compose.yml](docker-compose.yml).
 
-### 1. Create the deployment env file
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Yappito/taskito.git
+cd taskito
+```
+
+### 2. Create the deployment env file
 
 ```bash
 cp .env.example .env
@@ -53,7 +60,6 @@ Set real values for:
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
 - `POSTGRES_DB`
-- `APP_IMAGE`
 - `AUTH_URL`
 - `AUTH_SECRET`
 
@@ -65,13 +71,10 @@ Optional values:
 
 `DATABASE_URL` and `AUTH_TRUST_HOST` are injected by the compose file.
 
-`APP_IMAGE` should point at the published Docker Hub image, for example `your-dockerhub-user/taskito:latest`.
-
-### 2. Pull and start the stack
+### 3. Start the stack
 
 ```bash
-docker compose pull
-docker compose up -d
+docker compose up -d --pull always
 ```
 
 This starts:
@@ -82,7 +85,7 @@ This starts:
 
 The application container runs `prisma migrate deploy` automatically before starting the server.
 
-### 3. Create the first admin account
+### 4. Create the first admin account
 
 If you want a clean production instance without demo data, bootstrap an admin user:
 
@@ -98,7 +101,7 @@ Optional:
 - Add `-e BOOTSTRAP_ADMIN_PASSWORD="strong-password"` to choose the password explicitly.
 - If you omit the password, the script generates one and prints it once.
 
-### 4. Seed demo data only if you want sample content
+### 5. Seed demo data only if you want sample content
 
 ```bash
 docker compose exec \
@@ -115,7 +118,7 @@ docker compose exec app npm run db:generate
 docker compose exec app ./node_modules/.bin/prisma migrate deploy
 ```
 
-### 5. Check the running stack
+### 6. Check the running stack
 
 ```bash
 docker compose ps
@@ -137,8 +140,7 @@ Useful commands from the repository root:
 
 | Command | Purpose |
 |---|---|
-| `docker compose pull` | Pull the published app image and any base services |
-| `docker compose up -d` | Start the full stack |
+| `docker compose up -d --pull always` | Pull the latest image and start the full stack |
 | `docker compose ps` | Check container status |
 | `docker compose logs -f app` | Tail application logs |
 | `docker compose logs -f nginx` | Tail reverse proxy logs |
@@ -156,7 +158,6 @@ Useful commands from the repository root:
 | `POSTGRES_USER` | Yes | PostgreSQL user for the compose stack |
 | `POSTGRES_PASSWORD` | Yes | PostgreSQL password for the compose stack |
 | `POSTGRES_DB` | Yes | PostgreSQL database name |
-| `APP_IMAGE` | Yes | Published Docker image to run for the app service |
 | `AUTH_URL` | Yes | Public base URL of the app |
 | `AUTH_SECRET` | Yes | Auth.js signing secret |
 | `ALLOW_DEMO_SEED` | No | Leave `false` unless you intentionally want demo data |
@@ -170,6 +171,7 @@ Useful commands from the repository root:
 - The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume.
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
+- The documented `docker compose up -d --pull always` command refreshes the published app image before startup.
 
 ## Development
 

@@ -1,6 +1,6 @@
 services:
   app:
-    image: ${APP_IMAGE:?set APP_IMAGE}
+    image: yappito/taskito:latest
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB}
       - AUTH_URL=${AUTH_URL:?set AUTH_URL}
