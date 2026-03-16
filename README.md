@@ -33,10 +33,10 @@ Taskito is a self-hosted task manager for project-scoped planning, delivery, and
 ## Prerequisites
 
 - Docker Desktop or Docker Engine with Compose
-- Node.js 22+
-- npm
 
-Node.js is required to build the image from the repository checkout and to run supporting scripts such as admin bootstrap, Prisma utilities, and tests. The deployed application itself runs inside Docker.
+For deployment, Docker is enough. The published app image includes the Prisma and tsx tooling plus the bundled bootstrap and seed scripts, so those can be run inside the container after the stack is up.
+
+Node.js 22+ and npm are only needed if you want to work from a repository checkout for local development, tests, or direct script execution outside Docker.
 
 ## Deployment
 
@@ -53,6 +53,7 @@ Set real values for:
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
 - `POSTGRES_DB`
+- `APP_IMAGE`
 - `AUTH_URL`
 - `AUTH_SECRET`
 
@@ -64,10 +65,13 @@ Optional values:
 
 `DATABASE_URL` and `AUTH_TRUST_HOST` are injected by the compose file.
 
-### 2. Build and start the stack
+`APP_IMAGE` should point at the published Docker Hub image, for example `your-dockerhub-user/taskito:latest`.
+
+### 2. Pull and start the stack
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 This starts:
@@ -86,7 +90,7 @@ If you want a clean production instance without demo data, bootstrap an admin us
 docker compose exec \
   -e BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
   -e BOOTSTRAP_ADMIN_NAME="Initial Admin" \
-  app ./node_modules/.bin/tsx prisma/bootstrap-admin.ts
+  app npm run db:bootstrap-admin
 ```
 
 Optional:
@@ -99,10 +103,17 @@ Optional:
 ```bash
 docker compose exec \
   -e ALLOW_DEMO_SEED=true \
-  app ./node_modules/.bin/tsx prisma/seed.ts
+  app npm run db:seed
 ```
 
 Only do this when you want the sample project, tasks, and demo login. The seed script refuses to run in production unless `ALLOW_DEMO_SEED=true` is present in the container environment.
+
+You can use the same pattern for other bundled maintenance commands once the app container is running:
+
+```bash
+docker compose exec app npm run db:generate
+docker compose exec app ./node_modules/.bin/prisma migrate deploy
+```
 
 ### 5. Check the running stack
 
@@ -126,12 +137,15 @@ Useful commands from the repository root:
 
 | Command | Purpose |
 |---|---|
-| `docker compose up -d --build` | Build and start the full stack |
+| `docker compose pull` | Pull the published app image and any base services |
+| `docker compose up -d` | Start the full stack |
 | `docker compose ps` | Check container status |
 | `docker compose logs -f app` | Tail application logs |
 | `docker compose logs -f nginx` | Tail reverse proxy logs |
+| `docker compose exec app npm run db:bootstrap-admin` | Bootstrap or reset an admin user from inside the running container |
+| `docker compose exec app npm run db:seed` | Seed demo data from inside the running container |
+| `docker compose exec app npm run db:generate` | Rebuild the Prisma client inside the running container |
 | `docker compose exec app ./node_modules/.bin/prisma migrate deploy` | Re-run migrations manually |
-| `docker compose exec app ./node_modules/.bin/tsx prisma/bootstrap-admin.ts` | Bootstrap or reset an admin user |
 | `docker compose down` | Stop the stack |
 | `docker compose down -v` | Stop the stack and remove persisted volumes |
 
@@ -142,6 +156,7 @@ Useful commands from the repository root:
 | `POSTGRES_USER` | Yes | PostgreSQL user for the compose stack |
 | `POSTGRES_PASSWORD` | Yes | PostgreSQL password for the compose stack |
 | `POSTGRES_DB` | Yes | PostgreSQL database name |
+| `APP_IMAGE` | Yes | Published Docker image to run for the app service |
 | `AUTH_URL` | Yes | Public base URL of the app |
 | `AUTH_SECRET` | Yes | Auth.js signing secret |
 | `ALLOW_DEMO_SEED` | No | Leave `false` unless you intentionally want demo data |
@@ -154,6 +169,7 @@ Useful commands from the repository root:
 - Attachment downloads go through authenticated project access checks.
 - The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume.
 - nginx is configured to accept request bodies large enough for the application attachment limit.
+- The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 
 ## Development
 
