@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc-client";
+import { BulkActionBar } from "./bulk-action-bar";
 import { TaskCard } from "./task-card";
 import { TaskDetail } from "./task-detail";
 import { TaskViewFilters } from "./task-view-filters";
@@ -48,6 +49,8 @@ function getDropStatusIdFromPoint(clientX: number, clientY: number): string | nu
 export function BoardView({ projectId, statuses, tags, projectSettings }: BoardViewProps) {
   const alertConfig = getAlertConfig(projectSettings);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<DragPreviewState | null>(null);
@@ -59,6 +62,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   const suppressClickRef = useRef(false);
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -85,8 +89,41 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     placeholderData: (previousData) => previousData,
   });
 
+  const tasks = useMemo(() => (data?.items ?? []) as TaskCardData[], [data]);
+
+  useEffect(() => {
+    setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
+  }, [tasks]);
+
+  const bulkUpdate = trpc.task.bulkUpdate.useMutation({
+    onMutate: async () => {
+      setActionError(null);
+    },
+    onSuccess: () => {
+      setActionError(null);
+      setSelectedTaskIds([]);
+      utils.task.list.invalidate();
+    },
+    onError: (error) => {
+      setActionError(error.message || "Unable to apply bulk update.");
+    },
+  });
+
+  const savePreset = trpc.project.saveFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
+  const deletePreset = trpc.project.deleteFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
   const updateTask = trpc.task.update.useMutation({
     onMutate: async (variables) => {
+      setActionError(null);
       // Cancel outgoing refetches so they don't overwrite our optimistic update
       await utils.task.list.cancel(taskListInput);
       // Snapshot previous data
@@ -105,11 +142,12 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       }
       return { prev };
     },
-    onError: (_err, _variables, context) => {
+    onError: (error, _variables, context) => {
       // Roll back on error
       if (context?.prev) {
         utils.task.list.setData(taskListInput, context.prev);
       }
+      setActionError(error.message || "Unable to move task.");
     },
     onSettled: () => {
       utils.task.list.invalidate();
@@ -155,10 +193,12 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     );
   }
 
-  const tasks = (data?.items ?? []) as TaskCardData[];
   const draggedTask = draggingTaskId
     ? tasks.find((task) => task.id === draggingTaskId) ?? null
     : null;
+
+  const visibleTaskIds = tasks.map((task) => task.id);
+  const allVisibleSelected = visibleTaskIds.length > 0 && visibleTaskIds.every((taskId) => selectedTaskIds.includes(taskId));
 
   function releasePointerCapture(dragState: PointerDragState | null) {
     if (!dragState) return;
@@ -295,6 +335,40 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     setSelectedTaskId(taskId);
   }
 
+  function toggleTaskSelection(taskId: string) {
+    setSelectedTaskIds((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
+    );
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedTaskIds((prev) => {
+      if (allVisibleSelected) {
+        return prev.filter((taskId) => !visibleTaskIds.includes(taskId));
+      }
+
+      return [...new Set([...prev, ...visibleTaskIds])];
+    });
+  }
+
+  function applyBulkUpdate(input: {
+    statusId?: string;
+    assigneeId?: string | null;
+    addTagIds?: string[];
+    removeTagIds?: string[];
+    archive?: boolean;
+  }) {
+    if (selectedTaskIds.length === 0) {
+      return;
+    }
+
+    bulkUpdate.mutate({
+      projectId,
+      taskIds: selectedTaskIds,
+      ...input,
+    });
+  }
+
   return (
     <div className="flex flex-col">
       <TaskViewFilters
@@ -307,8 +381,56 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
         onToggleTag={toggleTag}
         onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
+        presets={presets as Array<{ id: string; name: string; search: string; tagIds: string[]; assigneeIds: string[] }>}
+        onApplyPreset={(preset) => {
+          setSearch(preset.search);
+          setSelectedTagIds(preset.tagIds);
+          setSelectedAssigneeIds(preset.assigneeIds);
+        }}
+        onSavePreset={(name) => {
+          savePreset.mutate({
+            projectId,
+            preset: {
+              id: crypto.randomUUID(),
+              name,
+              search,
+              tagIds: selectedTagIds,
+              assigneeIds: selectedAssigneeIds,
+            },
+          });
+        }}
+        onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}
         className="mx-4 mt-4"
       />
+
+      <BulkActionBar
+        selectedCount={selectedTaskIds.length}
+        statuses={statuses}
+        tags={tags}
+        assignees={people ?? []}
+        isPending={bulkUpdate.isPending}
+        allVisibleSelected={allVisibleSelected}
+        onSelectAllVisible={toggleVisibleSelection}
+        onClearSelection={() => setSelectedTaskIds([])}
+        onApplyStatus={(statusId) => applyBulkUpdate({ statusId })}
+        onApplyAssignee={(assigneeId) => applyBulkUpdate({ assigneeId })}
+        onAddTag={(tagId) => applyBulkUpdate({ addTagIds: [tagId] })}
+        onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
+        onArchive={() => applyBulkUpdate({ archive: true })}
+      />
+
+      {actionError && (
+        <div
+          className="mx-4 mt-3 rounded-lg border px-3 py-2 text-sm"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+            borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+            color: "var(--color-danger)",
+          }}
+        >
+          {actionError}
+        </div>
+      )}
 
       <div className="flex flex-1 gap-4 overflow-x-auto p-4">
         {statuses.map((status) => {
@@ -380,6 +502,18 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                   >
                     <TaskCard
                       task={task}
+                      className={selectedTaskIds.includes(task.id) ? "ring-2 ring-[var(--color-accent)]" : undefined}
+                      leadingContent={
+                        <input
+                          type="checkbox"
+                          checked={selectedTaskIds.includes(task.id)}
+                          onChange={() => toggleTaskSelection(task.id)}
+                          onClick={(event) => event.stopPropagation()}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          aria-label={`Select ${task.title}`}
+                          className="mt-0.5 shrink-0"
+                        />
+                      }
                       alertLevel={getAlertLevel(
                         task.dueDate,
                         (task.status as { category?: string }).category,

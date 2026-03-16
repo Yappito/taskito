@@ -180,4 +180,18 @@ test.describe("Search modal", () => {
     await page.waitForTimeout(300);
     await expect(searchInput).not.toBeVisible();
   });
+
+  test("search modal toggles closed when Cmd+K is pressed twice", async ({ page }) => {
+    await page.goto("/settings");
+    await page.waitForLoadState("networkidle");
+
+    const searchInput = page.locator('input[placeholder="Search tasks..."]');
+
+    await page.keyboard.press("Meta+k");
+    await expect(searchInput).toBeVisible();
+
+    await page.keyboard.press("Meta+k");
+    await page.waitForTimeout(300);
+    await expect(searchInput).not.toBeVisible();
+  });
 });

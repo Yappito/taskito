@@ -1,17 +1,17 @@
 import { z } from "zod";
-import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
-import { searchTasks, initMeiliSearch, bulkSyncTasks } from "../services/meilisearch";
-import { getAccessibleProjectIds, requireProjectAccess } from "../authz";
+import { createTRPCRouter, protectedProcedure } from "../trpc";
+import { searchTasks } from "../services/task-search";
+import { requireProjectAccess } from "../authz";
 import { consumeRateLimit } from "@/lib/rate-limit";
 
-/** Search router for MeiliSearch-powered full-text search */
+/** Search router for project-scoped Prisma search */
 export const searchRouter = createTRPCRouter({
-  /** Full-text search with faceted filtering */
+  /** Full-text search scoped to a single active project */
   query: protectedProcedure
     .input(
       z.object({
         query: z.string().max(200),
-        projectId: z.string().cuid().optional(),
+        projectId: z.string().cuid(),
         statusIds: z.array(z.string().cuid()).optional(),
         priorities: z.array(z.enum(["none", "low", "medium", "high", "urgent"])) .optional(),
         tagNames: z.array(z.string().min(1).max(50)).max(20).optional(),
@@ -29,28 +29,10 @@ export const searchRouter = createTRPCRouter({
         throw new Error("Search rate limit exceeded");
       }
 
-      let projectIds: string[];
-      if (input.projectId) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
-        projectIds = [input.projectId];
-      } else {
-        projectIds = await getAccessibleProjectIds(ctx.prisma, ctx.session.user.id);
-      }
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
 
-      if (projectIds.length === 0) {
-        return { hits: [], totalHits: 0, processingTimeMs: 0 };
-      }
-
-      return searchTasks({
+      return searchTasks(ctx.prisma, {
         ...input,
-        projectIds,
       });
-    }),
-
-  /** Initialize MeiliSearch index and bulk sync */
-  sync: adminProcedure.mutation(async ({ ctx }) => {
-    await initMeiliSearch();
-    const count = await bulkSyncTasks(ctx.prisma);
-    return { indexed: count };
   }),
 });

@@ -7,23 +7,40 @@ export default async function Home() {
   const session = await auth();
   if (!session) redirect("/login");
 
-  const firstProject = session.user.role === "admin"
-    ? await prisma.project.findFirst({
+  const accessibleProjects = session.user.role === "admin"
+    ? await prisma.project.findMany({
         orderBy: { createdAt: "asc" },
-        select: { slug: true },
+        select: {
+          slug: true,
+          _count: {
+            select: {
+              tasks: true,
+            },
+          },
+        },
       })
-    : await prisma.project.findFirst({
+    : await prisma.project.findMany({
         where: {
           members: {
             some: { userId: session.user.id },
           },
         },
         orderBy: { createdAt: "asc" },
-        select: { slug: true },
+        select: {
+          slug: true,
+          _count: {
+            select: {
+              tasks: true,
+            },
+          },
+        },
       });
 
-  if (firstProject) {
-    redirect(`/${firstProject.slug}`);
+  const preferredProject = accessibleProjects.find((project) => project._count.tasks > 0)
+    ?? accessibleProjects[0];
+
+  if (preferredProject) {
+    redirect(`/${preferredProject.slug}`);
   }
 
   if (session.user.role === "admin") {

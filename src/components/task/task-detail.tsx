@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import Image from "next/image";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { trpc } from "@/lib/trpc-client";
 import { Button } from "@/components/ui/button";
+import { CustomFieldInputs, type TaskCustomFieldValueMap } from "@/components/task/custom-field-inputs";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { StatusBadge } from "./status-badge";
@@ -15,11 +17,73 @@ interface TaskDetailProps {
   onClose: () => void;
 }
 
+function describeActivityEvent(event: { action: string; details?: Record<string, unknown> | null }) {
+  switch (event.action) {
+    case "created":
+      return "created this task";
+    case "updated": {
+      const changedFields = Array.isArray(event.details?.changedFields)
+        ? event.details.changedFields.filter((field): field is string => typeof field === "string")
+        : [];
+      return changedFields.length > 0
+        ? `updated ${changedFields.join(", ")}`
+        : "updated this task";
+    }
+    case "bulkUpdated":
+      return "applied a bulk update";
+    case "commented":
+      return "added a comment";
+    case "archived":
+      return "archived this task";
+    case "unarchived":
+      return "restored this task";
+    case "duplicated":
+      return "created this task by duplicating another one";
+    default:
+      return event.action;
+  }
+}
+
+function getDependencyMessages(task: {
+  dependencyState?: {
+    blockingTaskCount: number;
+    openChildCount: number;
+  };
+}) {
+  const messages: string[] = [];
+
+  if ((task.dependencyState?.blockingTaskCount ?? 0) > 0) {
+    messages.push(`Blocked by ${task.dependencyState!.blockingTaskCount} incomplete prerequisite${task.dependencyState!.blockingTaskCount === 1 ? "" : "s"}`);
+  }
+
+  if ((task.dependencyState?.openChildCount ?? 0) > 0) {
+    messages.push(`${task.dependencyState!.openChildCount} child task${task.dependencyState!.openChildCount === 1 ? " is" : "s are"} still open`);
+  }
+
+  return messages;
+}
+
+function getMutationErrorMessage(error: { message?: string } | null) {
+  return error?.message || "Unable to save task changes.";
+}
+
+function formatBytes(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Side panel showing full task details with editing */
 export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [editing, setEditing] = useState(false);
   const [showLinkForm, setShowLinkForm] = useState(false);
   const [linkTargetId, setLinkTargetId] = useState("");
+  const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [commentContent, setCommentContent] = useState("");
+  const [commentFiles, setCommentFiles] = useState<File[]>([]);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const utils = trpc.useUtils();
 
   const { data: task, isLoading } = trpc.task.byId.useQuery({ id: taskId });
@@ -38,9 +102,18 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     { projectId: task?.projectId ?? "" },
     { enabled: !!task?.projectId }
   );
+  const { data: customFields } = trpc.customField.list.useQuery(
+    { projectId: task?.projectId ?? "" },
+    { enabled: !!task?.projectId }
+  );
+  const { data: isWatching = false } = trpc.task.isWatching.useQuery(
+    { taskId },
+    { enabled: !!taskId }
+  );
 
   const updateTask = trpc.task.update.useMutation({
     onMutate: async (variables) => {
+      setFormError(null);
       await utils.task.byId.cancel({ id: taskId });
       const prev = utils.task.byId.getData({ id: taskId });
       if (prev) {
@@ -48,15 +121,19 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       }
       return { prev };
     },
-    onError: (_err, _variables, context) => {
+    onError: (error, _variables, context) => {
       if (context?.prev) {
         utils.task.byId.setData({ id: taskId }, context.prev);
       }
+      setFormError(getMutationErrorMessage(error));
+    },
+    onSuccess: () => {
+      setFormError(null);
+      setEditing(false);
     },
     onSettled: () => {
       utils.task.byId.invalidate({ id: taskId });
       utils.task.list.invalidate();
-      setEditing(false);
     },
   });
 
@@ -67,9 +144,17 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     },
   });
 
-  const addComment = trpc.task.addComment.useMutation({
+  const archiveTask = trpc.task.archive.useMutation({
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
+      utils.task.list.invalidate();
+      onClose();
+    },
+  });
+
+  const duplicateTask = trpc.task.duplicate.useMutation({
+    onSuccess: () => {
+      utils.task.list.invalidate();
     },
   });
 
@@ -87,6 +172,42 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       utils.task.links.invalidate();
     },
   });
+
+  const watchTask = trpc.task.watch.useMutation({
+    onSuccess: () => {
+      utils.task.byId.invalidate({ id: taskId });
+    },
+  });
+
+  const unwatchTask = trpc.task.unwatch.useMutation({
+    onSuccess: () => {
+      utils.task.byId.invalidate({ id: taskId });
+    },
+  });
+
+  const customFieldValueMap = useMemo(
+    () =>
+      ((task?.customFieldValues ?? []) as Array<{ customFieldId: string; value: unknown }>).reduce<TaskCustomFieldValueMap>((accumulator, fieldValue) => {
+        const rawValue = fieldValue.value;
+        accumulator[fieldValue.customFieldId] = rawValue == null ? "" : String(rawValue);
+        return accumulator;
+      }, {}),
+    [task?.customFieldValues]
+  );
+
+  useEffect(() => {
+    if (!task) {
+      setCustomFieldValues({});
+      return;
+    }
+
+    if (editing) {
+      setCustomFieldValues(customFieldValueMap);
+      return;
+    }
+
+    setCustomFieldValues({});
+  }, [customFieldValueMap, editing, task]);
 
   if (isLoading) {
     return (
@@ -113,6 +234,16 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
   if (!task) return null;
 
+  const dependencyMessages = getDependencyMessages(task as {
+    dependencyState?: {
+      blockingTaskCount: number;
+      openChildCount: number;
+    };
+  });
+  const isTerminalTask = task.status.category === "done" || task.status.category === "cancelled";
+  const isArchived = !!task.archivedAt && new Date(task.archivedAt) <= new Date();
+  const canArchiveNow = isTerminalTask && !isArchived;
+
   const otherTasks = (siblingTasks?.items ?? []).filter(
     (t: { id: string }) => t.id !== taskId
   );
@@ -120,6 +251,11 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   function handleSave(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
+    const effectiveCustomFieldValues = Object.entries(customFieldValues).map(([customFieldId, value]) => ({
+      customFieldId,
+      value,
+    }));
+
     updateTask.mutate({
       id: taskId,
       title: form.get("title") as string,
@@ -132,16 +268,40 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
         ? new Date(form.get("startDate") as string)
         : null,
       tagIds: form.getAll("tags") as string[],
+      customFieldValues: effectiveCustomFieldValues,
     });
   }
 
-  function handleAddComment(e: FormEvent<HTMLFormElement>) {
+  async function handleAddComment(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    const content = form.get("content") as string;
-    if (!content.trim()) return;
-    addComment.mutate({ taskId, content });
-    e.currentTarget.reset();
+    if (!commentContent.trim() && commentFiles.length === 0) return;
+
+    const formData = new FormData();
+    formData.set("content", commentContent);
+    commentFiles.forEach((file) => formData.append("attachments", file));
+
+    setIsSubmittingComment(true);
+    setCommentError(null);
+
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/comments`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Unable to add comment");
+      }
+
+      setCommentContent("");
+      setCommentFiles([]);
+      await utils.task.byId.invalidate({ id: taskId });
+    } catch (error) {
+      setCommentError(error instanceof Error ? error.message : "Unable to add comment");
+    } finally {
+      setIsSubmittingComment(false);
+    }
   }
 
   function handleAddLink(e: FormEvent<HTMLFormElement>) {
@@ -172,7 +332,26 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setEditing(!editing)}
+            onClick={() => (isWatching ? unwatchTask.mutate({ taskId }) : watchTask.mutate({ taskId }))}
+            disabled={watchTask.isPending || unwatchTask.isPending}
+          >
+            {isWatching ? "Unwatch" : "Watch"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => duplicateTask.mutate({ id: taskId })}
+            disabled={duplicateTask.isPending}
+          >
+            {duplicateTask.isPending ? "Duplicating..." : "Duplicate"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setFormError(null);
+              setEditing(!editing);
+            }}
           >
             {editing ? "Cancel" : "Edit"}
           </Button>
@@ -186,6 +365,18 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       <div className="flex-1 overflow-y-auto p-4">
         {editing ? (
           <form onSubmit={handleSave} className="space-y-3">
+            {formError && (
+              <div
+                className="rounded-lg border px-3 py-2 text-sm"
+                style={{
+                  backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                  borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                  color: "var(--color-danger)",
+                }}
+              >
+                {formError}
+              </div>
+            )}
             <Input
               name="title"
               defaultValue={task.title}
@@ -344,6 +535,22 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </p>
               )}
             </div>
+            <CustomFieldInputs
+              fields={(customFields ?? []).map((field) => ({
+                id: field.id,
+                name: field.name,
+                type: field.type,
+                required: field.required,
+                options: (field.options as { choices?: string[] } | null) ?? null,
+              }))}
+              values={{ ...customFieldValueMap, ...customFieldValues }}
+              onChange={(fieldId, value) =>
+                setCustomFieldValues((prev) => ({
+                  ...prev,
+                  [fieldId]: value,
+                }))
+              }
+            />
             <div className="flex gap-2">
               <Button type="submit" size="sm" disabled={updateTask.isPending}>
                 Save
@@ -384,6 +591,45 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 {task.priority}
               </Badge>
             </div>
+
+            {canArchiveNow && (
+              <div
+                className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm"
+                style={{
+                  backgroundColor: "var(--color-bg-overlay)",
+                  borderColor: "var(--color-border)",
+                  color: "var(--color-text-secondary)",
+                }}
+              >
+                <span>
+                  This task is no longer active and can be archived now.
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => archiveTask.mutate({ id: taskId })}
+                  disabled={archiveTask.isPending}
+                >
+                  {archiveTask.isPending ? "Archiving..." : "Archive now"}
+                </Button>
+              </div>
+            )}
+
+            {dependencyMessages.length > 0 && (
+              <div
+                className="rounded-lg border px-3 py-2 text-sm"
+                style={{
+                  backgroundColor: "color-mix(in srgb, var(--color-danger) 8%, transparent)",
+                  borderColor: "color-mix(in srgb, var(--color-danger) 30%, var(--color-border))",
+                  color: "var(--color-text-secondary)",
+                }}
+              >
+                {dependencyMessages.map((message) => (
+                  <div key={message}>{message}</div>
+                ))}
+              </div>
+            )}
 
             <div
               className="grid grid-cols-2 gap-2 text-sm"
@@ -474,6 +720,34 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                     {tag.name}
                   </Badge>
                 ))}
+              </div>
+            )}
+
+            {task.customFieldValues.length > 0 && (
+              <div>
+                <h4
+                  className="mb-1 text-xs font-medium"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Custom Fields
+                </h4>
+                <div className="space-y-2">
+                  {task.customFieldValues.map((fieldValue) => (
+                    <div
+                      key={fieldValue.id}
+                      className="rounded-lg border p-3 text-sm"
+                      style={{
+                        backgroundColor: "var(--color-bg-overlay)",
+                        borderColor: "var(--color-border)",
+                      }}
+                    >
+                      <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                        {fieldValue.customField.name}
+                      </div>
+                      <div>{fieldValue.value == null ? "—" : String(fieldValue.value)}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -637,6 +911,40 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 className="mb-2 text-sm font-medium"
                 style={{ color: "var(--color-text-secondary)" }}
               >
+                Activity
+              </h4>
+              <div className="space-y-2">
+                {((task as { activityEvents?: Array<{ id: string; action: string; details?: Record<string, unknown> | null; createdAt: string | Date; actor?: { name: string | null; email: string } | null }> }).activityEvents ?? []).map((event) => (
+                  <div
+                    key={event.id}
+                    className="rounded-md p-2 text-sm"
+                    style={{ backgroundColor: "var(--color-bg-overlay)" }}
+                  >
+                    <div
+                      className="flex justify-between gap-3 text-xs"
+                      style={{ color: "var(--color-text-muted)" }}
+                    >
+                      <span>
+                        {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
+                      </span>
+                      <span>{new Date(event.createdAt).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+                {((task as { activityEvents?: unknown[] }).activityEvents?.length ?? 0) === 0 && (
+                  <p className="text-xs italic" style={{ color: "var(--color-text-muted)" }}>
+                    No activity recorded yet
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Comments */}
+            <div>
+              <h4
+                className="mb-2 text-sm font-medium"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
                 Comments
               </h4>
               <div className="space-y-2">
@@ -646,6 +954,12 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                     content: string;
                     createdAt: string | Date;
                     author: { name: string | null };
+                    attachments?: Array<{
+                      id: string;
+                      originalName: string;
+                      mimeType: string;
+                      sizeBytes: number;
+                    }>;
                   }) => (
                     <div
                       key={comment.id}
@@ -661,20 +975,104 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                           {new Date(comment.createdAt).toLocaleDateString()}
                         </span>
                       </div>
-                      <p className="mt-1">{comment.content}</p>
+                      <p className="mt-1 whitespace-pre-wrap break-words">{comment.content}</p>
+                      {(comment.attachments?.length ?? 0) > 0 && (
+                        <div className="mt-3 space-y-2">
+                          {comment.attachments!.map((attachment) => {
+                            const attachmentUrl = `/api/comment-attachments/${attachment.id}`;
+                            const isImage = attachment.mimeType.startsWith("image/");
+
+                            return (
+                              <div key={attachment.id} className="rounded-md border p-2" style={{ borderColor: "var(--color-border)" }}>
+                                {isImage && (
+                                  <a href={attachmentUrl} target="_blank" rel="noreferrer">
+                                    <Image
+                                      src={attachmentUrl}
+                                      alt={attachment.originalName}
+                                      width={720}
+                                      height={420}
+                                      unoptimized
+                                      className="mb-2 max-h-44 rounded object-contain"
+                                    />
+                                  </a>
+                                )}
+                                <a
+                                  href={attachmentUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm font-medium underline"
+                                  style={{ color: "var(--color-accent)" }}
+                                >
+                                  {attachment.originalName}
+                                </a>
+                                <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                                  {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )
                 )}
               </div>
-              <form onSubmit={handleAddComment} className="mt-2 flex gap-2">
-                <Input
+              <form onSubmit={handleAddComment} className="mt-3 space-y-2">
+                {commentError && (
+                  <div
+                    className="rounded-lg border px-3 py-2 text-sm"
+                    style={{
+                      backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                      borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                      color: "var(--color-danger)",
+                    }}
+                  >
+                    {commentError}
+                  </div>
+                )}
+                <textarea
                   name="content"
+                  value={commentContent}
+                  onChange={(event) => setCommentContent(event.target.value)}
                   placeholder="Add a comment..."
                   maxLength={5000}
+                  rows={3}
+                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                  style={{
+                    backgroundColor: "var(--color-surface)",
+                    borderColor: "var(--color-border)",
+                    color: "var(--color-text)",
+                  }}
                 />
-                <Button type="submit" size="sm" disabled={addComment.isPending}>
-                  Send
-                </Button>
+                <div>
+                  <input
+                    type="file"
+                    multiple
+                    onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
+                    className="block w-full text-xs"
+                  />
+                  {commentFiles.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {commentFiles.map((file) => (
+                        <span
+                          key={`${file.name}-${file.size}`}
+                          className="rounded-full px-2 py-1 text-xs"
+                          style={{
+                            backgroundColor: "var(--color-bg-muted)",
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          {file.name} · {formatBytes(file.size)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-end">
+                  <Button type="submit" size="sm" disabled={isSubmittingComment || (!commentContent.trim() && commentFiles.length === 0)}>
+                    {isSubmittingComment ? "Sending..." : "Send"}
+                  </Button>
+                </div>
               </form>
             </div>
           </div>

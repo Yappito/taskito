@@ -20,9 +20,14 @@ model User {
   image         String?
   password      String?
   role          String    @default("member")
+  settings      Json      @default("{}")
   accounts      Account[]
   sessions      Session[]
   comments      Comment[]
+  activityEvents ActivityEvent[]
+  watchingTasks TaskWatcher[]
+  notifications Notification[] @relation("NotificationRecipient")
+  notificationActors Notification[] @relation("NotificationActor")
   createdTasks  Task[]    @relation("TaskCreator")
   assignedTasks Task[]    @relation("TaskAssignee")
   projectMemberships ProjectMember[]
@@ -186,6 +191,9 @@ model Task {
   sourceLinks      TaskLink[]         @relation("SourceTask")
   targetLinks      TaskLink[]         @relation("TargetTask")
   comments         Comment[]
+  activityEvents   ActivityEvent[]
+  watchers         TaskWatcher[]
+  notifications    Notification[]
   customFieldValues CustomFieldValue[]
 
   @@unique([projectId, taskNumber])
@@ -194,6 +202,68 @@ model Task {
   @@index([projectId, archivedAt])
   @@index([projectId, assigneeId])
   @@index([creatorId])
+}
+
+enum TaskActivityAction {
+  created
+  updated
+  bulkUpdated
+  commented
+  archived
+  unarchived
+  duplicated
+}
+
+model ActivityEvent {
+  id        String             @id @default(cuid())
+  taskId     String
+  actorId    String?
+  action     TaskActivityAction
+  details    Json?
+  createdAt  DateTime          @default(now())
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([taskId, createdAt])
+  @@index([actorId])
+}
+
+enum NotificationType {
+  assigned
+  commented
+  statusChanged
+  mentioned
+}
+
+model TaskWatcher {
+  taskId     String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String
+  actorId     String?
+  taskId      String?
+  type        NotificationType
+  payload     Json             @default("{}")
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  recipient User  @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor     User? @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+  task      Task? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, createdAt])
+  @@index([taskId])
 }
 
 // ─── Task Links ──────────────────────────────────────────
@@ -251,10 +321,25 @@ model Comment {
   content   String
   createdAt DateTime @default(now())
 
-  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author User @relation(fields: [authorId], references: [id])
+  task        Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author      User                @relation(fields: [authorId], references: [id])
+  attachments CommentAttachment[]
 
   @@index([taskId, createdAt])
+}
+
+model CommentAttachment {
+  id           String   @id @default(cuid())
+  commentId    String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  storagePath  String
+  createdAt    DateTime @default(now())
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@index([commentId, createdAt])
 }
 
 // ─── Custom Fields ───────────────────────────────────────
@@ -271,12 +356,15 @@ model CustomField {
   projectId String
   name      String
   type      CustomFieldType
+  order     Int             @default(0)
+  required  Boolean         @default(false)
   options   Json?
 
   project Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   values  CustomFieldValue[]
 
   @@unique([projectId, name])
+  @@index([projectId, order])
 }
 
 model CustomFieldValue {

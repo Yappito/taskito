@@ -32,7 +32,7 @@ export function createTimeScale(
   endDate: Date,
   width: number
 ): ScaleTime<number, number> {
-  return scaleTime().domain([startDate, endDate]).range([0, width]);
+  return scaleTime().domain([startDate, endDate]).range([0, width]).clamp(true);
 }
 
 /** Format a date based on the current time resolution */
@@ -69,10 +69,19 @@ export function formatDateForResolution(
 
 /** Get the date range for tasks, with buffer */
 export function getDateRange(
-  tasks: Array<{ dueDate: Date | string; startDate?: Date | string | null }>,
-  bufferDays = 14
+  tasks: Array<{ dueDate?: Date | string; startDate?: Date | string | null } | null | undefined>,
+  bufferDays = 14,
+  maxSpanDays?: number
 ): { start: Date; end: Date } {
-  if (tasks.length === 0) {
+  const validTasks = tasks.filter((task): task is { dueDate: Date | string; startDate?: Date | string | null } => {
+    if (!task || task.dueDate == null) {
+      return false;
+    }
+
+    return !Number.isNaN(new Date(task.dueDate).getTime());
+  });
+
+  if (validTasks.length === 0) {
     const now = new Date();
     const start = new Date(now);
     start.setDate(start.getDate() - 30);
@@ -84,7 +93,7 @@ export function getDateRange(
   let min = Infinity;
   let max = -Infinity;
 
-  for (const task of tasks) {
+  for (const task of validTasks) {
     const due = new Date(task.dueDate).getTime();
     if (due < min) min = due;
     if (due > max) max = due;
@@ -99,6 +108,16 @@ export function getDateRange(
   start.setDate(start.getDate() - bufferDays);
   const end = new Date(max);
   end.setDate(end.getDate() + bufferDays);
+
+  if (typeof maxSpanDays === "number") {
+    const maxEndTime = start.getTime() + maxSpanDays * 86_400_000;
+    if (end.getTime() > maxEndTime) {
+      return {
+        start,
+        end: new Date(maxEndTime),
+      };
+    }
+  }
 
   return { start, end };
 }

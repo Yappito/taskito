@@ -5,7 +5,7 @@ import { trpc } from "@/lib/trpc-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { getAlertConfig, DEFAULT_ALERT_CONFIG } from "@/lib/alert-utils";
+import { getAlertConfig } from "@/lib/alert-utils";
 
 const CATEGORIES = ["backlog", "todo", "active", "done", "cancelled"] as const;
 

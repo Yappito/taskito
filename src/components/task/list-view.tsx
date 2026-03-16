@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
 
 import { TaskDetail } from "./task-detail";
+import { BulkActionBar } from "./bulk-action-bar";
 import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
 import type { TaskFilterTagOption } from "@/lib/types";
@@ -21,13 +22,17 @@ interface ListViewProps {
 export function ListView({ projectId, statuses, tags, projectSettings }: ListViewProps) {
   const alertConfig = getAlertConfig(projectSettings);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [sortField, setSortField] = useState<"dueDate" | "title" | "priority">("dueDate");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
+  const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -52,6 +57,38 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
 
   const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
     placeholderData: (previousData) => previousData,
+  });
+
+  const tasks = useMemo(() => data?.items ?? [], [data]);
+
+  useEffect(() => {
+    setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
+  }, [tasks]);
+
+  const bulkUpdate = trpc.task.bulkUpdate.useMutation({
+    onMutate: async () => {
+      setActionError(null);
+    },
+    onSuccess: () => {
+      setActionError(null);
+      setSelectedTaskIds([]);
+      utils.task.list.invalidate();
+    },
+    onError: (error) => {
+      setActionError(error.message || "Unable to apply bulk update.");
+    },
+  });
+
+  const savePreset = trpc.project.saveFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
+  const deletePreset = trpc.project.deleteFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
   });
 
   function toggleTag(tagId: string) {
@@ -88,8 +125,6 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     );
   }
 
-  const tasks = data?.items ?? [];
-
   const sorted = [...tasks].sort((a, b) => {
     const dir = sortDir === "asc" ? 1 : -1;
     if (sortField === "dueDate") {
@@ -114,6 +149,43 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   const sortIcon = (field: string) =>
     sortField === field ? (sortDir === "asc" ? " ↑" : " ↓") : "";
 
+  const visibleTaskIds = sorted.map((task) => task.id);
+  const allVisibleSelected = visibleTaskIds.length > 0 && visibleTaskIds.every((taskId) => selectedTaskIds.includes(taskId));
+
+  function toggleTaskSelection(taskId: string) {
+    setSelectedTaskIds((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId]
+    );
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedTaskIds((prev) => {
+      if (allVisibleSelected) {
+        return prev.filter((taskId) => !visibleTaskIds.includes(taskId));
+      }
+
+      return [...new Set([...prev, ...visibleTaskIds])];
+    });
+  }
+
+  function applyBulkUpdate(input: {
+    statusId?: string;
+    assigneeId?: string | null;
+    addTagIds?: string[];
+    removeTagIds?: string[];
+    archive?: boolean;
+  }) {
+    if (selectedTaskIds.length === 0) {
+      return;
+    }
+
+    bulkUpdate.mutate({
+      projectId,
+      taskIds: selectedTaskIds,
+      ...input,
+    });
+  }
+
   return (
     <div className="flex flex-col">
       <TaskViewFilters
@@ -126,8 +198,56 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
         onToggleTag={toggleTag}
         onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
+        presets={presets as Array<{ id: string; name: string; search: string; tagIds: string[]; assigneeIds: string[] }>}
+        onApplyPreset={(preset) => {
+          setSearch(preset.search);
+          setSelectedTagIds(preset.tagIds);
+          setSelectedAssigneeIds(preset.assigneeIds);
+        }}
+        onSavePreset={(name) => {
+          savePreset.mutate({
+            projectId,
+            preset: {
+              id: crypto.randomUUID(),
+              name,
+              search,
+              tagIds: selectedTagIds,
+              assigneeIds: selectedAssigneeIds,
+            },
+          });
+        }}
+        onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}
         className="mx-4 mt-4"
       />
+
+      <BulkActionBar
+        selectedCount={selectedTaskIds.length}
+        statuses={statuses}
+        tags={tags}
+        assignees={people ?? []}
+        isPending={bulkUpdate.isPending}
+        allVisibleSelected={allVisibleSelected}
+        onSelectAllVisible={toggleVisibleSelection}
+        onClearSelection={() => setSelectedTaskIds([])}
+        onApplyStatus={(statusId) => applyBulkUpdate({ statusId })}
+        onApplyAssignee={(assigneeId) => applyBulkUpdate({ assigneeId })}
+        onAddTag={(tagId) => applyBulkUpdate({ addTagIds: [tagId] })}
+        onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
+        onArchive={() => applyBulkUpdate({ archive: true })}
+      />
+
+      {actionError && (
+        <div
+          className="mx-4 mt-3 rounded-lg border px-3 py-2 text-sm"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+            borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+            color: "var(--color-danger)",
+          }}
+        >
+          {actionError}
+        </div>
+      )}
 
       <div className="flex-1 overflow-x-auto p-4 pt-3">
         <table className="w-full text-sm">
@@ -140,6 +260,14 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                 color: "var(--color-text-muted)",
               }}
             >
+              <th className="px-4 py-3">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={toggleVisibleSelection}
+                  aria-label="Select all visible tasks"
+                />
+              </th>
               <th
                 className="cursor-pointer px-4 py-3"
                 onClick={() => handleSort("title")}
@@ -196,6 +324,14 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                     e.currentTarget.style.backgroundColor = "";
                 }}
               >
+                <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    checked={selectedTaskIds.includes(task.id)}
+                    onChange={() => toggleTaskSelection(task.id)}
+                    aria-label={`Select ${task.title}`}
+                  />
+                </td>
                 <td className="px-4 py-3 font-medium" style={{ color: "var(--color-text)" }}>
                   {(task as { taskNumber?: number }).taskNumber && (task as { project?: { key: string } }).project?.key && (
                     <span
@@ -205,7 +341,22 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                       {(task as { project?: { key: string } }).project!.key}-{(task as { taskNumber?: number }).taskNumber}
                     </span>
                   )}
-                  {task.title}
+                  <div>{task.title}</div>
+                  {((task.dependencyState?.blockingTaskCount ?? 0) > 0 || (task.dependencyState?.openChildCount ?? 0) > 0) && (
+                    <div className="mt-1 text-xs font-normal" style={{ color: "var(--color-danger)" }}>
+                      {(task.dependencyState?.blockingTaskCount ?? 0) > 0 && (
+                        <span>
+                          Blocked by {task.dependencyState?.blockingTaskCount}
+                        </span>
+                      )}
+                      {(task.dependencyState?.blockingTaskCount ?? 0) > 0 && (task.dependencyState?.openChildCount ?? 0) > 0 && " · "}
+                      {(task.dependencyState?.openChildCount ?? 0) > 0 && (
+                        <span>
+                          {task.dependencyState?.openChildCount} open child{(task.dependencyState?.openChildCount ?? 0) === 1 ? "" : "ren"}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <StatusBadge name={task.status.name} color={task.status.color} />

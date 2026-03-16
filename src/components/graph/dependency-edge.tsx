@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 
 interface DependencyEdgeProps {
   id: string;
@@ -82,7 +82,7 @@ function getArrowAngle(points: Array<{ x: number; y: number }>): number {
 }
 
 /** Clean rounded dependency edge with subtle casing and arrowhead */
-export function DependencyEdge({
+export const DependencyEdge = memo(function DependencyEdge({
   id,
   points,
   linkType,
@@ -148,4 +148,4 @@ export function DependencyEdge({
       />
     </g>
   );
-}
+});

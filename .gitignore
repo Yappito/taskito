@@ -36,7 +36,6 @@ yarn-error.log*
 # env files
 .env*
 !.env.example
-!.env.prod
 
 # vercel
 .vercel
@@ -51,3 +50,8 @@ next-env.d.ts
 *.swp
 *.swo
 *~
+
+# other stuff
+FEATURE_BACKLOG.md
+TODO.md
+uploads/

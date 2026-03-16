@@ -177,7 +177,7 @@ async function main() {
     "Create workflow status editor",
     "Add transition validation",
     "Implement auto-tagging service",
-    "Set up MeiliSearch indexing",
+    "Improve global task search",
     "Build search UI with Cmd+K",
     "Add faceted filter sidebar",
     "Optimize mobile responsive layout",

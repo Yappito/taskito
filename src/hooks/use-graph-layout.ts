@@ -15,27 +15,36 @@ interface UseGraphLayoutParams {
   timeScale: (date: Date) => number;
 }
 
+function isValidGraphTask(task: GraphTaskData | null | undefined): task is GraphTaskData {
+  if (!task) {
+    return false;
+  }
+
+  return !Number.isNaN(new Date(task.dueDate).getTime());
+}
+
 /** Hook to compute and cache ELK graph layout */
 export function useGraphLayout({ tasks, links, timeScale }: UseGraphLayoutParams) {
   const [layout, setLayout] = useState<GraphLayout | null>(null);
   const [isComputing, setIsComputing] = useState(false);
+  const safeTasks = useMemo(() => tasks.filter(isValidGraphTask), [tasks]);
 
   // Memoize the key to detect when recomputation is needed
   const layoutKey = useMemo(
     () =>
       JSON.stringify({
-        tasks: tasks
+        tasks: safeTasks
           .map((t) => ({ id: t.id, dueDate: t.dueDate, statusId: t.statusId }))
           .sort((a, b) => a.id.localeCompare(b.id)),
         links: links
           .map((l) => ({ id: l.id, sourceTaskId: l.sourceTaskId, targetTaskId: l.targetTaskId }))
           .sort((a, b) => a.id.localeCompare(b.id)),
       }),
-    [tasks, links]
+    [safeTasks, links]
   );
 
   const compute = useCallback(async () => {
-    if (tasks.length === 0) {
+    if (safeTasks.length === 0) {
       setLayout({ nodes: [], edges: [], width: 0, height: 0 });
       return;
     }
@@ -43,7 +52,7 @@ export function useGraphLayout({ tasks, links, timeScale }: UseGraphLayoutParams
     setIsComputing(true);
     try {
       const result = await computeGraphLayout({
-        tasks,
+        tasks: safeTasks,
         links,
         timeScale,
       });
@@ -54,7 +63,7 @@ export function useGraphLayout({ tasks, links, timeScale }: UseGraphLayoutParams
       setIsComputing(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- layoutKey is a stable serialization of tasks+links
-  }, [layoutKey, timeScale]);
+  }, [layoutKey, safeTasks, links, timeScale]);
 
   return { layout, isComputing, compute };
 }

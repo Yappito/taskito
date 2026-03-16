@@ -128,6 +128,15 @@ export interface Comment {
   authorId: string;
   content: string;
   createdAt: Date;
+  attachments?: CommentAttachment[];
+}
+
+export interface CommentAttachment {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: Date;
 }
 
 /** User-defined custom field per project */
@@ -200,6 +209,10 @@ export interface TaskCardData {
   assignee?: TaskPersonSummary | null;
   project?: ProjectReference;
   alertAcknowledged?: boolean;
+  dependencyState?: {
+    blockingTaskCount: number;
+    openChildCount: number;
+  };
 }
 
 /** Status payload used by board/task detail controls */
@@ -342,6 +355,10 @@ export interface GraphTaskData {
   creator?: TaskPersonSummary | null;
   assignee?: TaskPersonSummary | null;
   alertAcknowledged?: boolean;
+  dependencyState?: {
+    blockingTaskCount: number;
+    openChildCount: number;
+  };
 }
 
 export interface GraphNode {

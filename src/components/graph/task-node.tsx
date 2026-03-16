@@ -1,5 +1,7 @@
 "use client";
 
+import { memo } from "react";
+
 import type { AlertLevel } from "@/lib/alert-utils";
 
 interface TaskNodeProps {
@@ -11,6 +13,10 @@ interface TaskNodeProps {
   priority: string;
   tags: Array<{ name: string; color: string }>;
   assigneeName?: string | null;
+  dependencyState?: {
+    blockingTaskCount: number;
+    openChildCount: number;
+  };
   x: number;
   y: number;
   width: number;
@@ -63,8 +69,25 @@ const priorityIcons: Record<string, string> = {
   none: "",
 };
 
+function getDependencyMessages(dependencyState?: {
+  blockingTaskCount: number;
+  openChildCount: number;
+}) {
+  const messages: string[] = [];
+
+  if ((dependencyState?.blockingTaskCount ?? 0) > 0) {
+    messages.push(`B:${dependencyState!.blockingTaskCount}`);
+  }
+
+  if ((dependencyState?.openChildCount ?? 0) > 0) {
+    messages.push(`C:${dependencyState!.openChildCount}`);
+  }
+
+  return messages;
+}
+
 /** Modern task node with Sankey connection ports */
-export function TaskNode({
+export const TaskNode = memo(function TaskNode({
   id,
   title,
   dueDate,
@@ -73,6 +96,7 @@ export function TaskNode({
   priority,
   tags,
   assigneeName,
+  dependencyState,
   x,
   y,
   width,
@@ -92,6 +116,15 @@ export function TaskNode({
   const timeLeft = formatTimeLeft(dueDate);
   const isPast = new Date(dueDate) < new Date();
   const assigneeLabel = assigneeName?.trim() || "Unassigned";
+  const dependencyMessages = getDependencyMessages(dependencyState);
+  const showAlertPulse = alertLevel !== "none" && !!alertLevel;
+  const nodeStyle = selected
+    ? { filter: "drop-shadow(0 0 8px var(--color-accent-muted))" }
+    : highlighted
+      ? { filter: "drop-shadow(0 0 6px var(--color-accent-muted))" }
+      : isLinkTarget
+        ? { filter: "drop-shadow(0 0 6px var(--color-accent-muted))", cursor: "crosshair" }
+        : undefined;
 
   return (
     <g
@@ -114,7 +147,7 @@ export function TaskNode({
       }
     >
       {/* Pulsating glow rect for due-date alerts */}
-      {alertLevel !== "none" && alertLevel && (
+      {showAlertPulse && (
         <rect
           x={-4}
           y={-4}
@@ -168,15 +201,7 @@ export function TaskNode({
               : "var(--color-node-border)"
         }
         strokeWidth={isLinkTarget ? 2 : selected ? 2 : highlighted ? 2 : 1}
-        style={
-          selected
-            ? { filter: "drop-shadow(0 0 8px var(--color-accent-muted))" }
-            : highlighted
-              ? { filter: "drop-shadow(0 0 6px var(--color-accent-muted))" }
-            : isLinkTarget
-              ? { filter: "drop-shadow(0 0 6px var(--color-accent-muted))", cursor: "crosshair" }
-              : undefined
-        }
+        style={nodeStyle}
       />
 
       {/* Status accent strip (left edge, rounded) */}
@@ -245,6 +270,21 @@ export function TaskNode({
           >
             {statusName}
           </span>
+          {dependencyMessages.map((message) => (
+            <span
+              key={message}
+              className="rounded-full px-1.5 py-0.5 text-[8px] font-semibold"
+              style={{
+                backgroundColor: "color-mix(in srgb, var(--color-danger) 12%, transparent)",
+                color: "var(--color-danger)",
+              }}
+              title={message === dependencyMessages[0] && (dependencyState?.blockingTaskCount ?? 0) > 0
+                ? `${dependencyState?.blockingTaskCount ?? 0} blocking task${(dependencyState?.blockingTaskCount ?? 0) === 1 ? "" : "s"} still open`
+                : `${dependencyState?.openChildCount ?? 0} child task${(dependencyState?.openChildCount ?? 0) === 1 ? "" : "s"} still open`}
+            >
+              {message}
+            </span>
+          ))}
           <span
             className="ml-auto shrink-0 text-[9px] font-medium"
             style={{ color: isPast ? "var(--color-danger, #ef4444)" : "var(--color-text-muted)" }}
@@ -347,4 +387,4 @@ export function TaskNode({
       </g>
     </g>
   );
-}
+});

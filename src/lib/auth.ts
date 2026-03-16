@@ -67,6 +67,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!isValid) return null;
 
         resetRateLimit("login:account", `${email}:${ip}`);
+        resetRateLimit("login:ip", ip);
 
         return {
           id: user.id,

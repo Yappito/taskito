@@ -2,7 +2,9 @@ import { auth, signOut } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { SearchModal } from "@/components/ui/search-modal";
+import { NotificationCenter } from "@/components/ui/notification-center";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { CurrentProjectHomeLink } from "@/components/ui/current-project-home-link";
 
 /** Dashboard layout — requires authentication */
 export default async function DashboardLayout({
@@ -25,13 +27,7 @@ export default async function DashboardLayout({
       >
         <div className="flex h-14 items-center justify-between px-4">
           <div className="flex items-center gap-4">
-            <Link
-              href="/"
-              className="text-lg font-bold"
-              style={{ color: "var(--color-text)" }}
-            >
-              Taskito
-            </Link>
+            <CurrentProjectHomeLink />
             {session.user?.role === "admin" && (
               <Link
                 href="/settings"
@@ -44,6 +40,7 @@ export default async function DashboardLayout({
           </div>
           <div className="flex items-center gap-3">
             <SearchModal />
+            <NotificationCenter />
             <ThemeToggle />
             <span
               className="text-sm"

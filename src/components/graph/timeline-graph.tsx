@@ -26,6 +26,7 @@ interface TimelineGraphProps {
 }
 
 const AXIS_OFFSET = 50;
+const MAX_GRAPH_SPAN_DAYS = 540;
 
 const RESOLUTION_PIXELS_PER_DAY: Record<TimeResolution, number> = {
   day: 48,
@@ -34,6 +35,34 @@ const RESOLUTION_PIXELS_PER_DAY: Record<TimeResolution, number> = {
   quarter: 2,
   year: 0.9,
 };
+
+function hasValidTaskDate(value: unknown) {
+  if (!(value instanceof Date) && typeof value !== "string") {
+    return false;
+  }
+
+  return !Number.isNaN(new Date(value).getTime());
+}
+
+function isGraphTaskItem(item: unknown): item is GraphTaskData & {
+  status: GraphTaskData["status"];
+  tags: GraphTaskData["tags"];
+} {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+
+  const candidate = item as Partial<GraphTaskData>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.priority === "string" &&
+    typeof candidate.statusId === "string" &&
+    !!candidate.status &&
+    Array.isArray(candidate.tags) &&
+    hasValidTaskDate(candidate.dueDate)
+  );
+}
 
 function getGraphWidth(
   start: Date,
@@ -124,6 +153,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
 
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   // Fetch tasks and links
   const { data: taskData } = trpc.task.list.useQuery({
@@ -139,23 +169,42 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     },
   });
 
+  const savePreset = trpc.project.saveFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
+  const deletePreset = trpc.project.deleteFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
   const tasks: GraphTaskData[] = useMemo(() => {
     const items = taskData?.items;
     if (!items) return [];
-    return items.map((item) => ({
+    return items.filter(isGraphTaskItem).map((item) => ({
       id: item.id,
       title: item.title,
       priority: item.priority,
       dueDate: item.dueDate,
+      startDate: "startDate" in item ? item.startDate ?? null : null,
       statusId: item.statusId,
       status: item.status,
       tags: item.tags,
       creator: item.creator,
       assignee: item.assignee,
       alertAcknowledged: (item as { alertAcknowledged?: boolean }).alertAcknowledged ?? false,
+      dependencyState: item.dependencyState,
     }));
   }, [taskData?.items]);
-  const allLinks = useMemo(() => linksData ?? [], [linksData]);
+  const allLinks = useMemo(() => {
+    const taskIds = new Set(tasks.map((task) => task.id));
+    return (linksData ?? []).filter(
+      (link) => taskIds.has(link.sourceTaskId) && taskIds.has(link.targetTaskId)
+    );
+  }, [linksData, tasks]);
 
   const matchingTaskIds = useMemo(() => {
     const normalizedSearch = debouncedSearch.trim().toLowerCase();
@@ -218,7 +267,10 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   );
 
   // Compute date range and time scale
-  const dateRange = useMemo(() => getDateRange(focusedGraph.tasks), [focusedGraph.tasks]);
+  const dateRange = useMemo(
+    () => getDateRange(focusedGraph.tasks, 14, MAX_GRAPH_SPAN_DAYS),
+    [focusedGraph.tasks]
+  );
   const graphWidth = useMemo(
     () => getGraphWidth(dateRange.start, dateRange.end, resolution, dimensions.width),
     [dateRange, resolution, dimensions.width]
@@ -517,6 +569,25 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
         onToggleTag={toggleTag}
         onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
+        presets={presets as Array<{ id: string; name: string; search: string; tagIds: string[]; assigneeIds: string[] }>}
+        onApplyPreset={(preset) => {
+          setSearch(preset.search);
+          setSelectedTagIds(preset.tagIds);
+          setSelectedAssigneeIds(preset.assigneeIds);
+        }}
+        onSavePreset={(name) => {
+          savePreset.mutate({
+            projectId,
+            preset: {
+              id: crypto.randomUUID(),
+              name,
+              search,
+              tagIds: selectedTagIds,
+              assigneeIds: selectedAssigneeIds,
+            },
+          });
+        }}
+        onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}
         searchPlaceholder="Highlight by title..."
         helperText="Matching tasks are highlighted and all other tasks remain visible."
         className="absolute left-4 top-20 z-10 w-[min(32rem,calc(100%-2rem))]"
@@ -668,6 +739,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
               priority={node.task.priority}
               tags={(node.task.tags ?? []).map((t) => t.tag)}
               assigneeName={node.task.assignee?.name?.trim() || node.task.assignee?.email || null}
+              dependencyState={node.task.dependencyState}
               x={node.x}
               y={node.y + AXIS_OFFSET}
               width={node.width}

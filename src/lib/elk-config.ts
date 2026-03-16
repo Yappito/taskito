@@ -53,11 +53,16 @@ function buildEdgePoints(
 
 function getTaskComponents(tasks: GraphTaskData[], links: LayoutInput["links"]): TaskComponent[] {
   const taskIds = tasks.map((task) => task.id);
+  const validTaskIds = new Set(taskIds);
   const adjacency = new Map<string, Set<string>>(
     taskIds.map((taskId) => [taskId, new Set<string>()])
   );
 
   for (const link of links) {
+    if (!validTaskIds.has(link.sourceTaskId) || !validTaskIds.has(link.targetTaskId)) {
+      continue;
+    }
+
     adjacency.get(link.sourceTaskId)?.add(link.targetTaskId);
     adjacency.get(link.targetTaskId)?.add(link.sourceTaskId);
   }
@@ -159,16 +164,20 @@ export async function computeGraphLayout({
   }
 
   const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const validTaskIds = new Set(taskById.keys());
+  const safeLinks = links.filter(
+    (link) => validTaskIds.has(link.sourceTaskId) && validTaskIds.has(link.targetTaskId)
+  );
   const neighborMap = new Map<string, Set<string>>(
     tasks.map((task) => [task.id, new Set<string>()])
   );
 
-  for (const link of links) {
+  for (const link of safeLinks) {
     neighborMap.get(link.sourceTaskId)?.add(link.targetTaskId);
     neighborMap.get(link.targetTaskId)?.add(link.sourceTaskId);
   }
 
-  const components = getTaskComponents(tasks, links);
+  const components = getTaskComponents(tasks, safeLinks);
   const positioned: PositionedTask[] = [];
   let nextComponentOffsetY = 0;
 
@@ -228,7 +237,7 @@ export async function computeGraphLayout({
     };
   });
 
-  const graphEdges: GraphEdge[] = links.flatMap((edge) => {
+  const graphEdges: GraphEdge[] = safeLinks.flatMap((edge) => {
     const sourceId = edge.sourceTaskId;
     const targetId = edge.targetTaskId;
     const srcNode = nodeMap.get(sourceId);

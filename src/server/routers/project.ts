@@ -1,6 +1,22 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { createTRPCRouter, publicProcedure, protectedProcedure } from "../trpc";
 import { getAccessibleProjectIds, requireProjectAccess } from "../authz";
+
+const filterPresetSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(100),
+  search: z.string().default(""),
+  tagIds: z.array(z.string().cuid()).default([]),
+  assigneeIds: z.array(z.string().cuid()).default([]),
+});
+
+function getSavedFilterPresets(settings: unknown, projectId: string) {
+  const root = (settings ?? {}) as Record<string, unknown>;
+  const presetStore = (root.savedFilterPresets ?? {}) as Record<string, unknown>;
+  const projectPresets = presetStore[projectId];
+  return Array.isArray(projectPresets) ? projectPresets : [];
+}
 
 /** Health check and project router */
 export const projectRouter = createTRPCRouter({
@@ -90,6 +106,206 @@ export const projectRouter = createTRPCRouter({
           return leftLabel.localeCompare(rightLabel);
         });
       });
+    }),
+
+    /** Read saved task filter presets for the current user and project */
+    filterPresets: protectedProcedure
+      .input(z.object({ projectId: z.string().cuid() }))
+      .query(async ({ ctx, input }) => {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+        const user = await ctx.prisma.user.findUniqueOrThrow({
+          where: { id: ctx.session.user.id },
+          select: { settings: true },
+        });
+
+        return getSavedFilterPresets(user.settings, input.projectId);
+      }),
+
+    /** Save or update a task filter preset for the current user */
+    saveFilterPreset: protectedProcedure
+      .input(
+        z.object({
+          projectId: z.string().cuid(),
+          preset: filterPresetSchema,
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+        const user = await ctx.prisma.user.findUniqueOrThrow({
+          where: { id: ctx.session.user.id },
+          select: { settings: true },
+        });
+
+        const settings = (user.settings ?? {}) as Record<string, unknown>;
+        const presetStore = ((settings.savedFilterPresets ?? {}) as Record<string, unknown>);
+        const currentPresets = getSavedFilterPresets(user.settings, input.projectId) as Array<Record<string, unknown>>;
+        const nextPresets = [
+          ...currentPresets.filter((preset) => preset.id !== input.preset.id),
+          input.preset,
+        ];
+
+        await ctx.prisma.user.update({
+          where: { id: ctx.session.user.id },
+          data: {
+            settings: {
+              ...settings,
+              savedFilterPresets: {
+                ...presetStore,
+                [input.projectId]: nextPresets,
+              },
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        return input.preset;
+      }),
+
+    /** Delete a saved task filter preset for the current user */
+    deleteFilterPreset: protectedProcedure
+      .input(
+        z.object({
+          projectId: z.string().cuid(),
+          presetId: z.string(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+        const user = await ctx.prisma.user.findUniqueOrThrow({
+          where: { id: ctx.session.user.id },
+          select: { settings: true },
+        });
+
+        const settings = (user.settings ?? {}) as Record<string, unknown>;
+        const presetStore = ((settings.savedFilterPresets ?? {}) as Record<string, unknown>);
+        const currentPresets = getSavedFilterPresets(user.settings, input.projectId) as Array<Record<string, unknown>>;
+        const nextPresets = currentPresets.filter((preset) => preset.id !== input.presetId);
+
+        await ctx.prisma.user.update({
+          where: { id: ctx.session.user.id },
+          data: {
+            settings: {
+              ...settings,
+              savedFilterPresets: {
+                ...presetStore,
+                [input.projectId]: nextPresets,
+              },
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        return { success: true };
+      }),
+
+  /** List saved task templates for a project */
+  templates: protectedProcedure
+    .input(z.object({ projectId: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+      const project = await ctx.prisma.project.findUniqueOrThrow({
+        where: { id: input.projectId },
+        select: { settings: true },
+      });
+
+      const settings = (project.settings ?? {}) as Record<string, unknown>;
+      const templates = settings.taskTemplates;
+      return Array.isArray(templates) ? templates : [];
+    }),
+
+  /** Save a reusable task template in project settings */
+  saveTemplate: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.string().cuid(),
+        name: z.string().min(1).max(100),
+        title: z.string().min(1).max(200),
+        body: z.string().max(20000).nullable().optional(),
+        statusId: z.string().cuid().optional(),
+        priority: z.enum(["none", "low", "medium", "high", "urgent"]).default("none"),
+        tagIds: z.array(z.string().cuid()).optional(),
+        assigneeId: z.string().cuid().nullable().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+        minimumRole: "owner",
+      });
+
+      if (input.statusId) {
+        const status = await ctx.prisma.workflowStatus.findUnique({
+          where: { id: input.statusId },
+          select: { projectId: true },
+        });
+
+        if (!status || status.projectId !== input.projectId) {
+          throw new Error("Template status must belong to the selected project");
+        }
+      }
+
+      if (input.tagIds?.length) {
+        const matchingTags = await ctx.prisma.tag.findMany({
+          where: {
+            projectId: input.projectId,
+            id: { in: input.tagIds },
+          },
+          select: { id: true },
+        });
+
+        if (matchingTags.length !== input.tagIds.length) {
+          throw new Error("One or more template tags do not belong to the selected project");
+        }
+      }
+
+      if (input.assigneeId) {
+        const assignee = await ctx.prisma.user.findUnique({
+          where: { id: input.assigneeId },
+          select: {
+            id: true,
+            role: true,
+            projectMemberships: {
+              where: { projectId: input.projectId },
+              select: { userId: true },
+            },
+          },
+        });
+
+        if (!assignee || (assignee.role !== "admin" && assignee.projectMemberships.length === 0)) {
+          throw new Error("Template assignee must be able to access the selected project");
+        }
+      }
+
+      const project = await ctx.prisma.project.findUniqueOrThrow({
+        where: { id: input.projectId },
+        select: { settings: true },
+      });
+
+      const settings = (project.settings ?? {}) as Record<string, unknown>;
+      const templates = Array.isArray(settings.taskTemplates) ? settings.taskTemplates : [];
+      const nextTemplate = {
+        id: crypto.randomUUID(),
+        name: input.name,
+        title: input.title,
+        body: input.body ?? null,
+        statusId: input.statusId ?? null,
+        priority: input.priority,
+        tagIds: input.tagIds ?? [],
+        assigneeId: input.assigneeId ?? null,
+      };
+
+      await ctx.prisma.project.update({
+        where: { id: input.projectId },
+        data: {
+          settings: {
+            ...settings,
+            taskTemplates: [...templates, nextTemplate],
+          } as import("@prisma/client").Prisma.InputJsonValue,
+        },
+      });
+
+      return nextTemplate;
     }),
 
   /** Create a new project with default workflow */

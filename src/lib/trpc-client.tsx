@@ -16,6 +16,10 @@ function getBaseUrl() {
   return `http://localhost:${process.env.PORT ?? 3000}`;
 }
 
+function shouldEnableTrpcLogger() {
+  return process.env.NEXT_PUBLIC_TRPC_LOG_ERRORS === "true";
+}
+
 /** Provider component wrapping tRPC + TanStack Query */
 export function TRPCProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -23,7 +27,7 @@ export function TRPCProvider({ children }: { children: React.ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            staleTime: 5 * 1000,
+            staleTime: 30 * 1000,
             refetchOnWindowFocus: false,
           },
         },
@@ -33,11 +37,13 @@ export function TRPCProvider({ children }: { children: React.ReactNode }) {
   const [trpcClient] = useState(() =>
     trpc.createClient({
       links: [
-        loggerLink({
-          enabled: (opts) =>
-            process.env.NODE_ENV === "development" ||
-            (opts.direction === "down" && opts.result instanceof Error),
-        }),
+        ...(shouldEnableTrpcLogger()
+          ? [
+              loggerLink({
+                enabled: () => true,
+              }),
+            ]
+          : []),
         httpLink({
           url: `${getBaseUrl()}/api/trpc`,
           transformer: superjson,

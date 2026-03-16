@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc-client";
@@ -19,29 +19,8 @@ export default function ProjectPage({
 }: {
   params: Promise<{ projectSlug: string }>;
 }) {
-  return <ProjectPageInner params={params} />;
-}
-
-function ProjectPageInner({
-  params,
-}: {
-  params: Promise<{ projectSlug: string }>;
-}) {
-  const [resolvedParams, setResolvedParams] = useState<{ projectSlug: string } | null>(null);
-
-  useEffect(() => {
-    params.then(setResolvedParams);
-  }, [params]);
-
-  if (!resolvedParams) {
-    return (
-      <div className="flex h-[50vh] items-center justify-center">
-        <div className="animate-pulse" style={{ color: "var(--color-text-muted)" }}>Loading...</div>
-      </div>
-    );
-  }
-
-  return <ProjectPageContent projectSlug={resolvedParams.projectSlug} />;
+  const { projectSlug } = use(params);
+  return <ProjectPageContent projectSlug={projectSlug} />;
 }
 
 function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
@@ -157,6 +136,13 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
             style={{ color: "var(--color-text-muted)" }}
           >
             Tags
+          </Link>
+          <Link
+            href={`/${projectSlug}/settings/custom-fields`}
+            className="rounded px-2 py-1 text-xs transition-colors"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Custom Fields
           </Link>
         </div>
       </div>

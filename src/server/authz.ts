@@ -137,7 +137,7 @@ export async function requireWorkflowStatusAccess(
 ) {
   const status = await prisma.workflowStatus.findUnique({
     where: { id: statusId },
-    select: { id: true, projectId: true, autoArchive: true, autoArchiveDays: true },
+    select: { id: true, projectId: true, category: true, autoArchive: true, autoArchiveDays: true },
   });
 
   if (!status) {

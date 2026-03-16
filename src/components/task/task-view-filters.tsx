@@ -1,7 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 import type { TaskFilterAssigneeOption, TaskFilterTagOption } from "@/lib/types";
+
+interface SavedFilterPreset {
+  id: string;
+  name: string;
+  search: string;
+  tagIds: string[];
+  assigneeIds: string[];
+}
 
 interface TaskViewFiltersProps {
   search: string;
@@ -13,6 +22,10 @@ interface TaskViewFiltersProps {
   onToggleTag: (tagId: string) => void;
   onToggleAssignee: (assigneeId: string) => void;
   onClear: () => void;
+  presets?: SavedFilterPreset[];
+  onApplyPreset?: (preset: SavedFilterPreset) => void;
+  onSavePreset?: (name: string) => void;
+  onDeletePreset?: (presetId: string) => void;
   searchPlaceholder?: string;
   helperText?: string;
   className?: string;
@@ -29,10 +42,16 @@ export function TaskViewFilters({
   onToggleTag,
   onToggleAssignee,
   onClear,
+  presets = [],
+  onApplyPreset,
+  onSavePreset,
+  onDeletePreset,
   searchPlaceholder = "Filter by title...",
   helperText,
   className,
 }: TaskViewFiltersProps) {
+  const [presetName, setPresetName] = useState("");
+
   return (
     <div
       className={cn("rounded-xl border p-3", className)}
@@ -76,6 +95,70 @@ export function TaskViewFilters({
         >
           {helperText}
         </p>
+      )}
+
+      {(onSavePreset || presets.length > 0) && (
+        <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          {onSavePreset && (
+            <div className="flex gap-2">
+              <input
+                value={presetName}
+                onChange={(event) => setPresetName(event.target.value)}
+                placeholder="Preset name"
+                className="rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                style={{
+                  backgroundColor: "var(--color-surface)",
+                  borderColor: "var(--color-border)",
+                  color: "var(--color-text)",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const trimmed = presetName.trim();
+                  if (!trimmed) return;
+                  onSavePreset(trimmed);
+                  setPresetName("");
+                }}
+                className="rounded-lg px-3 py-2 text-xs font-medium transition-colors"
+                style={{
+                  backgroundColor: "var(--color-accent)",
+                  color: "white",
+                }}
+              >
+                Save preset
+              </button>
+            </div>
+          )}
+
+          {presets.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {presets.map((preset) => (
+                <div key={preset.id} className="flex items-center gap-1 rounded-full border px-2 py-1" style={{ borderColor: "var(--color-border)" }}>
+                  <button
+                    type="button"
+                    onClick={() => onApplyPreset?.(preset)}
+                    className="text-xs font-medium transition-colors"
+                    style={{ color: "var(--color-text-secondary)" }}
+                  >
+                    {preset.name}
+                  </button>
+                  {onDeletePreset && (
+                    <button
+                      type="button"
+                      onClick={() => onDeletePreset(preset.id)}
+                      className="text-xs transition-colors"
+                      style={{ color: "var(--color-text-muted)" }}
+                      aria-label={`Delete preset ${preset.name}`}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
