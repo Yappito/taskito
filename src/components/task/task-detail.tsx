@@ -30,6 +30,15 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     { enabled: !!task?.projectId }
   );
 
+  const { data: projectTags } = trpc.tag.list.useQuery(
+    { projectId: task?.projectId ?? "" },
+    { enabled: !!task?.projectId }
+  );
+  const { data: people } = trpc.project.people.useQuery(
+    { projectId: task?.projectId ?? "" },
+    { enabled: !!task?.projectId }
+  );
+
   const updateTask = trpc.task.update.useMutation({
     onMutate: async (variables) => {
       await utils.task.byId.cancel({ id: taskId });
@@ -115,12 +124,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       id: taskId,
       title: form.get("title") as string,
       body: (form.get("body") as string) || null,
+      assigneeId: ((form.get("assigneeId") as string) || null),
       statusId: form.get("statusId") as string,
       priority: form.get("priority") as "none" | "low" | "medium" | "high" | "urgent",
       dueDate: new Date(form.get("dueDate") as string),
       startDate: form.get("startDate")
         ? new Date(form.get("startDate") as string)
         : null,
+      tagIds: form.getAll("tags") as string[],
     });
   }
 
@@ -269,6 +280,70 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 }}
               />
             </div>
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Assignee
+              </label>
+              <Select
+                name="assigneeId"
+                defaultValue={(task as { assignee?: { id: string } | null }).assignee?.id ?? ""}
+              >
+                <option value="">Unassigned</option>
+                {(people ?? []).map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name?.trim() || person.email}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Tags
+              </label>
+              {projectTags && projectTags.length > 0 ? (
+                <div
+                  className="flex max-h-40 flex-wrap gap-2 overflow-y-auto rounded-lg border p-3"
+                  style={{
+                    backgroundColor: "var(--color-bg-overlay)",
+                    borderColor: "var(--color-border)",
+                  }}
+                >
+                  {projectTags.map((tag) => {
+                    const checked = task.tags.some(({ tag: taskTag }) => taskTag.id === tag.id);
+
+                    return (
+                      <label
+                        key={tag.id}
+                        className="flex items-center gap-2 rounded-md px-2 py-1 text-xs"
+                        style={{
+                          backgroundColor: `${tag.color}14`,
+                          color: "var(--color-text-secondary)",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          name="tags"
+                          value={tag.id}
+                          defaultChecked={checked}
+                          className="rounded"
+                        />
+                        <span style={{ color: tag.color }}>{tag.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  No tags available for this project.
+                </p>
+              )}
+            </div>
             <div className="flex gap-2">
               <Button type="submit" size="sm" disabled={updateTask.isPending}>
                 Save
@@ -324,6 +399,26 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   {new Date(task.startDate).toLocaleDateString()}
                 </div>
               )}
+            </div>
+
+            <div
+              className="grid grid-cols-1 gap-2 text-sm"
+              style={{ color: "var(--color-text-secondary)" }}
+            >
+              <div>
+                <span className="font-medium">Created by:</span>{" "}
+                {(task as { creator?: { name: string | null; email: string } | null }).creator
+                  ? ((task as { creator?: { name: string | null; email: string } | null }).creator?.name?.trim() ||
+                    (task as { creator?: { name: string | null; email: string } | null }).creator?.email)
+                  : "Unknown"}
+              </div>
+              <div>
+                <span className="font-medium">Assigned to:</span>{" "}
+                {(task as { assignee?: { name: string | null; email: string } | null }).assignee
+                  ? ((task as { assignee?: { name: string | null; email: string } | null }).assignee?.name?.trim() ||
+                    (task as { assignee?: { name: string | null; email: string } | null }).assignee?.email)
+                  : "Unassigned"}
+              </div>
             </div>
 
             {/* Alert acknowledgement toggle */}

@@ -63,7 +63,8 @@ export async function suggestTags(
 
   // Build text from task
   const descText = typeof task.description === "string" ? task.description : "";
-  const text = `${task.title} ${descText}`;
+  const bodyText = task.body ?? "";
+  const text = `${task.title} ${bodyText} ${descText}`;
   const tokens = tokenize(text);
 
   if (tokens.length === 0) return [];

@@ -156,6 +156,14 @@ export interface User {
   role: UserRole;
 }
 
+/** Minimal user payload used in task assignment and attribution UI */
+export interface TaskPersonSummary {
+  id: string;
+  name: string | null;
+  email: string;
+  image?: string | null;
+}
+
 /** Project fields commonly embedded on task payloads */
 export interface ProjectReference {
   key: string;
@@ -188,6 +196,8 @@ export interface TaskCardData {
   statusId: string;
   status: TaskStatusSummary;
   tags: TaskTagSummary[];
+  creator?: TaskPersonSummary | null;
+  assignee?: TaskPersonSummary | null;
   project?: ProjectReference;
   alertAcknowledged?: boolean;
 }
@@ -198,10 +208,14 @@ export type BoardStatus = Pick<WorkflowStatus, "id" | "name" | "color" | "catego
 /** Tag payload used by task view filters */
 export type TaskFilterTagOption = Pick<Tag, "id" | "name" | "color">;
 
+/** Assignee payload used by task filtering controls */
+export type TaskFilterAssigneeOption = TaskPersonSummary;
+
 /** Shared filter state for task views */
 export interface TaskViewFilters {
   search: string;
   tagIds: string[];
+  assigneeIds: string[];
 }
 
 /** Backwards-compatible aliases for board-specific usages */
@@ -220,6 +234,7 @@ export interface CreateTaskInput {
   dueDate: Date;
   startDate?: Date;
   tagIds?: string[];
+  assigneeId?: string | null;
 }
 
 /** Input for updating a task */
@@ -231,6 +246,7 @@ export interface UpdateTaskInput {
   priority?: Priority;
   dueDate?: Date;
   startDate?: Date;
+  assigneeId?: string | null;
 }
 
 /** Input for creating a task link */
@@ -323,6 +339,8 @@ export interface GraphTaskData {
   statusId: string;
   status: { name: string; color: string; category?: string };
   tags: Array<{ tag: { id: string; name: string; color: string } }>;
+  creator?: TaskPersonSummary | null;
+  assignee?: TaskPersonSummary | null;
   alertAcknowledged?: boolean;
 }
 

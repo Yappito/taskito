@@ -16,13 +16,16 @@ interface QuickAddProps {
 /** Quick-add task form — FAB button opens dialog, Ctrl+N keyboard shortcut */
 export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const [open, setOpen] = useState(false);
+  const [selectedAssigneeId, setSelectedAssigneeId] = useState("");
   const titleRef = useRef<HTMLInputElement>(null);
   const utils = trpc.useUtils();
+  const { data: people } = trpc.project.people.useQuery({ projectId });
 
   const createTask = trpc.task.create.useMutation({
     onSuccess: () => {
       utils.task.list.invalidate();
       setOpen(false);
+      setSelectedAssigneeId("");
     },
   });
 
@@ -45,20 +48,32 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     }
   }, [open]);
 
+  useEffect(() => {
+    if (!open || selectedAssigneeId || !people?.length) {
+      return;
+    }
+
+    setSelectedAssigneeId(people[0].id);
+  }, [open, people, selectedAssigneeId]);
+
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = new FormData(e.currentTarget);
     const title = form.get("title") as string;
+    const body = ((form.get("body") as string) || "").trim();
     const dueDate = form.get("dueDate") as string;
     const statusId = form.get("statusId") as string;
     const priority = (form.get("priority") as string) || "none";
     const selectedTags = form.getAll("tags") as string[];
+    const assigneeId = selectedAssigneeId || null;
 
     if (!title || !dueDate) return;
 
     createTask.mutate({
       projectId,
       title,
+      body: body || null,
+      assigneeId,
       dueDate: new Date(dueDate),
       statusId: statusId || undefined,
       priority: priority as "none" | "low" | "medium" | "high" | "urgent",
@@ -99,6 +114,24 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
             maxLength={200}
           />
 
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+              Description
+            </label>
+            <textarea
+              name="body"
+              rows={4}
+              placeholder="Add task details..."
+              className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2"
+              style={{
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+                color: "var(--color-text)",
+                resize: "vertical",
+              }}
+            />
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
@@ -133,6 +166,23 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
               {statuses.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}
+                </option>
+              ))}
+            </Select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+              Assignee
+            </label>
+            <Select
+              name="assigneeId"
+              value={selectedAssigneeId}
+              onChange={(event) => setSelectedAssigneeId(event.target.value)}
+            >
+              {(people ?? []).map((person) => (
+                <option key={person.id} value={person.id}>
+                  {(person.name?.trim() || person.email)}
                 </option>
               ))}
             </Select>

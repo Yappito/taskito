@@ -30,5 +30,5 @@ export default async function Home() {
     redirect("/settings");
   }
 
-  redirect("/login");
+  redirect("/no-access");
 }

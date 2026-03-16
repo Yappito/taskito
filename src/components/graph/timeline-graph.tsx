@@ -93,6 +93,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
   const [dimensions, setDimensions] = useState({ width: 1200, height: 600 });
   const previousFullViewRef = useRef<{ x: number; y: number; k: number } | null>(null);
 
@@ -122,6 +123,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   }, [search]);
 
   const utils = trpc.useUtils();
+  const { data: people } = trpc.project.people.useQuery({ projectId });
 
   // Fetch tasks and links
   const { data: taskData } = trpc.task.list.useQuery({
@@ -148,6 +150,8 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
       statusId: item.statusId,
       status: item.status,
       tags: item.tags,
+      creator: item.creator,
+      assignee: item.assignee,
       alertAcknowledged: (item as { alertAcknowledged?: boolean }).alertAcknowledged ?? false,
     }));
   }, [taskData?.items]);
@@ -164,11 +168,14 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
           const matchesTags =
             selectedTagIds.length === 0 ||
             task.tags.some((taskTag) => selectedTagIds.includes(taskTag.tag.id));
-          return matchesSearch && matchesTags;
+          const matchesAssignee =
+            selectedAssigneeIds.length === 0 ||
+            (!!task.assignee && selectedAssigneeIds.includes(task.assignee.id));
+          return matchesSearch && matchesTags && matchesAssignee;
         })
         .map((task) => task.id)
     );
-  }, [tasks, debouncedSearch, selectedTagIds]);
+  }, [tasks, debouncedSearch, selectedTagIds, selectedAssigneeIds]);
 
   function toggleTag(tagId: string) {
     setSelectedTagIds((prev) =>
@@ -179,6 +186,15 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   function clearFilters() {
     setSearch("");
     setSelectedTagIds([]);
+    setSelectedAssigneeIds([]);
+  }
+
+  function toggleAssignee(assigneeId: string) {
+    setSelectedAssigneeIds((prev) =>
+      prev.includes(assigneeId)
+        ? prev.filter((id) => id !== assigneeId)
+        : [...prev, assigneeId]
+    );
   }
 
   const focusedGraph = useMemo(() => {
@@ -494,9 +510,12 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
       <TaskViewFilters
         search={search}
         selectedTagIds={selectedTagIds}
+        selectedAssigneeIds={selectedAssigneeIds}
         tags={tags}
+        assignees={people ?? []}
         onSearchChange={setSearch}
         onToggleTag={toggleTag}
+        onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
         searchPlaceholder="Highlight by title..."
         helperText="Matching tasks are highlighted and all other tasks remain visible."
@@ -648,6 +667,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
               statusColor={node.task.status?.color ?? "#6b7280"}
               priority={node.task.priority}
               tags={(node.task.tags ?? []).map((t) => t.tag)}
+              assigneeName={node.task.assignee?.name?.trim() || node.task.assignee?.email || null}
               x={node.x}
               y={node.y + AXIS_OFFSET}
               width={node.width}

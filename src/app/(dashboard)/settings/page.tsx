@@ -333,13 +333,15 @@ interface UserFormData {
   email: string;
   password: string;
   role: "admin" | "member";
+  projectIds: string[];
 }
 
-const emptyUser: UserFormData = { name: "", email: "", password: "", role: "member" };
+const emptyUser: UserFormData = { name: "", email: "", password: "", role: "member", projectIds: [] };
 
 function UserManagement() {
   const utils = trpc.useUtils();
   const { data: users, isLoading } = trpc.user.list.useQuery();
+  const { data: projects } = trpc.project.list.useQuery();
   const createMutation = trpc.user.create.useMutation({
     onSuccess: () => {
       utils.user.list.invalidate();
@@ -361,16 +363,43 @@ function UserManagement() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [form, setForm] = useState<UserFormData>(emptyUser);
-  const [editingUser, setEditingUser] = useState<{ id: string; name: string | null; email: string | null; role: string } | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", email: "", role: "member" as "admin" | "member", password: "" });
+  const [editingUser, setEditingUser] = useState<{
+    id: string;
+    name: string | null;
+    email: string | null;
+    role: string;
+    projectMemberships: Array<{
+      projectId: string;
+      role: string;
+      project: { id: string; name: string; key: string; slug: string };
+    }>;
+  } | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", email: "", role: "member" as "admin" | "member", password: "", projectIds: [] as string[] });
 
-  function openEdit(user: { id: string; name: string | null; email: string | null; role: string }) {
+  function toggleSelectedProject(currentIds: string[], projectId: string) {
+    return currentIds.includes(projectId)
+      ? currentIds.filter((id) => id !== projectId)
+      : [...currentIds, projectId];
+  }
+
+  function openEdit(user: {
+    id: string;
+    name: string | null;
+    email: string | null;
+    role: string;
+    projectMemberships: Array<{
+      projectId: string;
+      role: string;
+      project: { id: string; name: string; key: string; slug: string };
+    }>;
+  }) {
     setEditingUser(user);
     setEditForm({
       name: user.name ?? "",
       email: user.email ?? "",
       role: user.role as "admin" | "member",
       password: "",
+      projectIds: user.projectMemberships.map((membership) => membership.projectId),
     });
     setEditOpen(true);
   }
@@ -430,6 +459,11 @@ function UserManagement() {
                 </div>
                 <p className="text-sm truncate" style={{ color: "var(--color-text-secondary)" }}>
                   {user.email}
+                </p>
+                <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {user.projectMemberships.length > 0
+                    ? user.projectMemberships.map((membership) => `${membership.project.key} ${membership.project.name}`).join(" • ")
+                    : "No project access"}
                 </p>
               </div>
             </div>
@@ -529,6 +563,38 @@ function UserManagement() {
                 ))}
               </div>
             </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+                Project Access
+              </label>
+              {projects && projects.length > 0 ? (
+                <div
+                  className="max-h-48 space-y-2 overflow-y-auto rounded-lg border p-3"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                >
+                  {projects.map((project) => (
+                    <label key={project.id} className="flex items-center gap-3 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.projectIds.includes(project.id)}
+                        onChange={() =>
+                          setForm((current) => ({
+                            ...current,
+                            projectIds: toggleSelectedProject(current.projectIds, project.id),
+                          }))
+                        }
+                        className="accent-[var(--color-accent)]"
+                      />
+                      <span style={{ color: "var(--color-text)" }}>{project.key} - {project.name}</span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                  Create a project before assigning access.
+                </p>
+              )}
+            </div>
             {createMutation.error && (
               <p className="text-sm" style={{ color: "var(--color-danger)" }}>
                 {createMutation.error.message}
@@ -562,6 +628,7 @@ function UserManagement() {
                 email: editForm.email,
                 role: editForm.role,
                 password: editForm.password || undefined,
+                projectIds: editForm.projectIds,
               });
             }}
             className="space-y-4"
@@ -620,6 +687,38 @@ function UserManagement() {
                   </label>
                 ))}
               </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+                Project Access
+              </label>
+              {projects && projects.length > 0 ? (
+                <div
+                  className="max-h-48 space-y-2 overflow-y-auto rounded-lg border p-3"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                >
+                  {projects.map((project) => (
+                    <label key={project.id} className="flex items-center gap-3 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editForm.projectIds.includes(project.id)}
+                        onChange={() =>
+                          setEditForm((current) => ({
+                            ...current,
+                            projectIds: toggleSelectedProject(current.projectIds, project.id),
+                          }))
+                        }
+                        className="accent-[var(--color-accent)]"
+                      />
+                      <span style={{ color: "var(--color-text)" }}>{project.key} - {project.name}</span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                  Create a project before assigning access.
+                </p>
+              )}
             </div>
             {updateMutation.error && (
               <p className="text-sm" style={{ color: "var(--color-danger)" }}>

@@ -1,14 +1,17 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import type { TaskFilterTagOption } from "@/lib/types";
+import type { TaskFilterAssigneeOption, TaskFilterTagOption } from "@/lib/types";
 
 interface TaskViewFiltersProps {
   search: string;
   selectedTagIds: string[];
+  selectedAssigneeIds: string[];
   tags: TaskFilterTagOption[];
+  assignees?: TaskFilterAssigneeOption[];
   onSearchChange: (value: string) => void;
   onToggleTag: (tagId: string) => void;
+  onToggleAssignee: (assigneeId: string) => void;
   onClear: () => void;
   searchPlaceholder?: string;
   helperText?: string;
@@ -20,8 +23,11 @@ export function TaskViewFilters({
   search,
   selectedTagIds,
   tags,
+  selectedAssigneeIds,
+  assignees = [],
   onSearchChange,
   onToggleTag,
+  onToggleAssignee,
   onClear,
   searchPlaceholder = "Filter by title...",
   helperText,
@@ -92,6 +98,31 @@ export function TaskViewFilters({
           );
         })}
       </div>
+
+      {assignees.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {assignees.map((assignee) => {
+            const selected = selectedAssigneeIds.includes(assignee.id);
+            const label = assignee.name?.trim() || assignee.email;
+
+            return (
+              <button
+                key={assignee.id}
+                type="button"
+                onClick={() => onToggleAssignee(assignee.id)}
+                className="rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+                style={{
+                  backgroundColor: selected ? "var(--color-accent-muted)" : "var(--color-surface)",
+                  borderColor: selected ? "var(--color-accent)" : "var(--color-border)",
+                  color: selected ? "var(--color-accent)" : "var(--color-text-secondary)",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

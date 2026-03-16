@@ -26,6 +26,8 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
+  const { data: people } = trpc.project.people.useQuery({ projectId });
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -43,8 +45,9 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
       limit: 100,
       search: debouncedSearch.trim() || undefined,
       tagIds: selectedTagIds.length > 0 ? selectedTagIds : undefined,
+      assigneeIds: selectedAssigneeIds.length > 0 ? selectedAssigneeIds : undefined,
     }),
-    [projectId, debouncedSearch, selectedTagIds]
+    [projectId, debouncedSearch, selectedTagIds, selectedAssigneeIds]
   );
 
   const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
@@ -60,6 +63,15 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   function clearFilters() {
     setSearch("");
     setSelectedTagIds([]);
+    setSelectedAssigneeIds([]);
+  }
+
+  function toggleAssignee(assigneeId: string) {
+    setSelectedAssigneeIds((prev) =>
+      prev.includes(assigneeId)
+        ? prev.filter((id) => id !== assigneeId)
+        : [...prev, assigneeId]
+    );
   }
 
   if (isLoading && !data) {
@@ -107,9 +119,12 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
       <TaskViewFilters
         search={search}
         selectedTagIds={selectedTagIds}
+        selectedAssigneeIds={selectedAssigneeIds}
         tags={tags}
+        assignees={people ?? []}
         onSearchChange={setSearch}
         onToggleTag={toggleTag}
+        onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
         className="mx-4 mt-4"
       />
@@ -144,6 +159,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
               >
                 Due Date{sortIcon("dueDate")}
               </th>
+              <th className="px-4 py-3">Assignee</th>
               <th className="px-4 py-3">Tags</th>
             </tr>
           </thead>
@@ -199,6 +215,9 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                 </td>
                 <td className="px-4 py-3" style={{ color: "var(--color-text-secondary)" }}>
                   {new Date(task.dueDate).toLocaleDateString()}
+                </td>
+                <td className="px-4 py-3" style={{ color: "var(--color-text-secondary)" }}>
+                  {task.assignee?.name?.trim() || task.assignee?.email || "Unassigned"}
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-1">

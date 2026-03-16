@@ -36,6 +36,7 @@ export function TaskCard({ task, onClick, className, alertLevel }: TaskCardProps
   const taskKey = task.project?.key && task.taskNumber
     ? `${task.project.key}-${task.taskNumber}`
     : null;
+  const assigneeLabel = task.assignee?.name?.trim() || task.assignee?.email || "Unassigned";
 
   return (
     <div
@@ -92,6 +93,13 @@ export function TaskCard({ task, onClick, className, alertLevel }: TaskCardProps
           style={{ color: isOverdue ? "var(--color-danger)" : "var(--color-text-muted)" }}
         >
           {dueDate.toLocaleDateString()}
+        </span>
+        <span
+          className="max-w-[8rem] truncate text-right text-[11px]"
+          style={{ color: "var(--color-text-muted)" }}
+          title={assigneeLabel}
+        >
+          {assigneeLabel}
         </span>
       </div>
     </div>

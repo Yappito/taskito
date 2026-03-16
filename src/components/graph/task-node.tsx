@@ -10,6 +10,7 @@ interface TaskNodeProps {
   statusColor: string;
   priority: string;
   tags: Array<{ name: string; color: string }>;
+  assigneeName?: string | null;
   x: number;
   y: number;
   width: number;
@@ -71,6 +72,7 @@ export function TaskNode({
   statusColor,
   priority,
   tags,
+  assigneeName,
   x,
   y,
   width,
@@ -89,6 +91,7 @@ export function TaskNode({
   const portRadius = 6;
   const timeLeft = formatTimeLeft(dueDate);
   const isPast = new Date(dueDate) < new Date();
+  const assigneeLabel = assigneeName?.trim() || "Unassigned";
 
   return (
     <g
@@ -251,21 +254,30 @@ export function TaskNode({
         </div>
       </foreignObject>
 
-      {/* Tags row */}
+      {/* Tags row + assignee */}
       <foreignObject x={14} y={54} width={width - 28} height={24}>
-        <div className="flex gap-1 overflow-hidden">
-          {tags.slice(0, 3).map((tag, i) => (
-            <span
-              key={i}
-              className="inline-block rounded-full px-1.5 py-0.5 text-[9px] font-medium"
-              style={{
-                backgroundColor: `${tag.color}18`,
-                color: tag.color,
-              }}
-            >
-              {tag.name}
-            </span>
-          ))}
+        <div className="flex items-end justify-between gap-2 overflow-hidden">
+          <div className="flex min-w-0 gap-1 overflow-hidden">
+            {tags.slice(0, 2).map((tag, i) => (
+              <span
+                key={i}
+                className="inline-block rounded-full px-1.5 py-0.5 text-[9px] font-medium"
+                style={{
+                  backgroundColor: `${tag.color}18`,
+                  color: tag.color,
+                }}
+              >
+                {tag.name}
+              </span>
+            ))}
+          </div>
+          <span
+            className="truncate text-right text-[9px]"
+            style={{ color: "var(--color-text-muted)" }}
+            title={assigneeLabel}
+          >
+            {assigneeLabel}
+          </span>
         </div>
       </foreignObject>
 

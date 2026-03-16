@@ -54,9 +54,11 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
   const dragStateRef = useRef<PointerDragState | null>(null);
   const suppressClickRef = useRef(false);
   const utils = trpc.useUtils();
+  const { data: people } = trpc.project.people.useQuery({ projectId });
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -74,8 +76,9 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       limit: 100,
       search: debouncedSearch.trim() || undefined,
       tagIds: selectedTagIds.length > 0 ? selectedTagIds : undefined,
+      assigneeIds: selectedAssigneeIds.length > 0 ? selectedAssigneeIds : undefined,
     }),
-    [projectId, debouncedSearch, selectedTagIds]
+    [projectId, debouncedSearch, selectedTagIds, selectedAssigneeIds]
   );
 
   const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
@@ -122,6 +125,15 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   function clearFilters() {
     setSearch("");
     setSelectedTagIds([]);
+    setSelectedAssigneeIds([]);
+  }
+
+  function toggleAssignee(assigneeId: string) {
+    setSelectedAssigneeIds((prev) =>
+      prev.includes(assigneeId)
+        ? prev.filter((id) => id !== assigneeId)
+        : [...prev, assigneeId]
+    );
   }
 
   if (isLoading && !data) {
@@ -288,9 +300,12 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       <TaskViewFilters
         search={search}
         selectedTagIds={selectedTagIds}
+        selectedAssigneeIds={selectedAssigneeIds}
         tags={tags}
+        assignees={people ?? []}
         onSearchChange={setSearch}
         onToggleTag={toggleTag}
+        onToggleAssignee={toggleAssignee}
         onClear={clearFilters}
         className="mx-4 mt-4"
       />

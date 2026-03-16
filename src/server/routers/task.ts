@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { autoTagTask } from "../services/auto-tagger";
 import { indexTask, removeTaskFromIndex } from "../services/meilisearch";
@@ -51,6 +52,36 @@ async function validateNoCycle(
   }
 }
 
+async function validateAssigneeAccess(
+  ctx: { prisma: typeof import("@/lib/prisma").prisma },
+  projectId: string,
+  assigneeId: string | null | undefined
+) {
+  if (!assigneeId) {
+    return;
+  }
+
+  const user = await ctx.prisma.user.findUnique({
+    where: { id: assigneeId },
+    select: {
+      id: true,
+      role: true,
+      projectMemberships: {
+        where: { projectId },
+        select: { userId: true },
+      },
+    },
+  });
+
+  if (!user) {
+    throw new Error("Assignee does not exist");
+  }
+
+  if (user.role !== "admin" && user.projectMemberships.length === 0) {
+    throw new Error("Assignee must be a member of the selected project");
+  }
+}
+
 /** Task CRUD router */
 export const taskRouter = createTRPCRouter({
   /** List tasks with filtering and cursor pagination */
@@ -64,6 +95,7 @@ export const taskRouter = createTRPCRouter({
         dueDateFrom: z.date().optional(),
         dueDateTo: z.date().optional(),
         search: z.string().optional(),
+        assigneeIds: z.array(z.string().cuid()).optional(),
         includeArchived: z.boolean().optional(),
         archivedOnly: z.boolean().optional(),
         cursor: z.string().optional(),
@@ -72,7 +104,7 @@ export const taskRouter = createTRPCRouter({
     )
     .query(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
-      const { projectId, cursor, limit, statusIds, tagIds, priorities, dueDateFrom, dueDateTo, search, includeArchived, archivedOnly } = input;
+      const { projectId, cursor, limit, statusIds, tagIds, priorities, dueDateFrom, dueDateTo, search, assigneeIds, includeArchived, archivedOnly } = input;
 
       const now = new Date();
       const where = {
@@ -95,6 +127,7 @@ export const taskRouter = createTRPCRouter({
         ...(tagIds?.length
           ? { tags: { some: { tagId: { in: tagIds } } } }
           : {}),
+        ...(assigneeIds?.length ? { assigneeId: { in: assigneeIds } } : {}),
         ...(search
           ? { title: { contains: search, mode: "insensitive" as const } }
           : {}),
@@ -105,6 +138,8 @@ export const taskRouter = createTRPCRouter({
         include: {
           status: true,
           tags: { include: { tag: true } },
+          creator: { select: { id: true, name: true, email: true, image: true } },
+          assignee: { select: { id: true, name: true, email: true, image: true } },
           project: { select: { key: true } },
         },
         orderBy: { dueDate: "asc" },
@@ -133,6 +168,8 @@ export const taskRouter = createTRPCRouter({
         include: {
           status: true,
           project: { select: { key: true } },
+          creator: { select: { id: true, name: true, email: true, image: true } },
+          assignee: { select: { id: true, name: true, email: true, image: true } },
           tags: { include: { tag: true } },
           sourceLinks: {
             include: {
@@ -164,6 +201,8 @@ export const taskRouter = createTRPCRouter({
         projectId: z.string().cuid(),
         title: z.string().min(1).max(200),
         description: z.unknown().optional(),
+        body: z.string().max(20000).nullable().optional(),
+        assigneeId: z.string().cuid().nullable().optional(),
         statusId: z.string().cuid().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).default("none"),
         dueDate: z.date(),
@@ -172,8 +211,10 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { tagIds, ...data } = input;
+      const { tagIds, description, body, assigneeId, ...data } = input;
+      const effectiveAssigneeId = assigneeId ?? ctx.session.user.id;
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId);
+      await validateAssigneeAccess(ctx, data.projectId, effectiveAssigneeId);
 
       if (data.statusId) {
         const status = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId);
@@ -227,7 +268,10 @@ export const taskRouter = createTRPCRouter({
           data: {
             ...data,
             taskNumber: nextNumber,
-            description: data.description as import("@prisma/client").Prisma.InputJsonValue | undefined,
+            creatorId: ctx.session.user.id,
+            assigneeId: effectiveAssigneeId,
+            description: (description ?? body ?? undefined) as Prisma.InputJsonValue | undefined,
+            body,
             statusId: data.statusId!,
             ...(tagIds?.length
               ? { tags: { create: tagIds.map((tagId) => ({ tagId })) } }
@@ -236,6 +280,8 @@ export const taskRouter = createTRPCRouter({
           include: {
             status: true,
             tags: { include: { tag: true } },
+            creator: { select: { id: true, name: true, email: true, image: true } },
+            assignee: { select: { id: true, name: true, email: true, image: true } },
             project: { select: { key: true, slug: true } },
           },
         });
@@ -256,16 +302,33 @@ export const taskRouter = createTRPCRouter({
         title: z.string().min(1).max(200).optional(),
         description: z.unknown().optional(),
         body: z.string().nullable().optional(),
+        assigneeId: z.string().cuid().nullable().optional(),
         statusId: z.string().cuid().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).optional(),
         dueDate: z.date().optional(),
         startDate: z.date().nullable().optional(),
         alertAcknowledged: z.boolean().optional(),
+        tagIds: z.array(z.string().cuid()).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, title, description, body, statusId, priority, dueDate, startDate, alertAcknowledged } = input;
+      const { id, title, description, body, assigneeId, statusId, priority, dueDate, startDate, alertAcknowledged, tagIds } = input;
       const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
+      await validateAssigneeAccess(ctx, currentTask.projectId, assigneeId);
+
+      if (tagIds) {
+        const matchingTags = await ctx.prisma.tag.findMany({
+          where: {
+            projectId: currentTask.projectId,
+            id: { in: tagIds },
+          },
+          select: { id: true },
+        });
+
+        if (matchingTags.length !== tagIds.length) {
+          throw new Error("One or more tags do not belong to the task project");
+        }
+      }
 
       // Validate status transition if statusId is being changed
       if (statusId) {
@@ -307,8 +370,16 @@ export const taskRouter = createTRPCRouter({
       // Build Prisma-safe update data — only include fields that were explicitly provided
       const updateData: import("@prisma/client").Prisma.TaskUpdateInput = {
         ...(title !== undefined && { title }),
-        ...(description !== undefined && { description: description as import("@prisma/client").Prisma.InputJsonValue }),
+        ...((description !== undefined || body !== undefined)
+          ? {
+              description:
+                description ??
+                body ??
+                Prisma.JsonNull,
+            }
+          : {}),
         ...(body !== undefined && { body }),
+        ...(assigneeId !== undefined && { assigneeId }),
         ...(statusId !== undefined && { statusId }),
         ...(priority !== undefined && { priority }),
         ...(dueDate !== undefined && { dueDate }),
@@ -317,14 +388,34 @@ export const taskRouter = createTRPCRouter({
         ...(archivedAt !== undefined && { archivedAt }),
       };
 
-      const updated = await ctx.prisma.task.update({
-        where: { id },
-        data: updateData,
-        include: {
-          status: true,
-          tags: { include: { tag: true } },
-          project: { select: { key: true, slug: true } },
-        },
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const task = await tx.task.update({
+          where: { id },
+          data: {
+            ...updateData,
+            ...(tagIds !== undefined
+              ? {
+                  tags: {
+                    deleteMany: {},
+                    ...(tagIds.length
+                      ? {
+                          create: tagIds.map((tagId) => ({ tagId })),
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
+          },
+          include: {
+            status: true,
+            tags: { include: { tag: true } },
+            creator: { select: { id: true, name: true, email: true, image: true } },
+            assignee: { select: { id: true, name: true, email: true, image: true } },
+            project: { select: { key: true, slug: true } },
+          },
+        });
+
+        return task;
       });
 
       // Sync to search index

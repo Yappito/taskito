@@ -41,6 +41,57 @@ export const projectRouter = createTRPCRouter({
       return project;
     }),
 
+  /** List people who can be assigned work inside a project */
+  people: protectedProcedure
+    .input(z.object({ projectId: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+      return ctx.prisma.projectMember.findMany({
+        where: { projectId: input.projectId },
+        select: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              image: true,
+            },
+          },
+        },
+        orderBy: [
+          { user: { name: "asc" } },
+          { user: { email: "asc" } },
+        ],
+      }).then(async (memberships) => {
+        const users = memberships.map((membership) => membership.user);
+
+        if (!users.some((user) => user.id === ctx.session.user.id)) {
+          const currentUser = await ctx.prisma.user.findUnique({
+            where: { id: ctx.session.user.id },
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              image: true,
+            },
+          });
+
+          if (currentUser) {
+            users.push(currentUser);
+          }
+        }
+
+        return users.sort((left, right) => {
+          if (left.id === ctx.session.user.id) return -1;
+          if (right.id === ctx.session.user.id) return 1;
+          const leftLabel = left.name?.trim() || left.email;
+          const rightLabel = right.name?.trim() || right.email;
+          return leftLabel.localeCompare(rightLabel);
+        });
+      });
+    }),
+
   /** Create a new project with default workflow */
   create: protectedProcedure
     .input(

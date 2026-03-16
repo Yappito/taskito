@@ -61,6 +61,7 @@ export async function indexTask(task: {
   projectId: string;
   title: string;
   description: unknown;
+  body?: string | null;
   statusId: string;
   priority: string;
   dueDate: Date;
@@ -77,7 +78,7 @@ export async function indexTask(task: {
     projectKey: task.project?.key ?? "",
     taskNumber: task.taskNumber ?? 0,
     title: task.title,
-    description: typeof task.description === "string" ? task.description : "",
+    description: typeof task.description === "string" ? task.description : task.body ?? "",
     statusId: task.statusId,
     priority: task.priority,
     dueDate: task.dueDate.toISOString(),
@@ -183,6 +184,7 @@ export async function bulkSyncTasks(prisma: {
       taskNumber: number;
       title: string;
       description: unknown;
+      body?: string | null;
       statusId: string;
       priority: string;
       dueDate: Date;
@@ -210,7 +212,7 @@ export async function bulkSyncTasks(prisma: {
     projectKey: task.project.key,
     taskNumber: task.taskNumber,
     title: task.title,
-    description: typeof task.description === "string" ? task.description : "",
+    description: typeof task.description === "string" ? task.description : task.body ?? "",
     statusId: task.statusId,
     priority: task.priority,
     dueDate: task.dueDate.toISOString(),
