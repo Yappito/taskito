@@ -10,7 +10,7 @@ function todayPlus(days: number) {
   return date.toISOString().split("T")[0];
 }
 
-async function login(page: Page, email = "admin@taskito.local", password = "admin123") {
+async function login(page: Page, email = "admin@taskito.local", password = "taskito-demo-2026") {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await page.goto("/login");
     await page.waitForLoadState("networkidle");
@@ -175,7 +175,7 @@ async function createMemberUser(page: Page, options: { name: string; email: stri
   await page.getByText("New User").click();
   await page.getByPlaceholder("John Doe").fill(options.name);
   await page.getByPlaceholder("john@example.com").fill(options.email);
-  await page.getByPlaceholder("Min 6 characters").fill(options.password);
+  await page.getByPlaceholder("Min 12 characters").fill(options.password);
   await page.locator("label", { hasText: "Default Project" }).locator('input[type="checkbox"]').check();
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByText(options.email)).toBeVisible({ timeout: 10_000 });
@@ -357,7 +357,7 @@ test.describe("Backlog regression coverage", () => {
   test("assignment notifications reach another project member", async ({ page }) => {
     const name = uniqueName("Notify User");
     const email = `${Date.now()}-notify@taskito.local`;
-    const password = "member123";
+    const password = "member-user-2026";
 
     try {
       await createMemberUser(page, { name, email, password });

@@ -9,7 +9,7 @@ test("login flow — seeded user signs in and lands on dashboard", async ({ page
 
   // Fill in the seeded credentials
   await page.fill('input[name="email"]', "admin@taskito.local");
-  await page.fill('input[name="password"]', "admin123");
+  await page.fill('input[name="password"]', "taskito-demo-2026");
 
   // Submit the form
   await page.click('button[type="submit"]');

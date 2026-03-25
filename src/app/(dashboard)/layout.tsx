@@ -5,6 +5,7 @@ import { SearchModal } from "@/components/ui/search-modal";
 import { NotificationCenter } from "@/components/ui/notification-center";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { CurrentProjectHomeLink } from "@/components/ui/current-project-home-link";
+import { Avatar } from "@/components/ui/avatar";
 
 /** Dashboard layout — requires authentication */
 export default async function DashboardLayout({
@@ -28,26 +29,27 @@ export default async function DashboardLayout({
         <div className="flex h-14 items-center justify-between px-4">
           <div className="flex items-center gap-4">
             <CurrentProjectHomeLink />
-            {session.user?.role === "admin" && (
-              <Link
-                href="/settings"
-                className="text-sm transition-colors hover:opacity-80"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Settings
-              </Link>
-            )}
+            <Link
+              href="/settings"
+              className="text-sm transition-colors hover:opacity-80"
+              style={{ color: "var(--color-text-secondary)" }}
+            >
+              Settings
+            </Link>
           </div>
           <div className="flex items-center gap-3">
             <SearchModal />
             <NotificationCenter />
             <ThemeToggle />
-            <span
-              className="text-sm"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              {session.user?.name ?? session.user?.email}
-            </span>
+            <div className="flex items-center gap-2">
+              <Avatar name={session.user?.name} email={session.user?.email} image={session.user?.image} size="sm" />
+              <span
+                className="text-sm"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                {session.user?.name ?? session.user?.email}
+              </span>
+            </div>
             <form
               action={async () => {
                 "use server";

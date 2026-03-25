@@ -739,6 +739,8 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
               priority={node.task.priority}
               tags={(node.task.tags ?? []).map((t) => t.tag)}
               assigneeName={node.task.assignee?.name?.trim() || node.task.assignee?.email || null}
+              assigneeEmail={node.task.assignee?.email ?? null}
+              assigneeImage={node.task.assignee?.image ?? null}
               dependencyState={node.task.dependencyState}
               x={node.x}
               y={node.y + AXIS_OFFSET}

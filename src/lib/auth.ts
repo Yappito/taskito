@@ -1,7 +1,6 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, resetRateLimit } from "@/lib/rate-limit";
 
@@ -60,11 +59,23 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         });
         if (!user?.password) return null;
 
-        const isValid = await bcrypt.compare(
-          credentials.password as string,
-          user.password
-        );
-        if (!isValid) return null;
+        const password = String(credentials.password);
+        const { hashPassword, verifyPassword } = await import("@/lib/password");
+        const verification = await verifyPassword(password, user.password);
+        if (!verification.valid) return null;
+
+        if (verification.needsRehash) {
+          try {
+            await prisma.user.update({
+              where: { id: user.id },
+              data: {
+                password: await hashPassword(password),
+              },
+            });
+          } catch {
+            // Avoid failing a valid login if the background rehash update cannot be persisted.
+          }
+        }
 
         resetRateLimit("login:account", `${email}:${ip}`);
         resetRateLimit("login:ip", ip);
@@ -80,17 +91,43 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   callbacks: {
-    jwt({ token, user }) {
+    async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
         token.role = user.role;
+        token.name = user.name;
+        token.email = user.email;
+        token.picture = user.image;
       }
+
+      if (token.id) {
+        const currentUser = await prisma.user.findUnique({
+          where: { id: String(token.id) },
+          select: {
+            name: true,
+            email: true,
+            image: true,
+            role: true,
+          },
+        });
+
+        if (currentUser) {
+          token.name = currentUser.name;
+          token.email = currentUser.email;
+          token.picture = currentUser.image;
+          token.role = currentUser.role === "admin" ? "admin" : "member";
+        }
+      }
+
       return token;
     },
     session({ session, token }) {
       if (session.user && token.id) {
         session.user.id = token.id as string;
         session.user.role = token.role === "admin" ? "admin" : "member";
+        session.user.name = typeof token.name === "string" ? token.name : null;
+        session.user.email = typeof token.email === "string" ? token.email : "";
+        session.user.image = typeof token.picture === "string" ? token.picture : null;
       }
       return session;
     },

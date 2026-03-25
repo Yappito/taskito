@@ -10,6 +10,7 @@ import { Select } from "@/components/ui/select";
 import { StatusBadge } from "./status-badge";
 import { Badge } from "@/components/ui/badge";
 import { TaskSearchInput } from "@/components/ui/task-search-input";
+import { Avatar } from "@/components/ui/avatar";
 
 interface TaskDetailProps {
   taskId: string;
@@ -653,17 +654,45 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
             >
               <div>
                 <span className="font-medium">Created by:</span>{" "}
-                {(task as { creator?: { name: string | null; email: string } | null }).creator
-                  ? ((task as { creator?: { name: string | null; email: string } | null }).creator?.name?.trim() ||
-                    (task as { creator?: { name: string | null; email: string } | null }).creator?.email)
-                  : "Unknown"}
+                <span className="inline-flex max-w-full items-center gap-2 align-middle">
+                  {(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator ? (
+                    <>
+                      <Avatar
+                        name={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.name}
+                        email={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.email}
+                        image={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.image}
+                        size="xs"
+                      />
+                      <span className="truncate">
+                        {(task as { creator?: { name: string | null; email: string } | null }).creator?.name?.trim() ||
+                          (task as { creator?: { name: string | null; email: string } | null }).creator?.email}
+                      </span>
+                    </>
+                  ) : (
+                    <span>Unknown</span>
+                  )}
+                </span>
               </div>
               <div>
                 <span className="font-medium">Assigned to:</span>{" "}
-                {(task as { assignee?: { name: string | null; email: string } | null }).assignee
-                  ? ((task as { assignee?: { name: string | null; email: string } | null }).assignee?.name?.trim() ||
-                    (task as { assignee?: { name: string | null; email: string } | null }).assignee?.email)
-                  : "Unassigned"}
+                <span className="inline-flex max-w-full items-center gap-2 align-middle">
+                  {(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee ? (
+                    <>
+                      <Avatar
+                        name={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.name}
+                        email={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.email}
+                        image={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.image}
+                        size="xs"
+                      />
+                      <span className="truncate">
+                        {(task as { assignee?: { name: string | null; email: string } | null }).assignee?.name?.trim() ||
+                          (task as { assignee?: { name: string | null; email: string } | null }).assignee?.email}
+                      </span>
+                    </>
+                  ) : (
+                    <span>Unassigned</span>
+                  )}
+                </span>
               </div>
             </div>
 

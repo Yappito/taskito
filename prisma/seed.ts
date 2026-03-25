@@ -1,8 +1,9 @@
 import { PrismaClient, StatusCategory, TaskPriority, LinkType } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import { hashPassword } from "../src/lib/password";
 
 const prisma = new PrismaClient();
 const allowDemoSeed = process.env.NODE_ENV !== "production" || process.env.ALLOW_DEMO_SEED === "true";
+const demoAdminPassword = process.env.DEMO_ADMIN_PASSWORD?.trim() || "taskito-demo-2026";
 
 /**
  * Seed script: creates 1 user, 1 project, default workflow,
@@ -16,7 +17,7 @@ async function main() {
   }
 
   // ─── User ──────────────────
-  const passwordHash = await bcrypt.hash("admin123", 12);
+  const passwordHash = await hashPassword(demoAdminPassword);
   const legacyAdmin = await prisma.user.findUnique({
     where: { email: "admin@taskgraph.local" },
   });
@@ -39,6 +40,7 @@ async function main() {
     },
   });
   console.log(`  ✅ User: ${user.email}`);
+  console.log(`  🔐 Demo admin password: ${demoAdminPassword}`);
 
   // ─── Project ───────────────
   const project = await prisma.project.upsert({

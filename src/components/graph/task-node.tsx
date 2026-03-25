@@ -3,6 +3,7 @@
 import { memo } from "react";
 
 import type { AlertLevel } from "@/lib/alert-utils";
+import { Avatar } from "@/components/ui/avatar";
 
 interface TaskNodeProps {
   id: string;
@@ -13,6 +14,8 @@ interface TaskNodeProps {
   priority: string;
   tags: Array<{ name: string; color: string }>;
   assigneeName?: string | null;
+  assigneeEmail?: string | null;
+  assigneeImage?: string | null;
   dependencyState?: {
     blockingTaskCount: number;
     openChildCount: number;
@@ -96,6 +99,8 @@ export const TaskNode = memo(function TaskNode({
   priority,
   tags,
   assigneeName,
+  assigneeEmail,
+  assigneeImage,
   dependencyState,
   x,
   y,
@@ -311,13 +316,17 @@ export const TaskNode = memo(function TaskNode({
               </span>
             ))}
           </div>
-          <span
-            className="truncate text-right text-[9px]"
-            style={{ color: "var(--color-text-muted)" }}
-            title={assigneeLabel}
-          >
-            {assigneeLabel}
-          </span>
+          <div className="flex min-w-0 shrink-0 items-center gap-1" title={assigneeLabel}>
+            {assigneeEmail && (
+              <Avatar name={assigneeName} email={assigneeEmail} image={assigneeImage} size="xs" />
+            )}
+            <span
+              className="max-w-[4.8rem] truncate text-right text-[9px]"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {assigneeLabel}
+            </span>
+          </div>
         </div>
       </foreignObject>
 

@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { StatusBadge } from "./status-badge";
 import { Badge } from "@/components/ui/badge";
+import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 import type { AlertLevel } from "@/lib/alert-utils";
 import type { TaskCardData } from "@/lib/types";
@@ -131,13 +132,23 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
         >
           {dueDate.toLocaleDateString()}
         </span>
-        <span
-          className="max-w-[8rem] truncate text-right text-[11px]"
-          style={{ color: "var(--color-text-muted)" }}
-          title={assigneeLabel}
-        >
-          {assigneeLabel}
-        </span>
+        <div className="flex max-w-[8.75rem] items-center gap-1.5 text-right" title={assigneeLabel}>
+          {task.assignee && (
+            <Avatar
+              name={task.assignee.name}
+              email={task.assignee.email}
+              image={task.assignee.image}
+              size="xs"
+              className="ring-1 ring-black/5"
+            />
+          )}
+          <span
+            className="truncate text-[11px]"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            {assigneeLabel}
+          </span>
+        </div>
       </div>
     </div>
   );

@@ -9,6 +9,7 @@ import { TaskDetail } from "./task-detail";
 import { BulkActionBar } from "./bulk-action-bar";
 import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
+import { Avatar } from "@/components/ui/avatar";
 import type { TaskFilterTagOption } from "@/lib/types";
 
 interface ListViewProps {
@@ -368,7 +369,23 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                   {new Date(task.dueDate).toLocaleDateString()}
                 </td>
                 <td className="px-4 py-3" style={{ color: "var(--color-text-secondary)" }}>
-                  {task.assignee?.name?.trim() || task.assignee?.email || "Unassigned"}
+                  <div className="flex items-center gap-2">
+                    {task.assignee ? (
+                      <>
+                        <Avatar
+                          name={task.assignee.name}
+                          email={task.assignee.email}
+                          image={task.assignee.image}
+                          size="xs"
+                        />
+                        <span className="truncate">
+                          {task.assignee.name?.trim() || task.assignee.email}
+                        </span>
+                      </>
+                    ) : (
+                      <span>Unassigned</span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-1">

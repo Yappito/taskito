@@ -111,6 +111,8 @@ docker compose exec \
 
 Only do this when you want the sample project, tasks, and demo login. The seed script refuses to run in production unless `ALLOW_DEMO_SEED=true` is present in the container environment.
 
+The seeded demo admin account uses `admin@taskito.local` and defaults to `taskito-demo-2026`. Override it with `DEMO_ADMIN_PASSWORD` when you want a different demo credential.
+
 You can use the same pattern for other bundled maintenance commands once the app container is running:
 
 ```bash
@@ -161,6 +163,7 @@ Useful commands from the repository root:
 | `AUTH_URL` | Yes | Public base URL of the app |
 | `AUTH_SECRET` | Yes | Auth.js signing secret |
 | `ALLOW_DEMO_SEED` | No | Leave `false` unless you intentionally want demo data |
+| `DEMO_ADMIN_PASSWORD` | No | Optional password for the seeded demo admin account |
 | `AUTO_TAGGER_URL` | No | Optional OpenAI-compatible tagging endpoint |
 | `AUTO_TAGGER_API_KEY` | No | Optional API key for the auto-tagger |
 

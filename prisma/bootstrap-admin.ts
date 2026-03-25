@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { hashPassword } from "../src/lib/password";
+import { PASSWORD_MIN_LENGTH } from "../src/lib/password-policy";
 
 const prisma = new PrismaClient();
 
@@ -24,15 +25,15 @@ async function main() {
   const providedPassword = optionalEnv("BOOTSTRAP_ADMIN_PASSWORD");
   const password = providedPassword ?? randomBytes(18).toString("base64url");
 
-  if (password.length < 12) {
-    throw new Error("BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters long");
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new Error(`BOOTSTRAP_ADMIN_PASSWORD must be at least ${PASSWORD_MIN_LENGTH} characters long`);
   }
 
   const existingUser = await prisma.user.findUnique({
     where: { email },
   });
 
-  const hashedPassword = await bcrypt.hash(password, 12);
+  const hashedPassword = await hashPassword(password);
   const defaultName = existingUser?.name ?? "Administrator";
 
   const user = existingUser

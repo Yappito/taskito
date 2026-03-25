@@ -1,10 +1,11 @@
-import { auth } from "@/lib/auth";
 import { NextResponse } from "next/server";
+import { getToken } from "next-auth/jwt";
 
-export default auth((req) => {
-  const isLoggedIn = !!req.auth;
+export default async function middleware(req: Request & { nextUrl: URL }) {
+  const token = await getToken({ req, secret: process.env.AUTH_SECRET });
+  const isLoggedIn = !!token;
   const { pathname } = req.nextUrl;
-  const role = (req.auth?.user as { role?: string } | undefined)?.role;
+  const role = typeof token?.role === "string" ? token.role : undefined;
 
   // Public routes that don't require auth
   const publicRoutes = ["/login", "/api/auth"];
@@ -30,7 +31,7 @@ export default auth((req) => {
   }
 
   return NextResponse.next();
-});
+}
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],

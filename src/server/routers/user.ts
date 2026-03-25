@@ -1,6 +1,8 @@
 import { z } from "zod";
-import bcrypt from "bcryptjs";
-import { createTRPCRouter, adminProcedure } from "../trpc";
+import { TRPCError } from "@trpc/server";
+import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
+import { hashPassword, verifyPassword } from "@/lib/password";
+import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@/lib/password-policy";
 
 interface MembershipSyncClient {
   project: {
@@ -79,6 +81,84 @@ async function syncProjectMemberships(
 
 /** User management router */
 export const userRouter = createTRPCRouter({
+  /** Read the current user's profile */
+  me: protectedProcedure.query(async ({ ctx }) => {
+    return ctx.prisma.user.findUniqueOrThrow({
+      where: { id: ctx.session.user.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        image: true,
+        role: true,
+        createdAt: true,
+      },
+    });
+  }),
+
+  /** Update the current user's profile */
+  updateProfile: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().trim().min(1).max(100),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.user.update({
+        where: { id: ctx.session.user.id },
+        data: {
+          name: input.name,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          image: true,
+          role: true,
+          createdAt: true,
+        },
+      });
+    }),
+
+  /** Change the current user's password */
+  changePassword: protectedProcedure
+    .input(
+      z.object({
+        currentPassword: z.string().min(1),
+        newPassword: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const user = await ctx.prisma.user.findUnique({
+        where: { id: ctx.session.user.id },
+        select: {
+          password: true,
+        },
+      });
+
+      if (!user?.password) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Password login is not configured for this account" });
+      }
+
+      const verification = await verifyPassword(input.currentPassword, user.password);
+      if (!verification.valid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Current password is incorrect" });
+      }
+
+      if (input.currentPassword === input.newPassword) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Choose a new password different from the current one" });
+      }
+
+      await ctx.prisma.user.update({
+        where: { id: ctx.session.user.id },
+        data: {
+          password: await hashPassword(input.newPassword),
+        },
+      });
+
+      return { success: true };
+    }),
+
   /** List all users */
   list: adminProcedure.query(async ({ ctx }) => {
     return ctx.prisma.user.findMany({
@@ -119,13 +199,13 @@ export const userRouter = createTRPCRouter({
       z.object({
         name: z.string().min(1).max(100),
         email: z.string().email(),
-        password: z.string().min(6).max(100),
+        password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
         role: z.enum(["admin", "member"]).default("member"),
         projectIds: z.array(z.string().cuid()).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const hashed = await bcrypt.hash(input.password, 12);
+      const hashed = await hashPassword(input.password);
       return ctx.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: {
@@ -173,7 +253,7 @@ export const userRouter = createTRPCRouter({
         name: z.string().min(1).max(100).optional(),
         email: z.string().email().optional(),
         role: z.enum(["admin", "member"]).optional(),
-        password: z.string().min(6).max(100).optional(),
+        password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH).optional(),
         projectIds: z.array(z.string().cuid()).optional(),
       })
     )
@@ -187,7 +267,7 @@ export const userRouter = createTRPCRouter({
         updateData.email = normalizeEmail(updateData.email);
       }
       if (password) {
-        updateData.password = await bcrypt.hash(password, 12);
+        updateData.password = await hashPassword(password);
       }
       return ctx.prisma.$transaction(async (tx) => {
         await tx.user.update({
@@ -230,6 +310,10 @@ export const userRouter = createTRPCRouter({
   delete: adminProcedure
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
+      if (input.id === ctx.session.user.id) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot delete your own account" });
+      }
+
       await ctx.prisma.user.delete({ where: { id: input.id } });
       return { success: true };
     }),

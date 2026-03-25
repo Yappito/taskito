@@ -26,6 +26,7 @@ export default function ProjectPage({
 function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
   const [view, setView] = useState<"list" | "board" | "graph" | "archive">("board");
   const [selectedSearchTaskId, setSelectedSearchTaskId] = useState<string | null>(null);
+  const [isRecoveringProject, setIsRecoveringProject] = useState(false);
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -45,6 +46,22 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
   const { data: projects, isLoading: projectsLoading } = trpc.project.list.useQuery();
 
+  useEffect(() => {
+    if (isLoading || projectsLoading || project) {
+      setIsRecoveringProject(false);
+      return;
+    }
+
+    const fallbackProject = (projects ?? []).find((candidate) => candidate.slug !== projectSlug);
+    if (!fallbackProject) {
+      setIsRecoveringProject(false);
+      return;
+    }
+
+    setIsRecoveringProject(true);
+    router.replace(`/${fallbackProject.slug}`);
+  }, [isLoading, project, projectSlug, projects, projectsLoading, router]);
+
   const { data: tags } = trpc.tag.list.useQuery(
     { projectId: project?.id ?? "" },
     { enabled: !!project?.id }
@@ -61,7 +78,9 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
   if (!project) {
     return (
       <div className="flex h-[50vh] items-center justify-center">
-        <p style={{ color: "var(--color-text-muted)" }}>Project not found</p>
+        <p style={{ color: "var(--color-text-muted)" }}>
+          {isRecoveringProject ? "Redirecting to an available project..." : "Project not found"}
+        </p>
       </div>
     );
   }
