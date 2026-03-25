@@ -1,8 +1,28 @@
 import { NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
 
+function getOriginalProtocol(req: Request & { nextUrl: URL }) {
+  const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  if (forwardedProto === "https" || forwardedProto === "http") {
+    return `${forwardedProto}:`;
+  }
+
+  return req.nextUrl.protocol;
+}
+
+function getSessionCookieName(isSecureRequest: boolean) {
+  return isSecureRequest ? "__Secure-authjs.session-token" : "authjs.session-token";
+}
+
 export default async function middleware(req: Request & { nextUrl: URL }) {
-  const token = await getToken({ req, secret: process.env.AUTH_SECRET });
+  const originalProtocol = getOriginalProtocol(req);
+  const isSecureRequest = originalProtocol === "https:";
+  const token = await getToken({
+    req,
+    secret: process.env.AUTH_SECRET,
+    secureCookie: isSecureRequest,
+    cookieName: getSessionCookieName(isSecureRequest),
+  });
   const isLoggedIn = !!token;
   const { pathname } = req.nextUrl;
   const role = typeof token?.role === "string" ? token.role : undefined;
