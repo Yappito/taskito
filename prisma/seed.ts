@@ -1,5 +1,5 @@
 import { PrismaClient, StatusCategory, TaskPriority, LinkType } from "@prisma/client";
-import { hashPassword } from "../src/lib/password";
+import { hashPassword } from "./password-support";
 
 const prisma = new PrismaClient();
 const allowDemoSeed = process.env.NODE_ENV !== "production" || process.env.ALLOW_DEMO_SEED === "true";

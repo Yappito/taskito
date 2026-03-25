@@ -1,8 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { hashPassword } from "../src/lib/password";
-import { PASSWORD_MIN_LENGTH } from "../src/lib/password-policy";
+import { hashPassword, PASSWORD_MIN_LENGTH } from "./password-support";
 
 const prisma = new PrismaClient();
 
