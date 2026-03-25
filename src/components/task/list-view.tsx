@@ -4,13 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc-client";
 import { cn } from "@/lib/utils";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
+import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
 
 import { TaskDetail } from "./task-detail";
 import { BulkActionBar } from "./bulk-action-bar";
 import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
 import { Avatar } from "@/components/ui/avatar";
-import type { TaskFilterTagOption } from "@/lib/types";
+import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 
 interface ListViewProps {
   projectId: string;
@@ -27,33 +28,18 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   const [actionError, setActionError] = useState<string | null>(null);
   const [sortField, setSortField] = useState<"dueDate" | "title" | "priority">("dueDate");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
-  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
+  const filters = useTaskViewFilters();
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
   const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
-
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      setDebouncedSearch(search);
-    }, 250);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [search]);
 
   const taskListInput = useMemo(
     () => ({
       projectId,
       limit: 100,
-      search: debouncedSearch.trim() || undefined,
-      tagIds: selectedTagIds.length > 0 ? selectedTagIds : undefined,
-      assigneeIds: selectedAssigneeIds.length > 0 ? selectedAssigneeIds : undefined,
+      ...filters.queryFilters,
     }),
-    [projectId, debouncedSearch, selectedTagIds, selectedAssigneeIds]
+    [projectId, filters.queryFilters]
   );
 
   const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
@@ -91,26 +77,6 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
       utils.project.filterPresets.invalidate({ projectId });
     },
   });
-
-  function toggleTag(tagId: string) {
-    setSelectedTagIds((prev) =>
-      prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
-    );
-  }
-
-  function clearFilters() {
-    setSearch("");
-    setSelectedTagIds([]);
-    setSelectedAssigneeIds([]);
-  }
-
-  function toggleAssignee(assigneeId: string) {
-    setSelectedAssigneeIds((prev) =>
-      prev.includes(assigneeId)
-        ? prev.filter((id) => id !== assigneeId)
-        : [...prev, assigneeId]
-    );
-  }
 
   if (isLoading && !data) {
     return (
@@ -190,31 +156,32 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   return (
     <div className="flex flex-col">
       <TaskViewFilters
-        search={search}
-        selectedTagIds={selectedTagIds}
-        selectedAssigneeIds={selectedAssigneeIds}
+        search={filters.search}
+        selectedTagIds={filters.selectedTagIds}
+        selectedAssigneeIds={filters.selectedAssigneeIds}
+        dueDateFrom={filters.dueDateFrom}
+        dueDateTo={filters.dueDateTo}
+        closedAtFrom={filters.closedAtFrom}
+        closedAtTo={filters.closedAtTo}
         tags={tags}
         assignees={people ?? []}
-        onSearchChange={setSearch}
-        onToggleTag={toggleTag}
-        onToggleAssignee={toggleAssignee}
-        onClear={clearFilters}
-        presets={presets as Array<{ id: string; name: string; search: string; tagIds: string[]; assigneeIds: string[] }>}
-        onApplyPreset={(preset) => {
-          setSearch(preset.search);
-          setSelectedTagIds(preset.tagIds);
-          setSelectedAssigneeIds(preset.assigneeIds);
+        onSearchChange={filters.setSearch}
+        onToggleTag={filters.toggleTag}
+        onToggleAssignee={filters.toggleAssignee}
+        onDateFilterChange={(key, value) => {
+          if (key === "dueDateFrom") filters.setDueDateFrom(value);
+          if (key === "dueDateTo") filters.setDueDateTo(value);
+          if (key === "closedAtFrom") filters.setClosedAtFrom(value);
+          if (key === "closedAtTo") filters.setClosedAtTo(value);
         }}
+        onApplyQuickDateFilter={filters.applyQuickDateFilter}
+        onClear={filters.clearFilters}
+        presets={presets as TaskFilterPreset[]}
+        onApplyPreset={filters.applyPreset}
         onSavePreset={(name) => {
           savePreset.mutate({
             projectId,
-            preset: {
-              id: crypto.randomUUID(),
-              name,
-              search,
-              tagIds: selectedTagIds,
-              assigneeIds: selectedAssigneeIds,
-            },
+            preset: filters.buildPreset(name),
           });
         }}
         onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}

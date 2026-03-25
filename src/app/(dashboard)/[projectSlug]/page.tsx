@@ -192,7 +192,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
         />
       )}
       {view === "archive" && (
-        <ArchivedTasks projectId={project.id} statuses={statuses} />
+        <ArchivedTasks projectId={project.id} statuses={statuses} tags={tags ?? []} />
       )}
 
       {/* Task detail from search navigation */}

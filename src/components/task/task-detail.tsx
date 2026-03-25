@@ -646,6 +646,12 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   {new Date(task.startDate).toLocaleDateString()}
                 </div>
               )}
+              {(task as { closedAt?: Date | string | null }).closedAt && (
+                <div>
+                  <span className="font-medium">Closed:</span>{" "}
+                  {new Date((task as { closedAt?: Date | string | null }).closedAt as Date | string).toLocaleDateString()}
+                </div>
+              )}
             </div>
 
             <div

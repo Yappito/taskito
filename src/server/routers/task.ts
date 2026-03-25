@@ -220,6 +220,25 @@ function assertCanEnterTerminalStatus(dependencyState: {
   }
 }
 
+function resolveClosedAtForStatusChange(
+  task: { statusId: string; closedAt: Date | null },
+  targetStatus: { id: string; isFinal: boolean }
+) {
+  if (targetStatus.id === task.statusId) {
+    return undefined;
+  }
+
+  if (targetStatus.isFinal) {
+    return task.closedAt ?? new Date();
+  }
+
+  if (task.closedAt) {
+    return null;
+  }
+
+  return undefined;
+}
+
 /** Task CRUD router */
 export const taskRouter = createTRPCRouter({
   /** List tasks with filtering and cursor pagination */
@@ -232,6 +251,8 @@ export const taskRouter = createTRPCRouter({
         priorities: z.array(z.enum(["none", "low", "medium", "high", "urgent"])).optional(),
         dueDateFrom: z.date().optional(),
         dueDateTo: z.date().optional(),
+        closedAtFrom: z.date().optional(),
+        closedAtTo: z.date().optional(),
         search: z.string().optional(),
         assigneeIds: z.array(z.string().cuid()).optional(),
         includeArchived: z.boolean().optional(),
@@ -242,7 +263,22 @@ export const taskRouter = createTRPCRouter({
     )
     .query(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
-      const { projectId, cursor, limit, statusIds, tagIds, priorities, dueDateFrom, dueDateTo, search, assigneeIds, includeArchived, archivedOnly } = input;
+      const {
+        projectId,
+        cursor,
+        limit,
+        statusIds,
+        tagIds,
+        priorities,
+        dueDateFrom,
+        dueDateTo,
+        closedAtFrom,
+        closedAtTo,
+        search,
+        assigneeIds,
+        includeArchived,
+        archivedOnly,
+      } = input;
 
       const now = new Date();
       const where = {
@@ -259,6 +295,15 @@ export const taskRouter = createTRPCRouter({
               dueDate: {
                 ...(dueDateFrom ? { gte: dueDateFrom } : {}),
                 ...(dueDateTo ? { lte: dueDateTo } : {}),
+              },
+            }
+          : {}),
+        ...(closedAtFrom || closedAtTo
+          ? {
+              closedAt: {
+                not: null,
+                ...(closedAtFrom ? { gte: closedAtFrom } : {}),
+                ...(closedAtTo ? { lte: closedAtTo } : {}),
               },
             }
           : {}),
@@ -467,6 +512,15 @@ export const taskRouter = createTRPCRouter({
         }
       }
 
+      let initialStatusIsFinal = false;
+      if (data.statusId) {
+        const initialStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId);
+        if (initialStatus.projectId !== data.projectId) {
+          throw new Error("Status does not belong to the specified project");
+        }
+        initialStatusIsFinal = initialStatus.isFinal;
+      }
+
       const task = await ctx.prisma.$transaction(async (tx) => {
         // Get the next task number for this project
         const lastTask = await tx.task.findFirst({
@@ -482,6 +536,7 @@ export const taskRouter = createTRPCRouter({
             taskNumber: nextNumber,
             creatorId: ctx.session.user.id,
             assigneeId: effectiveAssigneeId,
+            closedAt: initialStatusIsFinal ? new Date() : null,
             description: (description ?? body ?? undefined) as Prisma.InputJsonValue | undefined,
             body,
             statusId: data.statusId!,
@@ -554,10 +609,12 @@ export const taskRouter = createTRPCRouter({
       const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
       const currentTaskSnapshot = await ctx.prisma.task.findUniqueOrThrow({
         where: { id },
-        select: { assigneeId: true },
+        select: { assigneeId: true, closedAt: true },
       });
       await validateAssigneeAccess(ctx, currentTask.projectId, assigneeId);
       const normalizedCustomFieldValues = await validateCustomFieldValues(ctx, currentTask.projectId, customFieldValues);
+
+      let targetStatus: Awaited<ReturnType<typeof requireWorkflowStatusAccess>> | null = null;
 
       if (tagIds) {
         const matchingTags = await ctx.prisma.tag.findMany({
@@ -575,7 +632,7 @@ export const taskRouter = createTRPCRouter({
 
       // Validate status transition if statusId is being changed
       if (statusId) {
-        const targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, statusId);
+        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, statusId);
         if (targetStatus.projectId !== currentTask.projectId) {
           throw new Error("Status does not belong to the same project as the task");
         }
@@ -625,8 +682,8 @@ export const taskRouter = createTRPCRouter({
 
       // Auto-archive: if moving to a status with autoArchive enabled, set archivedAt
       let archivedAt: Date | null | undefined;
-      if (statusId) {
-        const targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, statusId);
+      let closedAt: Date | null | undefined;
+      if (statusId && targetStatus) {
         if (targetStatus?.autoArchive) {
           const delayMs = (targetStatus.autoArchiveDays || 0) * 86_400_000;
           archivedAt = new Date(Date.now() + delayMs);
@@ -634,6 +691,11 @@ export const taskRouter = createTRPCRouter({
           // Un-archive if moving away from an auto-archive status
           archivedAt = null;
         }
+
+        closedAt = resolveClosedAtForStatusChange(
+          { statusId: currentTask.statusId, closedAt: currentTaskSnapshot.closedAt },
+          targetStatus
+        );
       }
 
       // Build Prisma-safe update data — only include fields that were explicitly provided
@@ -653,6 +715,7 @@ export const taskRouter = createTRPCRouter({
         ...(priority !== undefined && { priority }),
         ...(dueDate !== undefined && { dueDate }),
         ...(startDate !== undefined && { startDate }),
+        ...(closedAt !== undefined && { closedAt }),
         ...(alertAcknowledged !== undefined && { alertAcknowledged }),
         ...(archivedAt !== undefined && { archivedAt }),
       };
@@ -711,6 +774,7 @@ export const taskRouter = createTRPCRouter({
             ...(description !== undefined || body !== undefined ? ["description"] : []),
             ...(assigneeId !== undefined ? ["assigneeId"] : []),
             ...(statusId !== undefined ? ["statusId"] : []),
+            ...(closedAt !== undefined ? ["closedAt"] : []),
             ...(priority !== undefined ? ["priority"] : []),
             ...(dueDate !== undefined ? ["dueDate"] : []),
             ...(startDate !== undefined ? ["startDate"] : []),
@@ -780,6 +844,7 @@ export const taskRouter = createTRPCRouter({
           id: true,
           projectId: true,
           statusId: true,
+            closedAt: true,
           sourceLinks: {
             select: {
               linkType: true,
@@ -812,12 +877,13 @@ export const taskRouter = createTRPCRouter({
       }
 
       let archivedAt: Date | null | undefined;
+      let targetStatus: Awaited<ReturnType<typeof requireWorkflowStatusAccess>> | null = null;
       if (input.archive !== undefined) {
         archivedAt = input.archive ? new Date() : null;
       }
 
       if (input.statusId) {
-        const targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.statusId);
+        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.statusId);
         if (targetStatus.projectId !== input.projectId) {
           throw new Error("Status does not belong to the selected project");
         }
@@ -878,16 +944,21 @@ export const taskRouter = createTRPCRouter({
       await ctx.prisma.$transaction(async (tx) => {
         if (input.statusId !== undefined || input.assigneeId !== undefined || archivedAt !== undefined) {
           await Promise.all(
-            tasks.map((task) =>
-              tx.task.update({
+            tasks.map((task) => {
+              const closedAt = input.statusId !== undefined && targetStatus
+                ? resolveClosedAtForStatusChange(task, targetStatus)
+                : undefined;
+
+              return tx.task.update({
                 where: { id: task.id },
                 data: {
                   ...(input.statusId !== undefined ? { statusId: input.statusId } : {}),
                   ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
                   ...(archivedAt !== undefined ? { archivedAt } : {}),
+                  ...(closedAt !== undefined ? { closedAt } : {}),
                 },
-              })
-            )
+              });
+            })
           );
         }
 
@@ -975,6 +1046,7 @@ export const taskRouter = createTRPCRouter({
             description: currentTask.description ?? Prisma.JsonNull,
             body: currentTask.body,
             statusId: currentTask.statusId,
+            closedAt: null,
             priority: currentTask.priority,
             dueDate: currentTask.dueDate,
             startDate: currentTask.startDate,

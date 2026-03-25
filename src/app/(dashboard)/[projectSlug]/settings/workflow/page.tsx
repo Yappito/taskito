@@ -9,6 +9,8 @@ import { getAlertConfig } from "@/lib/alert-utils";
 
 const CATEGORIES = ["backlog", "todo", "active", "done", "cancelled"] as const;
 
+const FINAL_STAGE_EXPLANATION = "Final stage marks work as closed. When a task enters this status, Taskito records its closure date automatically and clears it again if the task is reopened. Only one status can be final per project.";
+
 /** Workflow settings page: status CRUD + transition matrix */
 export default function WorkflowSettingsPage({
   params,
@@ -31,13 +33,13 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
   const { data: transitions = [] } = trpc.workflow.transitions.useQuery({ projectId });
 
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [newStatus, setNewStatus] = useState({ name: "", color: "#3b82f6", category: "todo" as (typeof CATEGORIES)[number], autoArchive: false, autoArchiveDays: 0 });
+  const [newStatus, setNewStatus] = useState({ name: "", color: "#3b82f6", category: "todo" as (typeof CATEGORIES)[number], isFinal: false, autoArchive: false, autoArchiveDays: 0 });
 
   const upsertMutation = trpc.workflow.upsertStatus.useMutation({
     onSuccess: () => {
       utils.workflow.statuses.invalidate();
       setEditingId(null);
-      setNewStatus({ name: "", color: "#3b82f6", category: "todo", autoArchive: false, autoArchiveDays: 0 });
+      setNewStatus({ name: "", color: "#3b82f6", category: "todo", isFinal: false, autoArchive: false, autoArchiveDays: 0 });
     },
   });
 
@@ -102,7 +104,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
               />
               {editingId === status.id ? (
                 <EditStatusForm
-                  status={{ ...status, autoArchive: (status as { autoArchive?: boolean }).autoArchive ?? false, autoArchiveDays: (status as { autoArchiveDays?: number }).autoArchiveDays ?? 0 }}
+                  status={{ ...status, isFinal: (status as { isFinal?: boolean }).isFinal ?? false, autoArchive: (status as { autoArchive?: boolean }).autoArchive ?? false, autoArchiveDays: (status as { autoArchiveDays?: number }).autoArchiveDays ?? 0 }}
                   onSave={(data) =>
                     upsertMutation.mutate({
                       id: status.id,
@@ -119,6 +121,11 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                   <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
                     {status.category}
                   </span>
+                  {(status as { isFinal?: boolean }).isFinal && (
+                    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
+                      final stage
+                    </span>
+                  )}
                   {(status as { autoArchive?: boolean }).autoArchive && (
                     <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
                       auto-archive{(status as { autoArchiveDays?: number }).autoArchiveDays ? ` (${(status as { autoArchiveDays?: number }).autoArchiveDays}d)` : ""}
@@ -200,6 +207,15 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
           <label className="flex items-center gap-2 text-xs text-gray-500">
             <input
               type="checkbox"
+              checked={newStatus.isFinal}
+              onChange={(e) => setNewStatus({ ...newStatus, isFinal: e.target.checked })}
+              className="rounded"
+            />
+            Final stage
+          </label>
+          <label className="flex items-center gap-2 text-xs text-gray-500">
+            <input
+              type="checkbox"
               checked={newStatus.autoArchive}
               onChange={(e) => setNewStatus({ ...newStatus, autoArchive: e.target.checked })}
               className="rounded"
@@ -227,6 +243,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                 color: newStatus.color,
                 order: statuses.length,
                 category: newStatus.category,
+                isFinal: newStatus.isFinal,
                 autoArchive: newStatus.autoArchive,
                 autoArchiveDays: newStatus.autoArchiveDays,
               })
@@ -236,6 +253,10 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
             Add
           </Button>
         </div>
+        {upsertMutation.error && (
+          <p className="mt-3 text-sm text-red-600">{upsertMutation.error.message}</p>
+        )}
+        <p className="mt-3 text-xs text-gray-500">{FINAL_STAGE_EXPLANATION}</p>
       </section>
 
       {/* Transition Matrix */}
@@ -389,13 +410,14 @@ function EditStatusForm({
   onSave,
   onCancel,
 }: {
-  status: { name: string; color: string; category: string; autoArchive: boolean; autoArchiveDays: number };
-  onSave: (data: { name: string; color: string; category: (typeof CATEGORIES)[number]; autoArchive: boolean; autoArchiveDays: number }) => void;
+  status: { name: string; color: string; category: string; isFinal: boolean; autoArchive: boolean; autoArchiveDays: number };
+  onSave: (data: { name: string; color: string; category: (typeof CATEGORIES)[number]; isFinal: boolean; autoArchive: boolean; autoArchiveDays: number }) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(status.name);
   const [color, setColor] = useState(status.color);
   const [category, setCategory] = useState(status.category as (typeof CATEGORIES)[number]);
+  const [isFinal, setIsFinal] = useState(status.isFinal);
   const [autoArchive, setAutoArchive] = useState(status.autoArchive);
   const [autoArchiveDays, setAutoArchiveDays] = useState(status.autoArchiveDays);
 
@@ -422,6 +444,15 @@ function EditStatusForm({
       <label className="flex items-center gap-1.5 text-xs text-gray-500">
         <input
           type="checkbox"
+          checked={isFinal}
+          onChange={(e) => setIsFinal(e.target.checked)}
+          className="rounded"
+        />
+        Final stage
+      </label>
+      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+        <input
+          type="checkbox"
           checked={autoArchive}
           onChange={(e) => setAutoArchive(e.target.checked)}
           className="rounded"
@@ -439,7 +470,7 @@ function EditStatusForm({
           placeholder="Days"
         />
       )}
-      <Button size="sm" onClick={() => onSave({ name, color, category, autoArchive, autoArchiveDays })}>
+      <Button size="sm" onClick={() => onSave({ name, color, category, isFinal, autoArchive, autoArchiveDays })}>
         Save
       </Button>
       <Button size="sm" variant="ghost" onClick={onCancel}>

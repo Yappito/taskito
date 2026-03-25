@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from "react";
 
 import { trpc } from "@/lib/trpc-client";
+import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
 import { useTimelineZoom } from "@/hooks/use-timeline-zoom";
 import { useGraphLayout } from "@/hooks/use-graph-layout";
 import { TimeAxis } from "./time-axis";
@@ -15,7 +16,7 @@ import { LinkTypePopup } from "@/components/ui/link-type-popup";
 import { TaskViewFilters } from "@/components/task/task-view-filters";
 import { createTimeScale } from "@/lib/date-utils";
 import { getDateRange } from "@/lib/date-utils";
-import type { TimeResolution, Viewport, LinkType, GraphTaskData, TaskFilterTagOption } from "@/lib/types";
+import type { TimeResolution, Viewport, LinkType, GraphTaskData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface TimelineGraphProps {
@@ -119,10 +120,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
-  const [selectedAssigneeIds, setSelectedAssigneeIds] = useState<string[]>([]);
+  const filters = useTaskViewFilters();
   const [dimensions, setDimensions] = useState({ width: 1200, height: 600 });
   const previousFullViewRef = useRef<{ x: number; y: number; k: number } | null>(null);
 
@@ -141,25 +139,21 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
 
   const alertConfig = useMemo(() => getAlertConfig(projectSettings), [projectSettings]);
 
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      setDebouncedSearch(search);
-    }, 250);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [search]);
-
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
   const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   // Fetch tasks and links
-  const { data: taskData } = trpc.task.list.useQuery({
-    projectId,
-    limit: 100,
-  });
+  const taskListInput = useMemo(
+    () => ({
+      projectId,
+      limit: 100,
+      ...filters.queryFilters,
+    }),
+    [projectId, filters.queryFilters]
+  );
+
+  const { data: taskData } = trpc.task.list.useQuery(taskListInput);
 
   const { data: linksData } = trpc.task.links.useQuery({ projectId });
 
@@ -207,44 +201,18 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   }, [linksData, tasks]);
 
   const matchingTaskIds = useMemo(() => {
-    const normalizedSearch = debouncedSearch.trim().toLowerCase();
+    const normalizedSearch = filters.debouncedSearch.trim().toLowerCase();
 
     return new Set(
       tasks
         .filter((task) => {
           const matchesSearch =
             normalizedSearch.length === 0 || task.title.toLowerCase().includes(normalizedSearch);
-          const matchesTags =
-            selectedTagIds.length === 0 ||
-            task.tags.some((taskTag) => selectedTagIds.includes(taskTag.tag.id));
-          const matchesAssignee =
-            selectedAssigneeIds.length === 0 ||
-            (!!task.assignee && selectedAssigneeIds.includes(task.assignee.id));
-          return matchesSearch && matchesTags && matchesAssignee;
+          return matchesSearch;
         })
         .map((task) => task.id)
     );
-  }, [tasks, debouncedSearch, selectedTagIds, selectedAssigneeIds]);
-
-  function toggleTag(tagId: string) {
-    setSelectedTagIds((prev) =>
-      prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
-    );
-  }
-
-  function clearFilters() {
-    setSearch("");
-    setSelectedTagIds([]);
-    setSelectedAssigneeIds([]);
-  }
-
-  function toggleAssignee(assigneeId: string) {
-    setSelectedAssigneeIds((prev) =>
-      prev.includes(assigneeId)
-        ? prev.filter((id) => id !== assigneeId)
-        : [...prev, assigneeId]
-    );
-  }
+  }, [tasks, filters.debouncedSearch]);
 
   const focusedGraph = useMemo(() => {
     if (!focusedTaskId) {
@@ -560,36 +528,37 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
       </div>
 
       <TaskViewFilters
-        search={search}
-        selectedTagIds={selectedTagIds}
-        selectedAssigneeIds={selectedAssigneeIds}
+        search={filters.search}
+        selectedTagIds={filters.selectedTagIds}
+        selectedAssigneeIds={filters.selectedAssigneeIds}
+        dueDateFrom={filters.dueDateFrom}
+        dueDateTo={filters.dueDateTo}
+        closedAtFrom={filters.closedAtFrom}
+        closedAtTo={filters.closedAtTo}
         tags={tags}
         assignees={people ?? []}
-        onSearchChange={setSearch}
-        onToggleTag={toggleTag}
-        onToggleAssignee={toggleAssignee}
-        onClear={clearFilters}
-        presets={presets as Array<{ id: string; name: string; search: string; tagIds: string[]; assigneeIds: string[] }>}
-        onApplyPreset={(preset) => {
-          setSearch(preset.search);
-          setSelectedTagIds(preset.tagIds);
-          setSelectedAssigneeIds(preset.assigneeIds);
+        onSearchChange={filters.setSearch}
+        onToggleTag={filters.toggleTag}
+        onToggleAssignee={filters.toggleAssignee}
+        onDateFilterChange={(key, value) => {
+          if (key === "dueDateFrom") filters.setDueDateFrom(value);
+          if (key === "dueDateTo") filters.setDueDateTo(value);
+          if (key === "closedAtFrom") filters.setClosedAtFrom(value);
+          if (key === "closedAtTo") filters.setClosedAtTo(value);
         }}
+        onApplyQuickDateFilter={filters.applyQuickDateFilter}
+        onClear={filters.clearFilters}
+        presets={presets as TaskFilterPreset[]}
+        onApplyPreset={filters.applyPreset}
         onSavePreset={(name) => {
           savePreset.mutate({
             projectId,
-            preset: {
-              id: crypto.randomUUID(),
-              name,
-              search,
-              tagIds: selectedTagIds,
-              assigneeIds: selectedAssigneeIds,
-            },
+            preset: filters.buildPreset(name),
           });
         }}
         onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}
         searchPlaceholder="Highlight by title..."
-        helperText="Matching tasks are highlighted and all other tasks remain visible."
+        helperText="Filters narrow the graph; matching titles remain highlighted inside the filtered result."
         className="absolute left-4 top-20 z-10 w-[min(32rem,calc(100%-2rem))]"
       />
 

@@ -130,6 +130,7 @@ model WorkflowStatus {
   color           String         @default("#6b7280")
   order           Int            @default(0)
   category        StatusCategory @default(todo)
+  isFinal         Boolean        @default(false)
   autoArchive     Boolean        @default(false)
   autoArchiveDays Int            @default(0)
 
@@ -178,6 +179,7 @@ model Task {
   priority    TaskPriority @default(none)
   dueDate     DateTime
   startDate   DateTime?
+  closedAt    DateTime?
   archivedAt  DateTime?
   alertAcknowledged Boolean @default(false)
   createdAt   DateTime     @default(now())

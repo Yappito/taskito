@@ -1,25 +1,52 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc-client";
+import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
 import { TaskCard } from "./task-card";
 import { TaskDetail } from "./task-detail";
+import { TaskViewFilters } from "./task-view-filters";
 import { Button } from "@/components/ui/button";
+import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 
 interface ArchivedTasksProps {
   projectId: string;
   statuses: Array<{ id: string; name: string; color: string }>;
+  tags: TaskFilterTagOption[];
 }
 
 /** View for archived tasks with the ability to unarchive */
-export function ArchivedTasks({ projectId, statuses }: ArchivedTasksProps) {
+export function ArchivedTasks({ projectId, statuses, tags }: ArchivedTasksProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const filters = useTaskViewFilters();
   const utils = trpc.useUtils();
+  const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
-  const { data, isLoading } = trpc.task.list.useQuery({
-    projectId,
-    archivedOnly: true,
-    limit: 100,
+  const taskListInput = useMemo(
+    () => ({
+      projectId,
+      archivedOnly: true,
+      limit: 100,
+      ...filters.queryFilters,
+    }),
+    [projectId, filters.queryFilters]
+  );
+
+  const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
+    placeholderData: (previousData) => previousData,
+  });
+
+  const savePreset = trpc.project.saveFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
+  });
+
+  const deletePreset = trpc.project.deleteFilterPreset.useMutation({
+    onSuccess: () => {
+      utils.project.filterPresets.invalidate({ projectId });
+    },
   });
 
   const unarchiveTask = trpc.task.unarchive.useMutation({
@@ -70,6 +97,40 @@ export function ArchivedTasks({ projectId, statuses }: ArchivedTasksProps) {
   return (
     <div className="flex">
       <div className="flex-1 p-4">
+        <TaskViewFilters
+          search={filters.search}
+          selectedTagIds={filters.selectedTagIds}
+          selectedAssigneeIds={filters.selectedAssigneeIds}
+          dueDateFrom={filters.dueDateFrom}
+          dueDateTo={filters.dueDateTo}
+          closedAtFrom={filters.closedAtFrom}
+          closedAtTo={filters.closedAtTo}
+          tags={tags}
+          assignees={people ?? []}
+          onSearchChange={filters.setSearch}
+          onToggleTag={filters.toggleTag}
+          onToggleAssignee={filters.toggleAssignee}
+          onDateFilterChange={(key, value) => {
+            if (key === "dueDateFrom") filters.setDueDateFrom(value);
+            if (key === "dueDateTo") filters.setDueDateTo(value);
+            if (key === "closedAtFrom") filters.setClosedAtFrom(value);
+            if (key === "closedAtTo") filters.setClosedAtTo(value);
+          }}
+          onApplyQuickDateFilter={filters.applyQuickDateFilter}
+          onClear={filters.clearFilters}
+          presets={presets as TaskFilterPreset[]}
+          onApplyPreset={filters.applyPreset}
+          onSavePreset={(name) => {
+            savePreset.mutate({
+              projectId,
+              preset: filters.buildPreset(name),
+            });
+          }}
+          onDeletePreset={(presetId) => deletePreset.mutate({ projectId, presetId })}
+          helperText="Filter archived work by due date or by when it was actually closed."
+          className="mb-4"
+        />
+
         <div className="mb-3 flex items-center justify-between">
           <h2
             className="text-sm font-semibold"

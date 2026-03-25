@@ -72,12 +72,12 @@ async function main() {
 
   // ─── Workflow Statuses ─────
   const statusDefs = [
-    { name: "Backlog", color: "#6b7280", order: 0, category: StatusCategory.backlog },
-    { name: "To Do", color: "#3b82f6", order: 1, category: StatusCategory.todo },
-    { name: "In Progress", color: "#f59e0b", order: 2, category: StatusCategory.active },
-    { name: "In Review", color: "#8b5cf6", order: 3, category: StatusCategory.active },
-    { name: "Done", color: "#10b981", order: 4, category: StatusCategory.done },
-    { name: "Cancelled", color: "#ef4444", order: 5, category: StatusCategory.cancelled },
+    { name: "Backlog", color: "#6b7280", order: 0, category: StatusCategory.backlog, isFinal: false },
+    { name: "To Do", color: "#3b82f6", order: 1, category: StatusCategory.todo, isFinal: false },
+    { name: "In Progress", color: "#f59e0b", order: 2, category: StatusCategory.active, isFinal: false },
+    { name: "In Review", color: "#8b5cf6", order: 3, category: StatusCategory.active, isFinal: false },
+    { name: "Done", color: "#10b981", order: 4, category: StatusCategory.done, isFinal: true },
+    { name: "Cancelled", color: "#ef4444", order: 5, category: StatusCategory.cancelled, isFinal: false },
   ];
 
   const statuses = await Promise.all(
@@ -232,6 +232,7 @@ async function main() {
         taskNumber: i + 1,
         title: taskTitles[i],
         statusId: statuses[statusIdx].id,
+        closedAt: statusDefs[statusIdx].isFinal ? dueDate : null,
         priority,
         dueDate,
         startDate,

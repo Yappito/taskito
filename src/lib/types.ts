@@ -65,6 +65,7 @@ export interface WorkflowStatus {
   color: string;
   order: number;
   category: StatusCategory;
+  isFinal: boolean;
 }
 
 /** Allowed state transition between two statuses */
@@ -85,6 +86,7 @@ export interface Task {
   priority: Priority;
   dueDate: Date;
   startDate: Date | null;
+  closedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -188,6 +190,7 @@ export interface TaskStatusSummary {
   name: string;
   color: string;
   category?: StatusCategory;
+  isFinal?: boolean;
 }
 
 /** Minimal tag relation shape used by task cards */
@@ -202,6 +205,7 @@ export interface TaskCardData {
   title: string;
   priority: Priority;
   dueDate: Date | string;
+  closedAt?: Date | string | null;
   statusId: string;
   status: TaskStatusSummary;
   tags: TaskTagSummary[];
@@ -226,6 +230,21 @@ export type TaskFilterAssigneeOption = TaskPersonSummary;
 
 /** Shared filter state for task views */
 export interface TaskViewFilters {
+  search: string;
+  tagIds: string[];
+  assigneeIds: string[];
+}
+
+export interface TaskDateFilterState {
+  dueDateFrom: string;
+  dueDateTo: string;
+  closedAtFrom: string;
+  closedAtTo: string;
+}
+
+export interface TaskFilterPreset extends TaskDateFilterState {
+  id: string;
+  name: string;
   search: string;
   tagIds: string[];
   assigneeIds: string[];
@@ -292,6 +311,7 @@ export interface UpsertWorkflowStatusInput {
   color: string;
   order: number;
   category: StatusCategory;
+  isFinal?: boolean;
 }
 
 /** Input for creating a workflow transition */
@@ -324,6 +344,8 @@ export interface TaskFilters {
   priorities?: Priority[];
   dueDateFrom?: Date;
   dueDateTo?: Date;
+  closedAtFrom?: Date;
+  closedAtTo?: Date;
   search?: string;
 }
 

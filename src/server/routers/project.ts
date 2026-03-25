@@ -9,6 +9,10 @@ const filterPresetSchema = z.object({
   search: z.string().default(""),
   tagIds: z.array(z.string().cuid()).default([]),
   assigneeIds: z.array(z.string().cuid()).default([]),
+  dueDateFrom: z.string().max(10).default(""),
+  dueDateTo: z.string().max(10).default(""),
+  closedAtFrom: z.string().max(10).default(""),
+  closedAtTo: z.string().max(10).default(""),
 });
 
 function getSavedFilterPresets(settings: unknown, projectId: string) {
@@ -16,6 +20,11 @@ function getSavedFilterPresets(settings: unknown, projectId: string) {
   const presetStore = (root.savedFilterPresets ?? {}) as Record<string, unknown>;
   const projectPresets = presetStore[projectId];
   return Array.isArray(projectPresets) ? projectPresets : [];
+}
+
+function normalizeFilterPreset(preset: unknown) {
+  const parsed = filterPresetSchema.safeParse(preset);
+  return parsed.success ? parsed.data : null;
 }
 
 /** Health check and project router */
@@ -119,7 +128,9 @@ export const projectRouter = createTRPCRouter({
           select: { settings: true },
         });
 
-        return getSavedFilterPresets(user.settings, input.projectId);
+        return getSavedFilterPresets(user.settings, input.projectId)
+          .map(normalizeFilterPreset)
+          .filter((preset): preset is z.infer<typeof filterPresetSchema> => preset !== null);
       }),
 
     /** Save or update a task filter preset for the current user */
@@ -337,12 +348,12 @@ export const projectRouter = createTRPCRouter({
 
         // Create default workflow statuses
         const defaultStatuses = [
-          { name: "Backlog", color: "#6b7280", order: 0, category: "backlog" as const },
-          { name: "To Do", color: "#3b82f6", order: 1, category: "todo" as const },
-          { name: "In Progress", color: "#f59e0b", order: 2, category: "active" as const },
-          { name: "In Review", color: "#8b5cf6", order: 3, category: "active" as const },
-          { name: "Done", color: "#10b981", order: 4, category: "done" as const },
-          { name: "Cancelled", color: "#ef4444", order: 5, category: "cancelled" as const },
+          { name: "Backlog", color: "#6b7280", order: 0, category: "backlog" as const, isFinal: false },
+          { name: "To Do", color: "#3b82f6", order: 1, category: "todo" as const, isFinal: false },
+          { name: "In Progress", color: "#f59e0b", order: 2, category: "active" as const, isFinal: false },
+          { name: "In Review", color: "#8b5cf6", order: 3, category: "active" as const, isFinal: false },
+          { name: "Done", color: "#10b981", order: 4, category: "done" as const, isFinal: true },
+          { name: "Cancelled", color: "#ef4444", order: 5, category: "cancelled" as const, isFinal: false },
         ];
 
         const statuses = await Promise.all(
