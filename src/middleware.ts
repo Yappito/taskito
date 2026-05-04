@@ -25,7 +25,6 @@ export default async function middleware(req: Request & { nextUrl: URL }) {
   });
   const isLoggedIn = !!token;
   const { pathname } = req.nextUrl;
-  const role = typeof token?.role === "string" ? token.role : undefined;
 
   // Public routes that don't require auth
   const publicRoutes = ["/login", "/api/auth"];
@@ -44,10 +43,6 @@ export default async function middleware(req: Request & { nextUrl: URL }) {
     const loginUrl = new URL("/login", req.nextUrl.origin);
     loginUrl.searchParams.set("callbackUrl", pathname);
     return NextResponse.redirect(loginUrl);
-  }
-
-  if (pathname === "/settings" && role !== "admin") {
-    return NextResponse.redirect(new URL("/", req.nextUrl.origin));
   }
 
   return NextResponse.next();

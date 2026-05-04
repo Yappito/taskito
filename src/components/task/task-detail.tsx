@@ -213,7 +213,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   if (isLoading) {
     return (
       <div
-        className="fixed inset-y-0 right-0 z-40 w-full max-w-md border-l p-6 shadow-xl"
+        className="fixed inset-y-0 right-0 z-40 w-full max-w-2xl border-l p-6 shadow-xl"
         style={{
           backgroundColor: "var(--color-surface)",
           borderColor: "var(--color-border)",
@@ -314,9 +314,22 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     setLinkTargetId("");
   }
 
+  const taskKey = (task as { taskNumber?: number }).taskNumber && (task as { project?: { key: string } }).project?.key
+    ? `${(task as { project?: { key: string } }).project!.key}-${(task as { taskNumber?: number }).taskNumber}`
+    : null;
+  const taskBody = (task as { body?: string | null }).body;
+  const creator = (task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator;
+  const assignee = (task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee;
+  const creatorLabel = creator?.name?.trim() || creator?.email || "Unknown";
+  const assigneeLabel = assignee?.name?.trim() || assignee?.email || "Unassigned";
+  const closedAt = (task as { closedAt?: Date | string | null }).closedAt;
+  const activityEvents = (task as { activityEvents?: Array<{ id: string; action: string; details?: Record<string, unknown> | null; createdAt: string | Date; actor?: { name: string | null; email: string } | null }> }).activityEvents ?? [];
+  const alertAcknowledged = (task as { alertAcknowledged?: boolean }).alertAcknowledged ?? false;
+  const hasLinks = task.sourceLinks.length > 0 || task.targetLinks.length > 0;
+
   return (
     <div
-      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l shadow-xl backdrop-blur-md"
+      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l shadow-xl backdrop-blur-md"
       style={{
         backgroundColor: "var(--color-surface)",
         borderColor: "var(--color-border)",
@@ -325,13 +338,37 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     >
       {/* Header */}
       <div
-        className="flex items-center justify-between border-b p-4"
+        className="border-b"
         style={{ borderColor: "var(--color-border)" }}
       >
-        <h2 className="text-lg font-semibold">Task Detail</h2>
-        <div className="flex gap-2">
+        <div className="flex items-start justify-between gap-4 p-5">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+              Task Detail
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {taskKey && (
+                <span className="rounded-full px-2.5 py-1 text-xs font-bold" style={{ backgroundColor: "var(--color-accent-muted)", color: "var(--color-accent)" }}>
+                  {taskKey}
+                </span>
+              )}
+              <StatusBadge name={task.status.name} color={task.status.color} />
+              <Badge variant="outline" className="capitalize">
+                {task.priority}
+              </Badge>
+            </div>
+            <h2 className="mt-3 text-2xl font-semibold leading-tight tracking-tight" style={{ color: "var(--color-text)" }}>
+              {editing ? "Edit task" : task.title}
+            </h2>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close task detail">
+            ✕
+          </Button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 px-5 pb-5">
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             onClick={() => (isWatching ? unwatchTask.mutate({ taskId }) : watchTask.mutate({ taskId }))}
             disabled={watchTask.isPending || unwatchTask.isPending}
@@ -339,7 +376,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
             {isWatching ? "Unwatch" : "Watch"}
           </Button>
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             onClick={() => duplicateTask.mutate({ id: taskId })}
             disabled={duplicateTask.isPending}
@@ -347,7 +384,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
             {duplicateTask.isPending ? "Duplicating..." : "Duplicate"}
           </Button>
           <Button
-            variant="ghost"
+            variant={editing ? "secondary" : "default"}
             size="sm"
             onClick={() => {
               setFormError(null);
@@ -356,9 +393,17 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           >
             {editing ? "Cancel" : "Edit"}
           </Button>
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            ✕
-          </Button>
+          {canArchiveNow && !editing && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => archiveTask.mutate({ id: taskId })}
+              disabled={archiveTask.isPending}
+            >
+              {archiveTask.isPending ? "Archiving..." : "Archive now"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -571,250 +616,211 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
             </div>
           </form>
         ) : (
-          <div className="space-y-4">
-            {/* Task key */}
-            {(task as { taskNumber?: number }).taskNumber && (task as { project?: { key: string } }).project?.key && (
-              <span
-                className="text-xs font-bold"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                {(task as { project?: { key: string } }).project!.key}-{(task as { taskNumber?: number }).taskNumber}
-              </span>
-            )}
-            <h3 className="text-xl font-semibold">{task.title}</h3>
-
-            <div className="flex flex-wrap gap-2">
-              <StatusBadge
-                name={task.status.name}
-                color={task.status.color}
-              />
-              <Badge variant="outline" className="capitalize">
-                {task.priority}
-              </Badge>
-            </div>
-
-            {canArchiveNow && (
-              <div
-                className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm"
-                style={{
-                  backgroundColor: "var(--color-bg-overlay)",
-                  borderColor: "var(--color-border)",
-                  color: "var(--color-text-secondary)",
-                }}
-              >
-                <span>
-                  This task is no longer active and can be archived now.
-                </span>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => archiveTask.mutate({ id: taskId })}
-                  disabled={archiveTask.isPending}
-                >
-                  {archiveTask.isPending ? "Archiving..." : "Archive now"}
-                </Button>
-              </div>
-            )}
-
+          <div className="flex flex-col gap-5">
             {dependencyMessages.length > 0 && (
               <div
-                className="rounded-lg border px-3 py-2 text-sm"
+                className="rounded-2xl border p-4 text-sm"
                 style={{
                   backgroundColor: "color-mix(in srgb, var(--color-danger) 8%, transparent)",
                   borderColor: "color-mix(in srgb, var(--color-danger) 30%, var(--color-border))",
                   color: "var(--color-text-secondary)",
                 }}
               >
-                {dependencyMessages.map((message) => (
-                  <div key={message}>{message}</div>
-                ))}
-              </div>
-            )}
-
-            <div
-              className="grid grid-cols-2 gap-2 text-sm"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              <div>
-                <span className="font-medium">Due:</span>{" "}
-                {new Date(task.dueDate).toLocaleDateString()}
-              </div>
-              {task.startDate && (
-                <div>
-                  <span className="font-medium">Start:</span>{" "}
-                  {new Date(task.startDate).toLocaleDateString()}
+                <div className="font-semibold" style={{ color: "var(--color-danger)" }}>
+                  Dependency warning
                 </div>
-              )}
-              {(task as { closedAt?: Date | string | null }).closedAt && (
-                <div>
-                  <span className="font-medium">Closed:</span>{" "}
-                  {new Date((task as { closedAt?: Date | string | null }).closedAt as Date | string).toLocaleDateString()}
-                </div>
-              )}
-            </div>
-
-            <div
-              className="grid grid-cols-1 gap-2 text-sm"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              <div>
-                <span className="font-medium">Created by:</span>{" "}
-                <span className="inline-flex max-w-full items-center gap-2 align-middle">
-                  {(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator ? (
-                    <>
-                      <Avatar
-                        name={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.name}
-                        email={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.email}
-                        image={(task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator?.image}
-                        size="xs"
-                      />
-                      <span className="truncate">
-                        {(task as { creator?: { name: string | null; email: string } | null }).creator?.name?.trim() ||
-                          (task as { creator?: { name: string | null; email: string } | null }).creator?.email}
-                      </span>
-                    </>
-                  ) : (
-                    <span>Unknown</span>
-                  )}
-                </span>
-              </div>
-              <div>
-                <span className="font-medium">Assigned to:</span>{" "}
-                <span className="inline-flex max-w-full items-center gap-2 align-middle">
-                  {(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee ? (
-                    <>
-                      <Avatar
-                        name={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.name}
-                        email={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.email}
-                        image={(task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee?.image}
-                        size="xs"
-                      />
-                      <span className="truncate">
-                        {(task as { assignee?: { name: string | null; email: string } | null }).assignee?.name?.trim() ||
-                          (task as { assignee?: { name: string | null; email: string } | null }).assignee?.email}
-                      </span>
-                    </>
-                  ) : (
-                    <span>Unassigned</span>
-                  )}
-                </span>
-              </div>
-            </div>
-
-            {/* Alert acknowledgement toggle */}
-            <label
-              className="flex items-center gap-2 text-sm cursor-pointer"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              <input
-                type="checkbox"
-                className="rounded"
-                checked={(task as { alertAcknowledged?: boolean }).alertAcknowledged ?? false}
-                onChange={(e) => {
-                  updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
-                }}
-              />
-              <span>Acknowledge due-date alert</span>
-            </label>
-
-            {/* Body / Description */}
-            {(task as { body?: string | null }).body && (
-              <div>
-                <h4
-                  className="mb-1 text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Description
-                </h4>
-                <div
-                  className="whitespace-pre-wrap rounded-lg p-3 text-sm"
-                  style={{
-                    backgroundColor: "var(--color-bg-overlay)",
-                    color: "var(--color-text)",
-                    border: "1px solid var(--color-border)",
-                  }}
-                >
-                  {(task as { body?: string | null }).body}
-                </div>
-              </div>
-            )}
-
-            {task.tags.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
-                  <Badge
-                    key={tag.id}
-                    style={
-                      {
-                        backgroundColor: `${tag.color}20`,
-                        color: tag.color,
-                      } as React.CSSProperties
-                    }
-                  >
-                    {tag.name}
-                  </Badge>
-                ))}
-              </div>
-            )}
-
-            {task.customFieldValues.length > 0 && (
-              <div>
-                <h4
-                  className="mb-1 text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Custom Fields
-                </h4>
-                <div className="space-y-2">
-                  {task.customFieldValues.map((fieldValue) => (
-                    <div
-                      key={fieldValue.id}
-                      className="rounded-lg border p-3 text-sm"
-                      style={{
-                        backgroundColor: "var(--color-bg-overlay)",
-                        borderColor: "var(--color-border)",
-                      }}
-                    >
-                      <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-                        {fieldValue.customField.name}
-                      </div>
-                      <div>{fieldValue.value == null ? "—" : String(fieldValue.value)}</div>
-                    </div>
+                <div className="mt-2 space-y-1">
+                  {dependencyMessages.map((message) => (
+                    <div key={message}>{message}</div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Dependencies */}
-            <div>
-              <div className="mb-2 flex items-center justify-between">
+            <div className="grid gap-3 text-sm sm:grid-cols-3">
+              <div
+                className="rounded-2xl border p-4"
+                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+              >
+                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                  Due
+                </div>
+                <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
+                  {new Date(task.dueDate).toLocaleDateString()}
+                </div>
+              </div>
+              <div
+                className="rounded-2xl border p-4"
+                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+              >
+                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                  Start
+                </div>
+                <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
+                  {task.startDate ? new Date(task.startDate).toLocaleDateString() : "Not set"}
+                </div>
+              </div>
+              <div
+                className="rounded-2xl border p-4"
+                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+              >
+                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                  Assignee
+                </div>
+                <div className="mt-2 flex min-w-0 items-center gap-2 font-semibold" style={{ color: "var(--color-text)" }}>
+                  {assignee && <Avatar name={assignee.name} email={assignee.email} image={assignee.image} size="xs" />}
+                  <span className="truncate">{assigneeLabel}</span>
+                </div>
+              </div>
+            </div>
+
+            <label
+              className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border p-4 text-sm"
+              style={{
+                backgroundColor: "var(--color-bg-overlay)",
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              <span className="min-w-0">
+                <span className="block font-medium" style={{ color: "var(--color-text)" }}>
+                  Due-date alert
+                </span>
+                <span className="mt-1 block text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {alertAcknowledged ? "Acknowledged for this task" : "Not acknowledged yet"}
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                className="rounded"
+                checked={alertAcknowledged}
+                onChange={(e) => {
+                  updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
+                }}
+              />
+            </label>
+
+            {taskBody && (
+              <section
+                className="rounded-2xl border p-4"
+                style={{
+                  backgroundColor: "var(--color-bg-overlay)",
+                  borderColor: "var(--color-border)",
+                }}
+              >
                 <h4
-                  className="text-sm font-medium"
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Description
+                </h4>
+                <div
+                  className="mt-3 whitespace-pre-wrap text-sm leading-6"
+                  style={{
+                    color: "var(--color-text)",
+                  }}
+                >
+                  {taskBody}
+                </div>
+              </section>
+            )}
+
+            {(task.tags.length > 0 || task.customFieldValues.length > 0) && (
+              <section
+                className="rounded-2xl border p-4"
+                style={{
+                  backgroundColor: "var(--color-surface)",
+                  borderColor: "var(--color-border)",
+                }}
+              >
+                <h4
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Details
+                </h4>
+                {task.tags.length > 0 && (
+                  <div className="mt-3">
+                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                      Tags
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
+                        <Badge
+                          key={tag.id}
+                          style={
+                            {
+                              backgroundColor: `${tag.color}20`,
+                              color: tag.color,
+                            } as React.CSSProperties
+                          }
+                        >
+                          {tag.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {task.customFieldValues.length > 0 && (
+                  <div className="mt-4">
+                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                      Custom Fields
+                    </div>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {task.customFieldValues.map((fieldValue) => (
+                        <div
+                          key={fieldValue.id}
+                          className="rounded-xl border p-3 text-sm"
+                          style={{
+                            backgroundColor: "var(--color-bg-overlay)",
+                            borderColor: "var(--color-border)",
+                          }}
+                        >
+                          <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                            {fieldValue.customField.name}
+                          </div>
+                          <div className="mt-1" style={{ color: "var(--color-text)" }}>
+                            {fieldValue.value == null ? "—" : String(fieldValue.value)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
+            <section
+              className="rounded-2xl border p-4"
+              style={{
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+              }}
+            >
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h4
+                  className="text-sm font-semibold"
                   style={{ color: "var(--color-text-secondary)" }}
                 >
                   Dependencies
                 </h4>
-                <button
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
                   onClick={() => setShowLinkForm(!showLinkForm)}
-                  className="rounded-md px-2 py-0.5 text-xs font-medium transition-colors"
-                  style={{
-                    backgroundColor: "var(--color-accent-muted)",
-                    color: "var(--color-accent)",
-                  }}
                 >
-                  {showLinkForm ? "Cancel" : "+ Add"}
-                </button>
+                  {showLinkForm ? "Cancel" : "Add link"}
+                </Button>
               </div>
 
-              {/* Add link form */}
               {showLinkForm && (
                 <form
                   onSubmit={handleAddLink}
-                  className="mb-3 space-y-2 rounded-lg p-3"
+                  className="mb-3 space-y-2 rounded-2xl border p-3"
                   style={{
                     backgroundColor: "var(--color-bg-overlay)",
-                    border: "1px solid var(--color-border)",
+                    borderColor: "var(--color-border)",
                   }}
                 >
                   <Select name="linkType" defaultValue="blocks">
@@ -840,8 +846,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </form>
               )}
 
-              {/* Existing links */}
-              <div className="space-y-1 text-sm">
+              <div className="space-y-2 text-sm">
                 {task.sourceLinks.map(
                   (link: {
                     id: string;
@@ -855,30 +860,38 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   }) => (
                     <div
                       key={link.id}
-                      className="flex items-center justify-between rounded-md px-2 py-1"
-                      style={{ backgroundColor: "var(--color-bg-overlay)" }}
+                      className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
+                      style={{
+                        backgroundColor: "var(--color-bg-overlay)",
+                        borderColor: "var(--color-border)",
+                      }}
                     >
-                      <span style={{ color: "var(--color-text-secondary)" }}>
-                        <span
-                          className="mr-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase"
-                          style={{
-                            backgroundColor: "var(--color-accent-muted)",
-                            color: "var(--color-accent)",
-                          }}
-                        >
-                          {link.linkType}
-                        </span>
-                        →{" "}
-                        <span className="font-semibold" style={{ color: "var(--color-text-muted)" }}>
-                          {link.targetTask.project.key}-{link.targetTask.taskNumber}
-                        </span>{" "}
-                        <span className="text-xs">{link.targetTask.title}</span>
-                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                            style={{
+                              backgroundColor: "var(--color-accent-muted)",
+                              color: "var(--color-accent)",
+                            }}
+                          >
+                            {link.linkType}
+                          </span>
+                          <span className="font-semibold" style={{ color: "var(--color-text)" }}>
+                            {link.targetTask.project.key}-{link.targetTask.taskNumber}
+                          </span>
+                        </div>
+                        <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
+                          {link.targetTask.title}
+                        </div>
+                      </div>
                       <button
+                        type="button"
                         onClick={() => removeLink.mutate({ id: link.id })}
-                        className="ml-2 text-xs opacity-50 hover:opacity-100"
+                        className="text-xs opacity-50 hover:opacity-100"
                         style={{ color: "var(--color-danger)" }}
                         title="Remove link"
+                        aria-label={`Remove link to ${link.targetTask.project.key}-${link.targetTask.taskNumber}`}
                       >
                         ✕
                       </button>
@@ -898,91 +911,69 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   }) => (
                     <div
                       key={link.id}
-                      className="flex items-center justify-between rounded-md px-2 py-1"
-                      style={{ backgroundColor: "var(--color-bg-overlay)" }}
+                      className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
+                      style={{
+                        backgroundColor: "var(--color-bg-overlay)",
+                        borderColor: "var(--color-border)",
+                      }}
                     >
-                      <span style={{ color: "var(--color-text-secondary)" }}>
-                        ←{" "}
-                        <span className="font-semibold" style={{ color: "var(--color-text-muted)" }}>
-                          {link.sourceTask.project.key}-{link.sourceTask.taskNumber}
-                        </span>{" "}
-                        <span className="text-xs">{link.sourceTask.title}</span>
-                        <span
-                          className="ml-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase"
-                          style={{
-                            backgroundColor: "var(--color-accent-muted)",
-                            color: "var(--color-accent)",
-                          }}
-                        >
-                          {link.linkType}
-                        </span>
-                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                            style={{
+                              backgroundColor: "var(--color-accent-muted)",
+                              color: "var(--color-accent)",
+                            }}
+                          >
+                            {link.linkType}
+                          </span>
+                          <span className="font-semibold" style={{ color: "var(--color-text)" }}>
+                            {link.sourceTask.project.key}-{link.sourceTask.taskNumber}
+                          </span>
+                        </div>
+                        <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
+                          {link.sourceTask.title}
+                        </div>
+                      </div>
                       <button
+                        type="button"
                         onClick={() => removeLink.mutate({ id: link.id })}
-                        className="ml-2 text-xs opacity-50 hover:opacity-100"
+                        className="text-xs opacity-50 hover:opacity-100"
                         style={{ color: "var(--color-danger)" }}
                         title="Remove link"
+                        aria-label={`Remove link from ${link.sourceTask.project.key}-${link.sourceTask.taskNumber}`}
                       >
                         ✕
                       </button>
                     </div>
                   )
                 )}
-                {task.sourceLinks.length === 0 &&
-                  task.targetLinks.length === 0 && (
-                    <p
-                      className="text-xs italic"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      No dependencies yet
-                    </p>
-                  )}
-              </div>
-            </div>
-
-            {/* Comments */}
-            <div>
-              <h4
-                className="mb-2 text-sm font-medium"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Activity
-              </h4>
-              <div className="space-y-2">
-                {((task as { activityEvents?: Array<{ id: string; action: string; details?: Record<string, unknown> | null; createdAt: string | Date; actor?: { name: string | null; email: string } | null }> }).activityEvents ?? []).map((event) => (
-                  <div
-                    key={event.id}
-                    className="rounded-md p-2 text-sm"
-                    style={{ backgroundColor: "var(--color-bg-overlay)" }}
+                {!hasLinks && (
+                  <p
+                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
                   >
-                    <div
-                      className="flex justify-between gap-3 text-xs"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      <span>
-                        {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
-                      </span>
-                      <span>{new Date(event.createdAt).toLocaleString()}</span>
-                    </div>
-                  </div>
-                ))}
-                {((task as { activityEvents?: unknown[] }).activityEvents?.length ?? 0) === 0 && (
-                  <p className="text-xs italic" style={{ color: "var(--color-text-muted)" }}>
-                    No activity recorded yet
+                    No dependencies yet
                   </p>
                 )}
               </div>
-            </div>
+            </section>
 
-            {/* Comments */}
-            <div>
+            <section
+              className="rounded-2xl border p-4"
+              style={{
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+              }}
+            >
               <h4
-                className="mb-2 text-sm font-medium"
+                className="text-sm font-semibold"
                 style={{ color: "var(--color-text-secondary)" }}
               >
                 Comments
               </h4>
-              <div className="space-y-2">
+              <div className="mt-3 space-y-2">
                 {task.comments.map(
                   (comment: {
                     id: string;
@@ -998,8 +989,11 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   }) => (
                     <div
                       key={comment.id}
-                      className="rounded-md p-2 text-sm"
-                      style={{ backgroundColor: "var(--color-bg-overlay)" }}
+                      className="rounded-xl border p-3 text-sm"
+                      style={{
+                        backgroundColor: "var(--color-bg-overlay)",
+                        borderColor: "var(--color-border)",
+                      }}
                     >
                       <div
                         className="flex justify-between text-xs"
@@ -1050,6 +1044,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                       )}
                     </div>
                   )
+                )}
+                {task.comments.length === 0 && (
+                  <p
+                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                  >
+                    No comments yet
+                  </p>
                 )}
               </div>
               <form onSubmit={handleAddComment} className="mt-3 space-y-2">
@@ -1109,7 +1111,102 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   </Button>
                 </div>
               </form>
-            </div>
+            </section>
+
+            <section
+              className="rounded-2xl border p-4"
+              style={{
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+              }}
+            >
+              <h4
+                className="text-sm font-semibold"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Activity
+              </h4>
+              <div className="mt-3 space-y-2">
+                {activityEvents.map((event) => (
+                  <div
+                    key={event.id}
+                    className="rounded-xl border p-3 text-sm"
+                    style={{
+                      backgroundColor: "var(--color-bg-overlay)",
+                      borderColor: "var(--color-border)",
+                    }}
+                  >
+                    <div
+                      className="flex justify-between gap-3 text-xs"
+                      style={{ color: "var(--color-text-muted)" }}
+                    >
+                      <span>
+                        {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
+                      </span>
+                      <span className="shrink-0">{new Date(event.createdAt).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+                {activityEvents.length === 0 && (
+                  <p
+                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                  >
+                    No activity recorded yet
+                  </p>
+                )}
+              </div>
+            </section>
+
+            <section
+              className="rounded-2xl border p-4 text-sm"
+              style={{
+                backgroundColor: "var(--color-bg-overlay)",
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              <h4
+                className="text-sm font-semibold"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Record
+              </h4>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <span className="font-medium">Created by:</span>{" "}
+                  <span className="inline-flex max-w-full items-center gap-2 align-middle">
+                    {creator ? (
+                      <>
+                        <Avatar
+                          name={creator.name}
+                          email={creator.email}
+                          image={creator.image}
+                          size="xs"
+                        />
+                        <span className="truncate">{creatorLabel}</span>
+                      </>
+                    ) : (
+                      <span>Unknown</span>
+                    )}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-medium">Created:</span>{" "}
+                  {new Date(task.createdAt).toLocaleString()}
+                </div>
+                <div>
+                  <span className="font-medium">Updated:</span>{" "}
+                  {new Date(task.updatedAt).toLocaleString()}
+                </div>
+                {closedAt && (
+                  <div>
+                    <span className="font-medium">Closed:</span>{" "}
+                    {new Date(closedAt).toLocaleString()}
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         )}
       </div>

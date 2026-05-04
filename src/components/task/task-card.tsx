@@ -17,19 +17,19 @@ interface TaskCardProps {
 }
 
 const priorityColors: Record<string, string> = {
-  urgent: "var(--color-danger)",
-  high: "#f97316",
-  medium: "#eab308",
-  low: "var(--color-accent)",
+  urgent: "var(--color-priority-urgent)",
+  high: "var(--color-priority-high)",
+  medium: "var(--color-priority-medium)",
+  low: "var(--color-priority-low)",
   none: "var(--color-text-muted)",
 };
 
-const priorityIcons: Record<string, string> = {
-  urgent: "⬆⬆",
-  high: "⬆",
-  medium: "➡",
-  low: "⬇",
-  none: "",
+const priorityLabels: Record<string, string> = {
+  urgent: "Urgent",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  none: "None",
 };
 
 function getDependencyMessages(task: TaskCardData) {
@@ -60,17 +60,33 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
     <div
       onClick={onClick}
       className={cn(
-        "cursor-pointer rounded-lg border p-3 shadow-sm transition-colors transition-shadow",
+        "group cursor-pointer overflow-hidden rounded-2xl border p-3.5 transition-colors transition-shadow hover:shadow-[var(--shadow-md)]",
         alertLevel === "critical" && "pulse-critical",
         alertLevel === "warning" && "pulse-warning",
         className
       )}
       style={{
         backgroundColor: "var(--color-surface)",
-        borderColor: "var(--color-border)",
+        borderColor: isOverdue ? "color-mix(in srgb, var(--color-danger) 42%, var(--color-border))" : "var(--color-border)",
         color: "var(--color-text)",
+        boxShadow: "var(--shadow-sm)",
       }}
     >
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <StatusBadge name={task.status.name} color={task.status.color} />
+        {task.priority !== "none" && (
+          <span
+            className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em]"
+            style={{
+              backgroundColor: `color-mix(in srgb, ${priorityColors[task.priority]} 14%, transparent)`,
+              color: priorityColors[task.priority],
+            }}
+          >
+            {priorityLabels[task.priority]}
+          </span>
+        )}
+      </div>
+
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-start gap-2">
           {leadingContent}
@@ -83,20 +99,14 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
               {taskKey}
             </span>
           )}
-          <h3 className="text-sm font-medium line-clamp-2">
+          <h3 className="line-clamp-2 text-sm font-semibold leading-5 transition-colors group-hover:text-[var(--color-accent)]">
             {task.title}
           </h3>
           </div>
         </div>
-        {task.priority !== "none" && (
-          <span className="text-xs shrink-0" style={{ color: priorityColors[task.priority] }}>
-            {priorityIcons[task.priority]}
-          </span>
-        )}
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
-        <StatusBadge name={task.status.name} color={task.status.color} />
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
         {task.tags.slice(0, 3).map(({ tag }) => (
           <Badge
             key={tag.id}
@@ -125,12 +135,15 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
         </div>
       )}
 
-      <div className="mt-2 flex items-center justify-between">
+      <div className="mt-3 flex items-center justify-between border-t pt-3" style={{ borderColor: "var(--color-border-muted)" }}>
         <span
-          className={cn("text-xs", isOverdue ? "font-medium" : "")}
-          style={{ color: isOverdue ? "var(--color-danger)" : "var(--color-text-muted)" }}
+          className={cn("rounded-full px-2 py-1 text-[11px]", isOverdue ? "font-semibold" : "")}
+          style={{
+            backgroundColor: isOverdue ? "var(--color-danger-muted)" : "var(--color-bg-muted)",
+            color: isOverdue ? "var(--color-danger)" : "var(--color-text-muted)",
+          }}
         >
-          {dueDate.toLocaleDateString()}
+          {isOverdue ? "Overdue" : "Due"} {dueDate.toLocaleDateString()}
         </span>
         <div className="flex max-w-[8.75rem] items-center gap-1.5 text-right" title={assigneeLabel}>
           {task.assignee && (

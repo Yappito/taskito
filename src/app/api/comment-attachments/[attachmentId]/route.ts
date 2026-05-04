@@ -1,11 +1,12 @@
-import { basename } from "node:path";
-
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { requireProjectAccess } from "@/server/authz";
-import { readStoredCommentAttachment } from "@/server/services/comment-attachments";
+import {
+  getCommentAttachmentResponseHeaders,
+  readStoredCommentAttachment,
+} from "@/server/services/comment-attachments";
 
 export async function GET(
   _request: Request,
@@ -46,11 +47,14 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  const safeHeaders = getCommentAttachmentResponseHeaders(attachment.originalName, attachment.mimeType, file);
+
   return new NextResponse(file, {
     headers: {
-      "Content-Type": attachment.mimeType,
-      "Content-Disposition": `inline; filename="${basename(attachment.originalName).replaceAll('"', "")}"`,
+      "Content-Type": safeHeaders.contentType,
+      "Content-Disposition": safeHeaders.contentDisposition,
       "Cache-Control": "private, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }

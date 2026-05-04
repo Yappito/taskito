@@ -14,11 +14,13 @@ test("login flow — seeded user signs in and lands on dashboard", async ({ page
   // Submit the form
   await page.click('button[type="submit"]');
 
-  // Wait for navigation away from /login — should land on dashboard (/default)
-  await page.waitForURL("**/default", {
+  // Wait for navigation away from /login; the seeded user's project slug can vary by local DB state.
+  await page.waitForURL((url) => url.pathname !== "/login", {
     timeout: 15_000,
   });
 
-  // Assert we're on the dashboard (project slug route)
-  expect(page.url()).toContain("/default");
+  // Assert we're on a dashboard project slug route.
+  const url = new URL(page.url());
+  expect(url.pathname).toMatch(/^\/[^/]+$/);
+  expect(["/login", "/no-access", "/settings"]).not.toContain(url.pathname);
 });

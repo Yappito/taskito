@@ -3,6 +3,7 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, resetRateLimit } from "@/lib/rate-limit";
+import { getClientIpFromHeaders } from "@/lib/request-ip";
 
 const productionSecret = process.env.AUTH_SECRET;
 const invalidSecrets = new Set([
@@ -16,10 +17,6 @@ if (isProductionRuntime) {
   if (!productionSecret || productionSecret.length < 32 || invalidSecrets.has(productionSecret)) {
     throw new Error("AUTH_SECRET must be set to a cryptographically strong value of at least 32 characters in production");
   }
-}
-
-function getClientIp(request: Request): string {
-  return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
@@ -40,7 +37,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!credentials?.email || !credentials?.password) return null;
 
         const email = String(credentials.email).toLowerCase();
-        const ip = getClientIp(request);
+        const ip = getClientIpFromHeaders(request.headers);
         const ipAttempt = consumeRateLimit("login:ip", ip, {
           maxAttempts: 10,
           windowMs: 15 * 60 * 1000,

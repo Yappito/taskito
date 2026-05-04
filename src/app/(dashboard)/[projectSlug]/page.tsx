@@ -87,79 +87,120 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
   const statuses = project.statuses ?? [];
   const projectSettings = (project as { settings?: Record<string, unknown> | null }).settings ?? null;
+  const viewDescriptions: Record<typeof view, string> = {
+    list: "Scan, sort, and bulk edit tasks.",
+    board: "Move work through delivery stages.",
+    graph: "Inspect schedule and dependency risk.",
+    archive: "Review completed and archived work.",
+  };
 
   return (
-    <div>
-      {/* Toolbar */}
+    <div className="min-h-[calc(100vh-4rem)]">
       <div
-        className="flex items-center justify-between border-b px-4 py-2"
+        className="border-b px-4 py-4 lg:px-6"
         style={{
-          backgroundColor: "var(--color-bg-elevated)",
+          background:
+            "linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-elevated)) 0%, var(--color-bg-elevated) 44%, var(--color-bg) 100%)",
           borderColor: "var(--color-border)",
         }}
       >
-        <div className="flex items-center gap-2">
-          <ProjectSwitcher
-            currentProjectSlug={project.slug}
-            projects={(projects ?? []).map((item) => ({
-              id: item.id,
-              name: item.name,
-              slug: item.slug,
-              key: item.key,
-            }))}
-            disabled={projectsLoading || !projects?.length}
-          />
-          <div
-            className="ml-4 flex rounded-lg p-0.5"
-            style={{ backgroundColor: "var(--color-bg-muted)" }}
-          >
-            {(["list", "board", "graph", "archive"] as const).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={cn(
-                  "rounded-md px-3 py-1 text-sm capitalize transition-colors",
-                  view === v ? "font-medium" : ""
-                )}
-                style={
-                  view === v
-                    ? {
-                        backgroundColor: "var(--color-surface)",
-                        color: "var(--color-text)",
-                        boxShadow: "var(--shadow-sm)",
-                      }
-                    : { color: "var(--color-text-secondary)" }
-                }
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <ProjectSwitcher
+                currentProjectSlug={project.slug}
+                projects={(projects ?? []).map((item) => ({
+                  id: item.id,
+                  name: item.name,
+                  slug: item.slug,
+                  key: item.key,
+                }))}
+                disabled={projectsLoading || !projects?.length}
+              />
+              <span
+                className="rounded-full px-2.5 py-1 text-xs font-semibold"
+                style={{ backgroundColor: "var(--color-accent-muted)", color: "var(--color-accent)" }}
               >
-                {v}
-              </button>
-            ))}
+                {project.key}
+              </span>
+              <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                /{project.slug}
+              </span>
+            </div>
+            <h1 className="mt-3 truncate text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>
+              {project.name}
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+              {project.description || viewDescriptions[view]}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {statuses.slice(0, 6).map((status) => (
+                <span
+                  key={status.id}
+                  className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text-secondary)" }}
+                >
+                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />
+                  {status.name}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 md:flex-row md:items-center xl:justify-end">
+            <div
+              className="grid grid-cols-4 rounded-2xl p-1"
+              style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
+            >
+              {(["list", "board", "graph", "archive"] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={cn(
+                    "rounded-xl px-3 py-2 text-sm capitalize transition-colors",
+                    view === v ? "font-semibold" : ""
+                  )}
+                  style={
+                    view === v
+                      ? {
+                          backgroundColor: "var(--color-surface)",
+                          color: "var(--color-text)",
+                          boxShadow: "var(--shadow-sm)",
+                        }
+                      : { color: "var(--color-text-secondary)" }
+                  }
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+            <QuickAdd
+              projectId={project.id}
+              statuses={statuses}
+              tags={tags ?? []}
+            />
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <QuickAdd
-            projectId={project.id}
-            statuses={statuses}
-            tags={tags ?? []}
-          />
+
+        <div className="mt-4 flex flex-wrap gap-2">
           <Link
             href={`/${projectSlug}/settings/workflow`}
-            className="rounded px-2 py-1 text-xs transition-colors"
-            style={{ color: "var(--color-text-muted)" }}
+            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
           >
             Workflow
           </Link>
           <Link
             href={`/${projectSlug}/settings/tags`}
-            className="rounded px-2 py-1 text-xs transition-colors"
-            style={{ color: "var(--color-text-muted)" }}
+            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
           >
             Tags
           </Link>
           <Link
             href={`/${projectSlug}/settings/custom-fields`}
-            className="rounded px-2 py-1 text-xs transition-colors"
-            style={{ color: "var(--color-text-muted)" }}
+            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
           >
             Custom Fields
           </Link>

@@ -399,7 +399,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
         </div>
       )}
 
-      <div className="flex flex-1 gap-4 overflow-x-auto p-4">
+      <div className="flex flex-1 gap-5 overflow-x-auto p-4 lg:p-6">
         {statuses.map((status) => {
           const columnTasks = tasks.filter(
             (t) => t.statusId === status.id
@@ -412,22 +412,24 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
               data-board-column
               data-board-status-id={status.id}
               data-board-status-name={status.name}
-              className="w-72 shrink-0 rounded-lg p-3"
+              className="w-80 shrink-0 rounded-3xl p-3.5"
               style={{
                 backgroundColor: isOver
-                  ? "var(--color-surface-hover)"
-                  : "var(--color-bg-muted)",
-                border: `2px ${isOver ? "dashed" : "solid"} ${isOver ? status.color : "transparent"}`,
+                  ? "color-mix(in srgb, var(--color-accent) 10%, var(--color-surface))"
+                  : "color-mix(in srgb, var(--color-bg-muted) 78%, var(--color-surface))",
+                border: `1px ${isOver ? "dashed" : "solid"} ${isOver ? status.color : "var(--color-border)"}`,
                 outline: isOver
                   ? "none"
-                  : "1px solid var(--color-border-muted)",
-                transition: "background-color 150ms, border-color 150ms",
+                  : "1px solid color-mix(in srgb, var(--color-surface) 60%, transparent)",
+                boxShadow: isOver ? "var(--shadow-md)" : "var(--shadow-sm)",
+                transition: "background-color 150ms, border-color 150ms, box-shadow 150ms",
               }}
             >
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+                <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span
-                    className="h-3 w-3 rounded-full"
+                    className="h-3 w-3 rounded-full shadow-sm"
                     style={{ backgroundColor: status.color }}
                   />
                   <h3
@@ -446,9 +448,19 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                 >
                   {columnTasks.length}
                 </span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full" style={{ backgroundColor: "var(--color-bg-muted)" }}>
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${Math.min(100, Math.max(8, columnTasks.length * 8))}%`,
+                      backgroundColor: status.color,
+                    }}
+                  />
+                </div>
               </div>
 
-              <div className="space-y-2" style={{ minHeight: "48px" }}>
+              <div className="space-y-3" style={{ minHeight: "64px" }}>
                 {columnTasks.map((task) => (
                   <div
                     key={task.id}
@@ -492,13 +504,22 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                 ))}
                 {columnTasks.length === 0 && draggingTaskId && (
                   <div
-                    className="flex h-12 items-center justify-center rounded-lg border-2 border-dashed text-xs"
+                    className="flex h-20 items-center justify-center rounded-2xl border-2 border-dashed text-xs font-medium"
                     style={{
                       borderColor: "var(--color-border)",
                       color: "var(--color-text-muted)",
                     }}
                   >
                     Drop here
+                  </div>
+                )}
+                {columnTasks.length === 0 && !draggingTaskId && (
+                  <div
+                    className="flex h-24 flex-col items-center justify-center rounded-2xl border border-dashed px-4 text-center text-xs"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)", backgroundColor: "var(--color-bg-overlay)" }}
+                  >
+                    <span className="font-medium">No tasks here</span>
+                    <span className="mt-1">Drop work into {status.name} when it is ready.</span>
                   </div>
                 )}
               </div>

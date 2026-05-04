@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import { requireProjectAccess } from "@/server/authz";
@@ -35,9 +36,28 @@ export const customFieldRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
-      });
+      if (input.id) {
+        const existingField = await ctx.prisma.customField.findUnique({
+          where: { id: input.id },
+          select: { projectId: true },
+        });
+
+        if (!existingField) {
+          throw new TRPCError({ code: "NOT_FOUND" });
+        }
+
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, existingField.projectId, {
+          minimumRole: "owner",
+        });
+
+        if (existingField.projectId !== input.projectId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Custom field cannot be moved between projects" });
+        }
+      } else {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+          minimumRole: "owner",
+        });
+      }
 
       const normalizedOptions =
         input.type === "select"

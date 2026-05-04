@@ -21,7 +21,7 @@ export default function WorkflowSettingsPage({
   const { data: project } = trpc.project.bySlug.useQuery({ slug: projectSlug });
 
   if (!project) {
-    return <div className="p-8 text-gray-500">Loading...</div>;
+    return <div className="p-8" style={{ color: "var(--color-text-muted)" }}>Loading...</div>;
   }
 
   return <WorkflowSettingsContent projectId={project.id} projectSettings={(project as { settings?: Record<string, unknown> | null }).settings ?? null} />;
@@ -86,17 +86,24 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
   }
 
   return (
-    <div className="mx-auto max-w-4xl p-6 space-y-8">
-      <h1 className="text-2xl font-bold">Workflow Settings</h1>
+    <div className="mx-auto max-w-6xl space-y-8 px-4 py-8 lg:px-6">
+      <div className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", background: "linear-gradient(135deg, color-mix(in srgb, var(--color-success) 10%, var(--color-surface)) 0%, var(--color-surface) 60%)", boxShadow: "var(--shadow-sm)" }}>
+        <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>Delivery system</p>
+        <h1 className="mt-2 text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>Workflow Settings</h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+          Configure stages, valid movement rules, closure behavior, and visual due-date alerts.
+        </p>
+      </div>
 
       {/* Status List */}
-      <section>
-        <h2 className="text-lg font-semibold mb-4">Statuses</h2>
+      <section className="rounded-3xl border p-5" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
+        <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>Statuses</h2>
         <div className="space-y-2">
           {statuses.map((status, index) => (
             <div
               key={status.id}
-              className="flex items-center gap-3 rounded-lg border p-3"
+              className="flex items-center gap-3 rounded-2xl border p-3"
+              style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
             >
               <div
                 className="h-4 w-4 rounded-full"
@@ -117,17 +124,17 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                 />
               ) : (
                 <>
-                  <span className="flex-1 font-medium">{status.name}</span>
-                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
+                  <span className="flex-1 font-medium" style={{ color: "var(--color-text)" }}>{status.name}</span>
+                  <span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-secondary)" }}>
                     {status.category}
                   </span>
                   {(status as { isFinal?: boolean }).isFinal && (
-                    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
+                    <span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: "var(--color-success-muted)", color: "var(--color-success)" }}>
                       final stage
                     </span>
                   )}
                   {(status as { autoArchive?: boolean }).autoArchive && (
-                    <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                    <span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: "var(--color-warning-muted)", color: "var(--color-warning)" }}>
                       auto-archive{(status as { autoArchiveDays?: number }).autoArchiveDays ? ` (${(status as { autoArchiveDays?: number }).autoArchiveDays}d)` : ""}
                     </span>
                   )}
@@ -135,20 +142,23 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                     <button
                       onClick={() => moveStatus(index, -1)}
                       disabled={index === 0}
-                      className="rounded p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30"
+                      className="rounded p-1 disabled:opacity-30"
+                      style={{ color: "var(--color-text-muted)" }}
                     >
                       ↑
                     </button>
                     <button
                       onClick={() => moveStatus(index, 1)}
                       disabled={index === statuses.length - 1}
-                      className="rounded p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30"
+                      className="rounded p-1 disabled:opacity-30"
+                      style={{ color: "var(--color-text-muted)" }}
                     >
                       ↓
                     </button>
                     <button
                       onClick={() => setEditingId(status.id)}
-                      className="rounded p-1 text-gray-400 hover:text-blue-600"
+                      className="rounded p-1"
+                      style={{ color: "var(--color-accent)" }}
                     >
                       Edit
                     </button>
@@ -158,7 +168,8 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                           deleteMutation.mutate({ id: status.id });
                         }
                       }}
-                      className="rounded p-1 text-gray-400 hover:text-red-600"
+                      className="rounded p-1"
+                      style={{ color: "var(--color-danger)" }}
                     >
                       Delete
                     </button>
@@ -170,9 +181,9 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
         </div>
 
         {/* Add new status */}
-        <div className="mt-4 flex items-end gap-3 rounded-lg border-2 border-dashed p-3">
+        <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-dashed p-4 xl:flex-row xl:items-end" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
           <div className="flex-1 space-y-1">
-            <label className="text-xs text-gray-500">Name</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Name</label>
             <Input
               value={newStatus.name}
               onChange={(e) => setNewStatus({ ...newStatus, name: e.target.value })}
@@ -180,22 +191,24 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Color</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Color</label>
             <input
               type="color"
               value={newStatus.color}
               onChange={(e) => setNewStatus({ ...newStatus, color: e.target.value })}
-              className="h-9 w-12 cursor-pointer rounded border"
+              className="h-9 w-12 cursor-pointer rounded-lg border"
+              style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Category</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Category</label>
             <select
               value={newStatus.category}
               onChange={(e) =>
                 setNewStatus({ ...newStatus, category: e.target.value as (typeof CATEGORIES)[number] })
               }
-              className="h-9 rounded border px-2 text-sm"
+              className="h-9 rounded-lg border px-2 text-sm"
+              style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-border)", color: "var(--color-text)" }}
             >
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
@@ -204,7 +217,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
               ))}
             </select>
           </div>
-          <label className="flex items-center gap-2 text-xs text-gray-500">
+          <label className="flex items-center gap-2 text-xs" style={{ color: "var(--color-text-secondary)" }}>
             <input
               type="checkbox"
               checked={newStatus.isFinal}
@@ -213,7 +226,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
             />
             Final stage
           </label>
-          <label className="flex items-center gap-2 text-xs text-gray-500">
+          <label className="flex items-center gap-2 text-xs" style={{ color: "var(--color-text-secondary)" }}>
             <input
               type="checkbox"
               checked={newStatus.autoArchive}
@@ -224,7 +237,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
           </label>
           {newStatus.autoArchive && (
             <div className="space-y-1">
-              <label className="text-xs text-gray-500">Delay (days)</label>
+              <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Delay (days)</label>
               <Input
                 type="number"
                 min={0}
@@ -254,15 +267,15 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
           </Button>
         </div>
         {upsertMutation.error && (
-          <p className="mt-3 text-sm text-red-600">{upsertMutation.error.message}</p>
+          <p className="mt-3 text-sm" style={{ color: "var(--color-danger)" }}>{upsertMutation.error.message}</p>
         )}
-        <p className="mt-3 text-xs text-gray-500">{FINAL_STAGE_EXPLANATION}</p>
+        <p className="mt-3 text-xs" style={{ color: "var(--color-text-muted)" }}>{FINAL_STAGE_EXPLANATION}</p>
       </section>
 
       {/* Transition Matrix */}
-      <section>
-        <h2 className="text-lg font-semibold mb-4">Transition Matrix</h2>
-        <p className="mb-3 text-sm text-gray-500">
+      <section className="rounded-3xl border p-5" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
+        <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>Transition Matrix</h2>
+        <p className="mb-3 text-sm" style={{ color: "var(--color-text-secondary)" }}>
           Click a cell to allow/disallow a transition from row status → column status.
         </p>
         {statuses.length > 0 && (
@@ -270,9 +283,9 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
             <table className="border-collapse text-sm">
               <thead>
                 <tr>
-                  <th className="border p-2 bg-gray-50 text-left">From ↓ / To →</th>
+                  <th className="border p-2 text-left" style={{ backgroundColor: "var(--color-bg-muted)", borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>From ↓ / To →</th>
                   {statuses.map((s) => (
-                    <th key={s.id} className="border p-2 bg-gray-50">
+                    <th key={s.id} className="border p-2" style={{ backgroundColor: "var(--color-bg-muted)", borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
                       <div className="flex items-center gap-1 justify-center">
                         <div
                           className="h-2.5 w-2.5 rounded-full"
@@ -287,7 +300,7 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
               <tbody>
                 {statuses.map((from) => (
                   <tr key={from.id}>
-                    <td className="border p-2 font-medium">
+                    <td className="border p-2 font-medium" style={{ borderColor: "var(--color-border)", color: "var(--color-text)" }}>
                       <div className="flex items-center gap-1">
                         <div
                           className="h-2.5 w-2.5 rounded-full"
@@ -302,17 +315,21 @@ function WorkflowSettingsContent({ projectId, projectSettings }: { projectId: st
                         className={cn(
                           "border p-2 text-center",
                           from.id === to.id
-                            ? "bg-gray-100"
+                            ? ""
                             : "cursor-pointer hover:bg-blue-50"
                         )}
+                        style={{
+                          borderColor: "var(--color-border)",
+                          backgroundColor: from.id === to.id ? "var(--color-bg-muted)" : "var(--color-surface)",
+                        }}
                         onClick={() => toggleTransition(from.id, to.id)}
                       >
                         {from.id === to.id ? (
-                          <span className="text-gray-300">—</span>
+                          <span style={{ color: "var(--color-text-muted)" }}>—</span>
                         ) : hasTransition(from.id, to.id) ? (
-                          <span className="text-green-600 font-bold">✓</span>
+                          <span className="font-bold" style={{ color: "var(--color-success)" }}>✓</span>
                         ) : (
-                          <span className="text-gray-300">✗</span>
+                          <span style={{ color: "var(--color-text-muted)" }}>✗</span>
                         )}
                       </td>
                     ))}
@@ -358,12 +375,12 @@ function AlertSettingsSection({ projectId, projectSettings }: { projectId: strin
   }
 
   return (
-    <section>
-      <h2 className="text-lg font-semibold mb-4">Due Date Alerts</h2>
-      <p className="mb-3 text-sm text-gray-500">
+    <section className="rounded-3xl border p-5" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
+      <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>Due Date Alerts</h2>
+      <p className="mb-3 text-sm" style={{ color: "var(--color-text-secondary)" }}>
         Tasks approaching their due date will pulsate to draw attention.
       </p>
-      <div className="space-y-4 rounded-lg border p-4">
+      <div className="space-y-4 rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
         <label className="flex items-center gap-3">
           <input
             type="checkbox"
@@ -371,11 +388,11 @@ function AlertSettingsSection({ projectId, projectSettings }: { projectId: strin
             onChange={(e) => setEnabled(e.target.checked)}
             className="rounded"
           />
-          <span className="text-sm font-medium">Enable due date alerts</span>
+          <span className="text-sm font-medium" style={{ color: "var(--color-text)" }}>Enable due date alerts</span>
         </label>
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Warning threshold (days)</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Warning threshold (days)</label>
             <Input
               type="number"
               min={1}
@@ -383,10 +400,10 @@ function AlertSettingsSection({ projectId, projectSettings }: { projectId: strin
               value={warningDays}
               onChange={(e) => setWarningDays(Number(e.target.value))}
             />
-            <p className="text-[10px] text-gray-400">Tasks pulsate orange when within this many days</p>
+            <p className="text-[10px]" style={{ color: "var(--color-text-muted)" }}>Tasks pulsate orange when within this many days</p>
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Critical threshold (days)</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Critical threshold (days)</label>
             <Input
               type="number"
               min={1}
@@ -394,7 +411,7 @@ function AlertSettingsSection({ projectId, projectSettings }: { projectId: strin
               value={criticalDays}
               onChange={(e) => setCriticalDays(Number(e.target.value))}
             />
-            <p className="text-[10px] text-gray-400">Tasks pulsate red when within this many days</p>
+            <p className="text-[10px]" style={{ color: "var(--color-text-muted)" }}>Tasks pulsate red when within this many days</p>
           </div>
         </div>
         <Button onClick={handleSave} disabled={updateProject.isPending} size="sm">
@@ -428,12 +445,14 @@ function EditStatusForm({
         type="color"
         value={color}
         onChange={(e) => setColor(e.target.value)}
-        className="h-9 w-10 cursor-pointer rounded border"
+        className="h-9 w-10 cursor-pointer rounded-lg border"
+        style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}
       />
       <select
         value={category}
         onChange={(e) => setCategory(e.target.value as (typeof CATEGORIES)[number])}
-        className="h-9 rounded border px-2 text-sm"
+        className="h-9 rounded-lg border px-2 text-sm"
+        style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-border)", color: "var(--color-text)" }}
       >
         {CATEGORIES.map((c) => (
           <option key={c} value={c}>
@@ -441,7 +460,7 @@ function EditStatusForm({
           </option>
         ))}
       </select>
-      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+      <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--color-text-secondary)" }}>
         <input
           type="checkbox"
           checked={isFinal}
@@ -450,7 +469,7 @@ function EditStatusForm({
         />
         Final stage
       </label>
-      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+      <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--color-text-secondary)" }}>
         <input
           type="checkbox"
           checked={autoArchive}

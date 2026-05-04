@@ -1,4 +1,5 @@
 import { LoginForm } from "@/components/auth/login-form";
+import { getSafeRedirectPath } from "@/lib/safe-redirect";
 
 /** Login page with stable server-rendered callback handling. */
 export default async function LoginPage({
@@ -8,5 +9,5 @@ export default async function LoginPage({
 }) {
   const resolvedSearchParams = await searchParams;
 
-  return <LoginForm callbackUrl={resolvedSearchParams.callbackUrl ?? "/"} />;
+  return <LoginForm callbackUrl={getSafeRedirectPath(resolvedSearchParams.callbackUrl)} />;
 }

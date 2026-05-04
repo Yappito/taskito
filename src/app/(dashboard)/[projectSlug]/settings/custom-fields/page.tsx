@@ -17,7 +17,7 @@ export default function CustomFieldSettingsPage({
   const { data: project } = trpc.project.bySlug.useQuery({ slug: projectSlug });
 
   if (!project) {
-    return <div className="p-8 text-gray-500">Loading...</div>;
+    return <div className="p-8" style={{ color: "var(--color-text-muted)" }}>Loading...</div>;
   }
 
   return <CustomFieldSettingsContent projectId={project.id} />;
@@ -79,18 +79,24 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      <h1 className="text-2xl font-bold">Custom Fields</h1>
+    <div className="mx-auto max-w-4xl space-y-6 px-4 py-8 lg:px-6">
+      <div className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", background: "linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 9%, var(--color-surface)) 0%, var(--color-surface) 62%)", boxShadow: "var(--shadow-sm)" }}>
+        <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>Project schema</p>
+        <h1 className="mt-2 text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>Custom Fields</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+          Shape project-specific task metadata without changing the database schema.
+        </p>
+      </div>
 
-      <div className="rounded-lg border-2 border-dashed p-4">
+      <div className="rounded-3xl border p-5" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
         <div className="grid gap-3 md:grid-cols-2">
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Field name</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Field name</label>
             <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Customer, Estimate, Release date..." />
           </div>
           <div className="space-y-1">
-            <label className="text-xs text-gray-500">Type</label>
-            <select value={type} onChange={(event) => setType(event.target.value as (typeof FIELD_TYPES)[number])} className="h-9 w-full rounded border px-2 text-sm">
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Type</label>
+            <select value={type} onChange={(event) => setType(event.target.value as (typeof FIELD_TYPES)[number])} className="h-9 w-full rounded-lg border px-2 text-sm" style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-border)", color: "var(--color-text)" }}>
               {FIELD_TYPES.map((fieldType) => (
                 <option key={fieldType} value={fieldType}>
                   {fieldType}
@@ -102,12 +108,12 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
 
         {type === "select" && (
           <div className="mt-3 space-y-1">
-            <label className="text-xs text-gray-500">Options</label>
+            <label className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>Options</label>
             <Input value={choices} onChange={(event) => setChoices(event.target.value)} placeholder="Low, Medium, High" />
           </div>
         )}
 
-        <label className="mt-3 flex items-center gap-2 text-sm text-gray-600">
+        <label className="mt-3 flex items-center gap-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
           <input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />
           Required field
         </label>
@@ -137,11 +143,11 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
             : [];
 
           return (
-            <div key={field.id} className="rounded-lg border p-3">
+            <div key={field.id} className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
               {editingId === field.id ? (
                 <div className="space-y-3">
                   <Input value={editName} onChange={(event) => setEditName(event.target.value)} />
-                  <select value={editType} onChange={(event) => setEditType(event.target.value as (typeof FIELD_TYPES)[number])} className="h-9 w-full rounded border px-2 text-sm">
+                  <select value={editType} onChange={(event) => setEditType(event.target.value as (typeof FIELD_TYPES)[number])} className="h-9 w-full rounded-lg border px-2 text-sm" style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-border)", color: "var(--color-text)" }}>
                     {FIELD_TYPES.map((fieldType) => (
                       <option key={fieldType} value={fieldType}>
                         {fieldType}
@@ -151,7 +157,7 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
                   {editType === "select" && (
                     <Input value={editChoices} onChange={(event) => setEditChoices(event.target.value)} placeholder="Low, Medium, High" />
                   )}
-                  <label className="flex items-center gap-2 text-sm text-gray-600">
+                  <label className="flex items-center gap-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
                     <input type="checkbox" checked={editRequired} onChange={(event) => setEditRequired(event.target.checked)} />
                     Required field
                   </label>
@@ -179,16 +185,16 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
               ) : (
                 <div className="flex items-center gap-3">
                   <div className="flex-1">
-                    <div className="font-medium">{field.name}</div>
-                    <div className="text-xs text-gray-500">
+                    <div className="font-medium" style={{ color: "var(--color-text)" }}>{field.name}</div>
+                    <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                       {field.type}
                       {field.required ? " · required" : ""}
                       {fieldChoices.length > 0 ? ` · ${fieldChoices.join(", ")}` : ""}
                     </div>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded p-1 text-gray-400 hover:text-gray-700 disabled:opacity-30">↑</button>
-                    <button onClick={() => moveField(index, 1)} disabled={index === fields.length - 1} className="rounded p-1 text-gray-400 hover:text-gray-700 disabled:opacity-30">↓</button>
+                    <button onClick={() => moveField(index, -1)} disabled={index === 0} className="rounded p-1 disabled:opacity-30" style={{ color: "var(--color-text-muted)" }}>↑</button>
+                    <button onClick={() => moveField(index, 1)} disabled={index === fields.length - 1} className="rounded p-1 disabled:opacity-30" style={{ color: "var(--color-text-muted)" }}>↓</button>
                     <button
                       onClick={() => {
                         setEditingId(field.id);
@@ -197,7 +203,8 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
                         setEditRequired(field.required);
                         setEditChoices(fieldChoices.join(", "));
                       }}
-                      className="rounded p-1 text-xs text-gray-400 hover:text-blue-600"
+                      className="rounded p-1 text-xs"
+                      style={{ color: "var(--color-accent)" }}
                     >
                       Edit
                     </button>
@@ -207,7 +214,8 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
                           deleteMutation.mutate({ id: field.id });
                         }
                       }}
-                      className="rounded p-1 text-xs text-gray-400 hover:text-red-600"
+                      className="rounded p-1 text-xs"
+                      style={{ color: "var(--color-danger)" }}
                     >
                       Delete
                     </button>
@@ -218,7 +226,7 @@ function CustomFieldSettingsContent({ projectId }: { projectId: string }) {
           );
         })}
 
-        {fields.length === 0 && <p className="py-8 text-center text-sm text-gray-400">No custom fields yet</p>}
+        {fields.length === 0 && <p className="py-8 text-center text-sm" style={{ color: "var(--color-text-muted)" }}>No custom fields yet</p>}
       </div>
     </div>
   );
