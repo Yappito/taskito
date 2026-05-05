@@ -31,6 +31,11 @@ model User {
   createdTasks  Task[]    @relation("TaskCreator")
   assignedTasks Task[]    @relation("TaskAssignee")
   projectMemberships ProjectMember[]
+  ownedAiProviders AiProviderConnection[] @relation("OwnedAiProviders")
+  aiConversations AiConversation[] @relation("CreatedAiConversations")
+  requestedAiActionExecutions AiActionExecution[] @relation("RequestedAiActions")
+  executedAiActionExecutions AiActionExecution[] @relation("ExecutedAiActions")
+  rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -92,6 +97,10 @@ model Project {
   tags        Tag[]
   customFields CustomField[]
   members     ProjectMember[]
+  aiProviders AiProviderConnection[]
+  aiPolicy    AiProjectPolicy?
+  aiConversations AiConversation[]
+  aiActionExecutions AiActionExecution[]
 }
 
 enum ProjectMemberRole {
@@ -197,6 +206,8 @@ model Task {
   watchers         TaskWatcher[]
   notifications    Notification[]
   customFieldValues CustomFieldValue[]
+  aiConversations  AiConversation[]
+  aiActionExecutions AiActionExecution[]
 
   @@unique([projectId, taskNumber])
   @@index([projectId, dueDate])
@@ -379,4 +390,177 @@ model CustomFieldValue {
   customField CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
 
   @@unique([taskId, customFieldId])
+}
+
+enum AiProviderScope {
+  user
+  project
+}
+
+enum AiProviderAdapter {
+  openai_compatible
+  anthropic
+}
+
+enum AiConversationMode {
+  approval
+  yolo
+}
+
+enum AiMessageRole {
+  system
+  user
+  assistant
+  tool
+}
+
+enum AiActionStatus {
+  proposed
+  approved
+  rejected
+  executed
+  failed
+}
+
+enum AiRollbackStatus {
+  unavailable
+  available
+  rolledBack
+  failed
+}
+
+enum AiActionType {
+  addComment
+  addLink
+  removeLink
+  moveStatus
+  assignTask
+  editTask
+  bulkUpdate
+  createTask
+  duplicateTask
+  archiveTask
+  unarchiveTask
+}
+
+model AiProviderConnection {
+  id              String            @id @default(cuid())
+  scope           AiProviderScope
+  ownerUserId     String?
+  projectId       String?
+  label           String
+  adapter         AiProviderAdapter
+  baseUrl         String
+  model           String
+  encryptedSecret String
+  defaultHeaders  Json?
+  isEnabled       Boolean           @default(true)
+  isDefault       Boolean           @default(false)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  ownerUser User? @relation("OwnedAiProviders", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  conversations AiConversation[]
+  defaultForProjectPolicies AiProjectPolicy[] @relation("AiPolicyDefaultProvider")
+
+  @@index([ownerUserId])
+  @@index([projectId])
+}
+
+model AiProjectPolicy {
+  projectId          String   @id
+  defaultProviderId  String?
+  allowUserProviders Boolean  @default(true)
+  allowProjectProviders Boolean @default(true)
+  allowYoloMode      Boolean  @default(true)
+  defaultPermissions Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\"]")
+  maxPermissions     Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\",\"add_comment\",\"link_tasks\",\"move_status\",\"assign_task\",\"edit_core_fields\",\"edit_tags\",\"edit_custom_fields\",\"bulk_update_selected\",\"create_task\",\"duplicate_task\",\"archive_task\"]")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  project         Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  defaultProvider AiProviderConnection? @relation("AiPolicyDefaultProvider", fields: [defaultProviderId], references: [id], onDelete: SetNull)
+}
+
+model AiConversation {
+  id                 String             @id @default(cuid())
+  projectId          String
+  taskId             String?
+  createdByUserId    String
+  providerId         String
+  mode               AiConversationMode @default(approval)
+  title              String?
+  grantedPermissions Json               @default("[]")
+  selectedTaskIds    Json?
+  contextSnapshot    Json?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task          Task?                @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  createdByUser User                 @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  provider      AiProviderConnection @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  messages      AiMessage[]
+  actionExecutions AiActionExecution[]
+
+  @@index([projectId, updatedAt])
+  @@index([taskId])
+  @@index([createdByUserId, updatedAt])
+}
+
+model AiMessage {
+  id             String        @id @default(cuid())
+  conversationId String
+  role           AiMessageRole
+  content        String        @db.Text
+  toolName       String?
+  toolPayload    Json?
+  createdAt      DateTime      @default(now())
+
+  conversation AiConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  actionExecutions AiActionExecution[]
+
+  @@index([conversationId, createdAt])
+}
+
+model AiActionExecution {
+  id                String             @id @default(cuid())
+  conversationId    String
+  messageId         String?
+  projectId         String
+  taskId            String?
+  requestedByUserId String
+  executedByUserId  String?
+  actionType        AiActionType
+  title             String?
+  summary           String?            @db.Text
+  mode              AiConversationMode
+  status            AiActionStatus     @default(proposed)
+  proposedPayload   Json
+  executedPayload   Json?
+  result            Json?
+  checkpointBefore  Json?
+  checkpointAfter   Json?
+  rollbackStatus    AiRollbackStatus    @default(unavailable)
+  rollbackErrorMessage String?           @db.Text
+  rolledBackAt      DateTime?
+  rolledBackByUserId String?
+  errorMessage      String?            @db.Text
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  conversation    AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message         AiMessage?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task            Task?           @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  requestedByUser User            @relation("RequestedAiActions", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  executedByUser  User?           @relation("ExecutedAiActions", fields: [executedByUserId], references: [id], onDelete: SetNull)
+  rolledBackByUser User?           @relation("RolledBackAiActions", fields: [rolledBackByUserId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([taskId, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@index([rolledBackByUserId, createdAt])
 }

@@ -12,6 +12,7 @@ import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
 import { Avatar } from "@/components/ui/avatar";
 import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
+import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
 interface ListViewProps {
   projectId: string;
@@ -203,6 +204,17 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
         onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
         onArchive={() => applyBulkUpdate({ archive: true })}
       />
+
+      {selectedTaskIds.length > 0 && (
+        <div className="mx-4 mt-3 flex justify-end">
+          <AiChatLauncher
+            projectId={projectId}
+            selectedTaskIds={selectedTaskIds}
+            title={`AI chat for ${selectedTaskIds.length} selected task${selectedTaskIds.length === 1 ? "" : "s"}`}
+            buttonLabel={`AI on ${selectedTaskIds.length} selected`}
+          />
+        </div>
+      )}
 
       {actionError && (
         <div

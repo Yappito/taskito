@@ -22,10 +22,12 @@ function Dialog({
   open,
   onClose,
   children,
+  panelClassName,
 }: {
   open: boolean;
   onClose: () => void;
   children: React.ReactNode;
+  panelClassName?: string;
 }) {
   const panelRef = React.useRef<HTMLDivElement>(null);
 
@@ -101,14 +103,14 @@ function Dialog({
 
   return (
     <>
-      <DialogOverlay onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <DialogOverlay />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
         <div
           ref={panelRef}
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          className="relative w-full max-w-lg rounded-lg p-6 shadow-xl"
+          className={cn("relative max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg p-6 shadow-xl", panelClassName)}
           style={{
             backgroundColor: "var(--color-surface)",
             border: "1px solid var(--color-border)",
@@ -130,13 +132,15 @@ function DialogControlled({
   open,
   onOpenChange,
   children,
+  panelClassName,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
+  panelClassName?: string;
 }) {
   return (
-    <Dialog open={open} onClose={() => onOpenChange(false)}>
+    <Dialog open={open} onClose={() => onOpenChange(false)} panelClassName={panelClassName}>
       {children}
     </Dialog>
   );

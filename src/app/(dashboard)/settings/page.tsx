@@ -8,14 +8,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar } from "@/components/ui/avatar";
 import { DialogControlled as Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AiProviderForm } from "@/components/ai/ai-provider-form";
+import { AiProviderList } from "@/components/ai/ai-provider-list";
 
 /** Settings page — project and user management */
 export default function SettingsPage() {
   const { data: currentUser, isLoading } = trpc.user.me.useQuery();
-  const [tab, setTab] = useState<"profile" | "projects" | "users">("profile");
+  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users">("profile");
 
   useEffect(() => {
-    if (currentUser?.role !== "admin" && tab !== "profile") {
+    if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "ai") {
       setTab("profile");
     }
   }, [currentUser?.role, tab]);
@@ -33,8 +35,8 @@ export default function SettingsPage() {
   }
 
   const tabs = currentUser.role === "admin"
-    ? (["profile", "projects", "users"] as const)
-    : (["profile"] as const);
+    ? (["profile", "ai", "projects", "users"] as const)
+    : (["profile", "ai"] as const);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -71,6 +73,7 @@ export default function SettingsPage() {
       </div>
 
       {tab === "profile" && <ProfileSettings currentUser={currentUser} />}
+      {tab === "ai" && <PersonalAiSettings />}
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}
       {tab === "users" && currentUser.role === "admin" && <UserManagement currentUserId={currentUser.id} />}
     </div>
@@ -416,6 +419,147 @@ function ProfileSettings({
           </form>
         </section>
       </div>
+    </div>
+  );
+}
+
+function PersonalAiSettings() {
+  const utils = trpc.useUtils();
+  const { data: providers = [] } = trpc.ai.listProviders.useQuery();
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [revealedSecret, setRevealedSecret] = useState<{ providerId: string; label: string; secret: string } | null>(null);
+
+  const createMutation = trpc.ai.createUserProvider.useMutation({
+    onSuccess: async () => {
+      await utils.ai.listProviders.invalidate();
+    },
+  });
+
+  const updateMutation = trpc.ai.updateProvider.useMutation({
+    onSuccess: async () => {
+      setEditingProviderId(null);
+      await utils.ai.listProviders.invalidate();
+    },
+  });
+
+  const deleteMutation = trpc.ai.deleteProvider.useMutation({
+    onSuccess: async () => {
+      await utils.ai.listProviders.invalidate();
+    },
+  });
+
+  const aiClient = trpc.useContext();
+
+  const testMutation = trpc.ai.testProvider.useMutation();
+
+  const editingProvider = providers.find((provider) => provider.id === editingProviderId) ?? null;
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+          Personal AI
+        </p>
+        <h2 className="mt-2 text-xl font-semibold" style={{ color: "var(--color-text)" }}>
+          Personal Providers
+        </h2>
+        <p className="mt-2 text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+          Configure private remote AI providers that only you can use inside projects that allow personal providers.
+        </p>
+      </section>
+
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <AiProviderForm
+          title="Add Personal Provider"
+          submitLabel="Create Provider"
+          isPending={createMutation.isPending}
+          error={createMutation.error?.message ?? null}
+          onSubmit={(values) => createMutation.mutate(values)}
+        />
+      </section>
+
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>
+          Configured Personal Providers
+        </h2>
+        <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+          These providers are scoped to your account only.
+        </p>
+        <div className="mt-4">
+          <AiProviderList
+            providers={providers.filter((provider) => provider.scope === "user") as Array<{
+              id: string;
+              label: string;
+              adapter: string;
+              model: string;
+              baseUrl: string;
+              isEnabled: boolean;
+              isDefault: boolean;
+              scope: "user" | "project";
+            }>}
+            onEdit={(provider) => {
+              setEditingProviderId(provider.id);
+            }}
+            onDelete={(provider) => {
+              if (confirm(`Delete provider \"${provider.label}\"?`)) {
+                deleteMutation.mutate({ id: provider.id });
+              }
+            }}
+            onRevealSecret={async (provider) => {
+              const result = await aiClient.ai.revealProviderSecret.fetch({ id: provider.id });
+              setRevealedSecret({ providerId: provider.id, label: provider.label, secret: result.secret ?? "" });
+            }}
+            onTest={(provider) => testMutation.mutate({ id: provider.id })}
+          />
+        </div>
+        {testMutation.error && (
+          <p className="mt-3 text-sm" style={{ color: "var(--color-danger)" }}>
+            {testMutation.error.message}
+          </p>
+        )}
+        {testMutation.data && (
+          <p className="mt-3 text-sm" style={{ color: "var(--color-accent)" }}>
+            Provider test request succeeded for {testMutation.data.label}.
+          </p>
+        )}
+        {revealedSecret && (
+          <div className="mt-3 rounded-2xl border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
+            <div className="font-medium" style={{ color: "var(--color-text)" }}>Secret for {revealedSecret.label}</div>
+            <code className="mt-2 block overflow-x-auto rounded-xl px-3 py-2 text-xs" style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}>
+              {revealedSecret.secret}
+            </code>
+            <Button className="mt-3" size="sm" variant="outline" onClick={() => setRevealedSecret(null)}>Hide Secret</Button>
+          </div>
+        )}
+      </section>
+
+      <Dialog open={!!editingProvider} onOpenChange={(open) => {
+        if (!open) {
+          setEditingProviderId(null);
+        }
+      }}>
+        <DialogContent>
+          {editingProvider && (
+            <AiProviderForm
+              title="Edit Personal Provider"
+              submitLabel="Save Provider"
+              isPending={updateMutation.isPending}
+              error={updateMutation.error?.message ?? null}
+              initialValues={{
+                label: editingProvider.label,
+                adapter: editingProvider.adapter as "openai_compatible" | "anthropic",
+                baseUrl: editingProvider.baseUrl,
+                model: editingProvider.model,
+                secret: "",
+                isEnabled: editingProvider.isEnabled,
+                isDefault: editingProvider.isDefault,
+              }}
+              secretRequired={false}
+              onSubmit={(values) => updateMutation.mutate({ id: editingProvider.id, ...values })}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

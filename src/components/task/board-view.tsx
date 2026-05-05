@@ -9,6 +9,7 @@ import { TaskDetail } from "./task-detail";
 import { TaskViewFilters } from "./task-view-filters";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
 import type { BoardStatus, TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
+import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
 interface BoardViewProps {
   projectId: string;
@@ -385,6 +386,17 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
         onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
         onArchive={() => applyBulkUpdate({ archive: true })}
       />
+
+      {selectedTaskIds.length > 0 && (
+        <div className="mx-4 mt-3 flex justify-end">
+          <AiChatLauncher
+            projectId={projectId}
+            selectedTaskIds={selectedTaskIds}
+            title={`AI chat for ${selectedTaskIds.length} selected task${selectedTaskIds.length === 1 ? "" : "s"}`}
+            buttonLabel={`AI on ${selectedTaskIds.length} selected`}
+          />
+        </div>
+      )}
 
       {actionError && (
         <div

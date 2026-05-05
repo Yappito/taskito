@@ -11,6 +11,7 @@ import { StatusBadge } from "./status-badge";
 import { Badge } from "@/components/ui/badge";
 import { TaskSearchInput } from "@/components/ui/task-search-input";
 import { Avatar } from "@/components/ui/avatar";
+import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
 interface TaskDetailProps {
   taskId: string;
@@ -393,6 +394,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           >
             {editing ? "Cancel" : "Edit"}
           </Button>
+          {!editing && (
+            <AiChatLauncher
+              projectId={task.projectId}
+              taskId={taskId}
+              title={`AI chat for ${task.title}`}
+              buttonLabel="Ask AI"
+            />
+          )}
           {canArchiveNow && !editing && (
             <Button
               type="button"

@@ -1,6 +1,11 @@
 import { PrismaClient } from "@prisma/client";
 
 const REQUIRED_DELEGATES = [
+  "aiActionExecution",
+  "aiConversation",
+  "aiMessage",
+  "aiProjectPolicy",
+  "aiProviderConnection",
   "activityEvent",
   "commentAttachment",
   "customField",

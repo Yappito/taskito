@@ -11,6 +11,7 @@ import { ArchivedTasks } from "@/components/task/archived-tasks";
 import { TaskDetail } from "@/components/task/task-detail";
 import { QuickAdd } from "@/components/task/quick-add";
 import { ProjectSwitcher } from "@/components/ui/project-switcher";
+import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 import { cn } from "@/lib/utils";
 
 /** Project page with list, board, and graph view tabs */
@@ -179,6 +180,11 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
               statuses={statuses}
               tags={tags ?? []}
             />
+            <AiChatLauncher
+              projectId={project.id}
+              title={`AI workspace for ${project.name}`}
+              buttonLabel="Project AI"
+            />
           </div>
         </div>
 
@@ -203,6 +209,13 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
             style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
           >
             Custom Fields
+          </Link>
+          <Link
+            href={`/${projectSlug}/settings/ai`}
+            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
+          >
+            AI
           </Link>
         </div>
       </div>

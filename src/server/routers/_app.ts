@@ -7,6 +7,7 @@ import { searchRouter } from "./search";
 import { userRouter } from "./user";
 import { customFieldRouter } from "./custom-field";
 import { notificationRouter } from "./notification";
+import { aiRouter } from "./ai";
 
 /** Root tRPC router — all sub-routers mounted here */
 export const appRouter = createTRPCRouter({
@@ -18,6 +19,7 @@ export const appRouter = createTRPCRouter({
   notification: notificationRouter,
   search: searchRouter,
   user: userRouter,
+  ai: aiRouter,
 });
 
 /** Type export for the client */

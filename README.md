@@ -1,11 +1,16 @@
 # Taskito
 
-Taskito is a self-hosted task manager for project-scoped planning, delivery, and follow-up. It combines board, list, archive, and dependency graph views with workflow controls, custom fields, comments with attachments, notifications, and operational tooling in one deployable stack.
+Taskito is a self-hosted task manager for project-scoped planning, delivery, and follow-up. It combines board, list, archive, and dependency graph views with workflow controls, custom fields, comments with attachments, notifications, and an in-app AI workspace in one deployable stack.
 
 ## Feature Overview
 
+- Built-in AI workspace with project, task, and selected-task launchers
 - Multiple task views: board, list, archive, and timeline graph
 - Project-scoped workflows with configurable statuses, transition rules, due-date alerts, and auto-archive settings
+- Personal and project-scoped AI provider management for remote `openai-compatible` and `anthropic` backends
+- Project AI policy controls for provider scope, permission ceilings/defaults, approval mode, and `Yolo mode`
+- AI action proposals with approval/rejection, execution audit rows, rollback checkpoints, and rollback actions for executed changes
+- AI chat history with generated titles, markdown-rendered responses, optimistic message bubbles, and persistent send preferences
 - Task detail panel with editing, dependencies, comments, activity history, watchers, duplicate, and manual archive for completed work
 - Comment attachments with secure file serving and inline image preview
 - Project tags with colors, merge support, and filtering across views
@@ -17,6 +22,53 @@ Taskito is a self-hosted task manager for project-scoped planning, delivery, and
 - Global settings for users, projects, workflows, tags, and custom fields
 - Docker Compose deployment with PostgreSQL, nginx, migrations on boot, and persistent uploads
 
+## AI Workspace
+
+Taskito's AI layer is built into the app rather than treated as a separate bot. The assistant works with project, task, and selected-task context and uses the same permission and actor model as the rest of the product.
+
+### AI Capabilities
+
+- Project-wide, task-scoped, and selected-task AI conversations
+- Conversation history with generated titles for quick reuse
+- Markdown-rendered assistant responses in the chat window
+- Approval-first write proposals with separate proposal cards
+- Optional `Yolo mode` per conversation when project policy allows automatic execution
+- Compact rollbackable AI execution history
+
+### Supported AI Actions
+
+When the matching permissions are granted, the AI can propose and execute:
+
+- comments
+- task links
+- status changes
+- assignee changes
+- task edits for core fields, tags, and custom fields
+- bulk updates on selected tasks only
+- task creation
+- task duplication
+- archive and unarchive
+
+### Provider Model
+
+- Remote providers only
+- Supported adapters:
+  - `openai_compatible`
+  - `anthropic`
+- Providers can be configured per user or per project
+- Providers can be tested from the UI before use
+
+### Safety Model
+
+- AI provider calls are server-side only
+- Provider secrets are encrypted before persistence
+- Writes default to approval mode
+- `Yolo mode` is explicit and project-policy-gated
+- Executed AI changes run as the current signed-in user
+- Executed AI changes are checkpointed so they can be rolled back
+
+Detailed implementation notes and the full summary of features added since the last commit are in [FEATURES_SINCE_LAST_COMMIT.md](FEATURES_SINCE_LAST_COMMIT.md).
+
 ## Stack
 
 | Layer | Technology |
@@ -27,6 +79,7 @@ Taskito is a self-hosted task manager for project-scoped planning, delivery, and
 | Database | PostgreSQL 16 + Prisma 6 |
 | Auth | Auth.js credentials |
 | UI | React 19 + Tailwind CSS 4 |
+| AI integrations | OpenAI-compatible APIs + Anthropic |
 | Graph layout | ELK.js + D3.js |
 | Deployment | Docker Compose |
 
@@ -67,9 +120,14 @@ Optional values:
 
 - `AUTO_TAGGER_URL`
 - `AUTO_TAGGER_API_KEY`
+- `AI_SECRET_MASTER_KEY`
+- `AI_PROVIDER_HOST_ALLOWLIST`
+- `AI_PROVIDER_REQUEST_TIMEOUT_MS`
 - `ALLOW_DEMO_SEED`
 
 `DATABASE_URL` and `AUTH_TRUST_HOST` are injected by the compose file.
+
+If you plan to use AI providers, set `AI_SECRET_MASTER_KEY` explicitly to a base64-encoded 32-byte value instead of relying on any implicit fallback behavior.
 
 ### 3. Start the stack
 
@@ -120,6 +178,15 @@ docker compose exec app npm run db:generate
 docker compose exec app ./node_modules/.bin/prisma migrate deploy
 ```
 
+### Optional AI setup in the app
+
+After the stack is running and you can sign in:
+
+1. Add a personal provider in `Settings -> AI`, or a shared provider in `Project -> AI`.
+2. Test the provider from the UI.
+3. Set the project AI policy for default permissions, maximum permissions, provider scope, and `Yolo mode`.
+4. Launch AI from the project page, a task detail view, or a selected-task view in board/list mode.
+
 ### 6. Check the running stack
 
 ```bash
@@ -166,6 +233,9 @@ Useful commands from the repository root:
 | `DEMO_ADMIN_PASSWORD` | No | Optional password for the seeded demo admin account |
 | `AUTO_TAGGER_URL` | No | Optional OpenAI-compatible tagging endpoint |
 | `AUTO_TAGGER_API_KEY` | No | Optional API key for the auto-tagger |
+| `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt stored AI provider secrets |
+| `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated host allowlist for AI provider endpoints |
+| `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
 
 ## Notes
 
@@ -175,6 +245,9 @@ Useful commands from the repository root:
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 - The documented `docker compose up -d --pull always` command refreshes the published app image before startup.
+- AI providers are remote endpoints; local desktop model assumptions are not part of the hosted deployment model.
+- AI provider URLs are validated before use and can be restricted further with `AI_PROVIDER_HOST_ALLOWLIST`.
+- AI-generated writes are permission-scoped and approval-based unless `Yolo mode` is explicitly enabled for the conversation and allowed by project policy.
 
 ## Development
 

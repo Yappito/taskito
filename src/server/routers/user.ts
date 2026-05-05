@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
@@ -21,6 +22,15 @@ function normalizeEmail(email: string) {
 
 function uniqueProjectIds(projectIds: string[] | undefined) {
   return [...new Set(projectIds ?? [])];
+}
+
+function getAiPreferences(settings: unknown) {
+  const root = (settings ?? {}) as Record<string, unknown>;
+  const preferences = (root.aiPreferences ?? {}) as Record<string, unknown>;
+
+  return {
+    sendOnEnter: preferences.sendOnEnter === true,
+  };
 }
 
 async function syncProjectMemberships(
@@ -95,6 +105,42 @@ export const userRouter = createTRPCRouter({
       },
     });
   }),
+
+  aiPreferences: protectedProcedure.query(async ({ ctx }) => {
+    const user = await ctx.prisma.user.findUniqueOrThrow({
+      where: { id: ctx.session.user.id },
+      select: { settings: true },
+    });
+
+    return getAiPreferences(user.settings);
+  }),
+
+  updateAiPreferences: protectedProcedure
+    .input(
+      z.object({
+        sendOnEnter: z.boolean(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const user = await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: ctx.session.user.id },
+        select: { settings: true },
+      });
+
+      const settings = (user.settings ?? {}) as Record<string, unknown>;
+
+      await ctx.prisma.user.update({
+        where: { id: ctx.session.user.id },
+        data: {
+          settings: {
+            ...settings,
+            aiPreferences: input,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return input;
+    }),
 
   /** Update the current user's profile */
   updateProfile: protectedProcedure
