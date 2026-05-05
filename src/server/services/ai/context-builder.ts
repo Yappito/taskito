@@ -4,6 +4,7 @@ import type { AiConversationContextInput, AiConversationContextSnapshot } from "
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 type AiContextRecord = Record<string, unknown>;
 const PROJECT_TASK_CONTEXT_LIMIT = 50;
+const CONTEXT_TASK_COMMENT_LIMIT = 5;
 
 function asRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as AiContextRecord : null;
@@ -232,7 +233,13 @@ export async function buildAiConversationContext(
           include: {
             status: true,
             assignee: { select: { id: true, name: true, email: true, image: true } },
+            creator: { select: { id: true, name: true, email: true, image: true } },
             tags: { include: { tag: true } },
+            comments: {
+              orderBy: { createdAt: "desc" },
+              take: CONTEXT_TASK_COMMENT_LIMIT,
+              include: { author: { select: { id: true, name: true, email: true, image: true } } },
+            },
             project: { select: { key: true, slug: true } },
           },
           orderBy: { dueDate: "asc" },
@@ -243,7 +250,13 @@ export async function buildAiConversationContext(
       include: {
         status: true,
         assignee: { select: { id: true, name: true, email: true, image: true } },
+        creator: { select: { id: true, name: true, email: true, image: true } },
         tags: { include: { tag: true } },
+        comments: {
+          orderBy: { createdAt: "desc" },
+          take: CONTEXT_TASK_COMMENT_LIMIT,
+          include: { author: { select: { id: true, name: true, email: true, image: true } } },
+        },
         project: { select: { key: true, slug: true } },
       },
       orderBy: [{ dueDate: "asc" }, { taskNumber: "asc" }],
@@ -258,8 +271,8 @@ export async function buildAiConversationContext(
   return {
     project,
     currentTask: currentTask ? serializeTask(currentTask as unknown as AiContextRecord, { detailed: true }) : null,
-    projectTasks: projectTasks.map((task) => serializeTask(task as unknown as AiContextRecord)),
-    selectedTasks: selectedTasks.map((task) => serializeTask(task as unknown as AiContextRecord)),
+    projectTasks: projectTasks.map((task) => serializeTask(task as unknown as AiContextRecord, { detailed: true })),
+    selectedTasks: selectedTasks.map((task) => serializeTask(task as unknown as AiContextRecord, { detailed: true })),
     statuses,
     tags,
     people,
