@@ -23,6 +23,18 @@ interface PendingMessage {
   id: string;
   role: "user";
   content: string;
+  createdAt: Date;
+}
+
+function formatMessageTimestamp(value: string | Date) {
+  return new Date(value).toLocaleString();
+}
+
+function sortProposals<T extends { id: string; createdAt: string | Date }>(items: T[]) {
+  return [...items].sort((left, right) => {
+    const createdAtDiff = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+    return createdAtDiff !== 0 ? createdAtDiff : left.id.localeCompare(right.id);
+  });
 }
 
 export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, onClose }: AiChatPanelProps) {
@@ -46,7 +58,9 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sendOnEnter, setSendOnEnter] = useState<boolean | null>(null);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDetailsElement | null>(null);
 
   const availablePermissions = useMemo(
     () => (permissions ?? []) as AiPermission[],
@@ -70,6 +84,9 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       if (provider.scope === "project" && policy && !policy.allowProjectProviders) {
         return false;
       }
+      if (provider.scope === "shared" && policy && !policy.allowSharedProviders) {
+        return false;
+      }
       return true;
     }),
     [policy, providers]
@@ -77,7 +94,8 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
 
   useEffect(() => {
     if (!providerId && visibleProviders.length > 0) {
-      const defaultProvider = visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
+      const defaultProvider = visibleProviders.find((provider) => provider.id === aiPreferences?.draftProviderIds?.[projectId])
+        ?? visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
         ?? visibleProviders.find((provider) => provider.isDefault)
         ?? visibleProviders[0];
       setProviderId(defaultProvider.id);
@@ -88,7 +106,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     if (providerId && visibleProviders.length === 0) {
       setProviderId("");
     }
-  }, [policy?.defaultProviderId, providerId, visibleProviders]);
+  }, [aiPreferences?.draftProviderIds, policy?.defaultProviderId, projectId, providerId, visibleProviders]);
 
   useEffect(() => {
     const defaults = Array.isArray(policy?.defaultPermissions)
@@ -96,8 +114,11 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       : (["read_current_task", "read_selected_tasks", "search_project"] as AiPermission[]);
     const nextPermissions = defaults.filter((permission) => maxPermissions.includes(permission));
     setGrantedPermissions(nextPermissions);
+    if (conversationId) {
+      return;
+    }
     setDraftPermissions(nextPermissions);
-  }, [maxPermissions, policy?.defaultPermissions]);
+  }, [conversationId, maxPermissions, policy?.defaultPermissions]);
 
   const { data: conversation } = trpc.ai.getConversation.useQuery(
     { id: conversationId ?? "" },
@@ -200,18 +221,19 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     onError: (error) => setErrorMessage(error.message),
   });
 
-  const proposals = (conversation?.actionExecutions ?? []).map((proposal) => ({
+  const proposals = sortProposals((conversation?.actionExecutions ?? []).map((proposal) => ({
     ...proposal,
     proposedPayload: proposal.proposedPayload as Record<string, unknown>,
-  }));
-  const messages = [
+  })));
+  const messages = sortProposals([
     ...((conversation?.messages ?? []).map((item) => ({
       id: item.id,
       role: item.role,
       content: item.content,
+      createdAt: item.createdAt,
     }))),
     ...pendingMessages,
-  ];
+  ]);
 
   const canUseYolo = policy?.allowYoloMode ?? true;
   const displayName = currentUser?.name?.trim() || currentUser?.email || "You";
@@ -246,6 +268,72 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   }, [aiPreferences, sendOnEnter]);
 
   useEffect(() => {
+    if (conversationId || !aiPreferences) {
+      return;
+    }
+
+    const savedProviderId = aiPreferences.draftProviderIds?.[projectId];
+    if (savedProviderId && visibleProviders.some((provider) => provider.id === savedProviderId)) {
+      setProviderId(savedProviderId);
+    }
+
+    const savedMode = aiPreferences.draftModes?.[projectId];
+    if (savedMode === "approval" || savedMode === "yolo") {
+      setMode(savedMode === "yolo" && canUseYolo ? "yolo" : "approval");
+    }
+
+    const savedPermissions = aiPreferences.draftPermissionsByProject?.[projectId];
+    if (Array.isArray(savedPermissions)) {
+      const filteredPermissions = savedPermissions.filter((permission) => maxPermissions.includes(permission));
+      setGrantedPermissions(filteredPermissions);
+      setDraftPermissions(filteredPermissions);
+    }
+  }, [aiPreferences, canUseYolo, conversationId, maxPermissions, projectId, visibleProviders]);
+
+  useEffect(() => {
+    if (conversationId) {
+      return;
+    }
+
+    const savedMode = aiPreferences?.draftModes?.[projectId];
+    if (savedMode === "yolo" && !canUseYolo) {
+      setMode("approval");
+      updateAiPreferences.mutate({
+        sendOnEnter: effectiveSendOnEnter,
+        draftModes: {
+          ...(aiPreferences?.draftModes ?? {}),
+          [projectId]: "approval",
+        },
+      });
+    }
+  }, [aiPreferences?.draftModes, canUseYolo, conversationId, effectiveSendOnEnter, projectId, updateAiPreferences]);
+
+  useEffect(() => {
+    if (!contextMenuOpen) {
+      return;
+    }
+
+    function handleClick(event: MouseEvent) {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(event.target as Node)) {
+        setContextMenuOpen(false);
+      }
+    }
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setContextMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [contextMenuOpen]);
+
+  useEffect(() => {
     if (!conversation) {
       return;
     }
@@ -257,7 +345,6 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       : [];
     const nextPermissions = conversationPermissions.filter((permission) => maxPermissions.includes(permission));
     setGrantedPermissions(nextPermissions);
-    setDraftPermissions(nextPermissions);
   }, [canUseYolo, conversation, maxPermissions]);
 
   async function ensureConversation(initialContent: string) {
@@ -356,9 +443,12 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     setConversationId(null);
     setErrorMessage(null);
     setPendingMessages([]);
-    setMode(mode === "yolo" && canUseYolo ? "yolo" : "approval");
+    const draftMode = aiPreferences?.draftModes?.[projectId];
+    setMode((draftMode === "yolo" && canUseYolo) ? "yolo" : draftMode === "approval" ? "approval" : mode === "yolo" && canUseYolo ? "yolo" : "approval");
     setGrantedPermissions(draftPermissions.filter((permission) => maxPermissions.includes(permission)));
-    const defaultProvider = visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
+    const draftProviderId = aiPreferences?.draftProviderIds?.[projectId];
+    const defaultProvider = visibleProviders.find((provider) => provider.id === draftProviderId)
+      ?? visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
       ?? visibleProviders.find((provider) => provider.isDefault)
       ?? visibleProviders[0];
     setProviderId(defaultProvider?.id ?? "");
@@ -381,7 +471,19 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
             <label className="mb-1 block text-sm font-medium" style={{ color: "var(--color-text-secondary)" }}>Provider</label>
             <select
               value={providerId}
-              onChange={(event) => setProviderId(event.target.value)}
+              onChange={(event) => {
+                const nextProviderId = event.target.value;
+                setProviderId(nextProviderId);
+                if (!hasActiveConversation) {
+                  updateAiPreferences.mutate({
+                    sendOnEnter: effectiveSendOnEnter,
+                    draftProviderIds: {
+                      ...(aiPreferences?.draftProviderIds ?? {}),
+                      [projectId]: nextProviderId,
+                    },
+                  });
+                }
+              }}
               disabled={hasActiveConversation}
               className="h-9 w-full rounded-lg border px-3 text-sm"
               style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
@@ -403,7 +505,19 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
             <label className="mb-1 block text-sm font-medium" style={{ color: "var(--color-text-secondary)" }}>Mode</label>
             <select
               value={mode}
-              onChange={(event) => setMode(event.target.value as "approval" | "yolo")}
+              onChange={(event) => {
+                const nextMode = event.target.value as "approval" | "yolo";
+                setMode(nextMode);
+                if (!hasActiveConversation) {
+                  updateAiPreferences.mutate({
+                    sendOnEnter: effectiveSendOnEnter,
+                    draftModes: {
+                      ...(aiPreferences?.draftModes ?? {}),
+                      [projectId]: nextMode,
+                    },
+                  });
+                }
+              }}
               disabled={hasActiveConversation}
               className="h-9 w-full rounded-lg border px-3 text-sm"
               style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
@@ -421,6 +535,13 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                 const filteredPermissions = nextPermissions.filter((permission) => maxPermissions.includes(permission));
                 if (!hasActiveConversation) {
                   setDraftPermissions(filteredPermissions);
+                  updateAiPreferences.mutate({
+                    sendOnEnter: effectiveSendOnEnter,
+                    draftPermissionsByProject: {
+                      ...(aiPreferences?.draftPermissionsByProject ?? {}),
+                      [projectId]: filteredPermissions,
+                    },
+                  });
                 }
                 setGrantedPermissions(filteredPermissions);
               }}
@@ -447,43 +568,49 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium" style={{ color: "var(--color-text-secondary)" }}>Loaded context</label>
-            <details className="relative">
+            <details ref={contextMenuRef} className="relative" open={contextMenuOpen}>
               <summary
+                onClick={(event) => {
+                  event.preventDefault();
+                  setContextMenuOpen((current) => !current);
+                }}
                 className="flex h-9 cursor-pointer list-none items-center justify-between rounded-lg border px-3 text-sm"
                 style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
               >
                 <span>{contextTasks.length === 0 ? "No tasks loaded" : `${contextTasks.length} loaded task${contextTasks.length === 1 ? "" : "s"}`}</span>
-                <span style={{ color: "var(--color-text-muted)" }}>v</span>
+                <span style={{ color: "var(--color-text-muted)" }}>{contextMenuOpen ? "^" : "v"}</span>
               </summary>
-              <div
-                className="absolute left-0 right-0 z-20 mt-2 max-h-80 overflow-y-auto rounded-2xl border p-3 shadow-xl"
-                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
-              >
-                {contextTasks.length === 0 ? (
-                  <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
-                    {taskId || selectedTaskIds.length > 0 ? "Task context will appear after the first reply in this conversation." : "Project task context will appear after the first reply in this conversation."}
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {visibleContextTasks.map((task, index) => {
-                      const taskId = typeof task.id === "string" ? task.id : `${index}`;
-                      const key = typeof task.key === "string" ? task.key : null;
-                      const taskTitle = typeof task.title === "string" ? task.title : "Untitled task";
-                      return (
-                        <div key={taskId} className="rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
-                          <div className="font-medium" style={{ color: "var(--color-text)" }}>{key ?? "Task"}</div>
-                          <div className="truncate">{taskTitle}</div>
-                        </div>
-                      );
-                    })}
-                    {contextTasks.length > visibleContextTasks.length && (
-                      <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                        Showing {visibleContextTasks.length} of {contextTasks.length} loaded tasks.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
+              {contextMenuOpen && (
+                <div
+                  className="absolute left-0 right-0 z-20 mt-2 max-h-80 overflow-y-auto rounded-2xl border p-3 shadow-xl"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
+                >
+                  {contextTasks.length === 0 ? (
+                    <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                      {taskId || selectedTaskIds.length > 0 ? "Task context will appear after the first reply in this conversation." : "Project task context will appear after the first reply in this conversation."}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {visibleContextTasks.map((task, index) => {
+                        const taskId = typeof task.id === "string" ? task.id : `${index}`;
+                        const key = typeof task.key === "string" ? task.key : null;
+                        const taskTitle = typeof task.title === "string" ? task.title : "Untitled task";
+                        return (
+                          <div key={taskId} className="rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
+                            <div className="font-medium" style={{ color: "var(--color-text)" }}>{key ?? "Task"}</div>
+                            <div className="truncate">{taskTitle}</div>
+                          </div>
+                        );
+                      })}
+                      {contextTasks.length > visibleContextTasks.length && (
+                        <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                          Showing {visibleContextTasks.length} of {contextTasks.length} loaded tasks.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </details>
           </div>
         </div>
@@ -508,7 +635,10 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
         <div className="space-y-3">
           {messages.map((item) => (
             <div key={item.id} className="rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: item.role === "assistant" ? "var(--color-bg-overlay)" : "var(--color-surface)" }}>
-              <div className="mb-1 text-xs font-semibold" style={{ color: "var(--color-text-muted)" }}>{getMessageLabel(item.role)}</div>
+              <div className="mb-1 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                <span className="font-semibold">{getMessageLabel(item.role)}</span>
+                <span className="shrink-0">{formatMessageTimestamp(item.createdAt)}</span>
+              </div>
               {renderMessageContent(item.role, item.content)}
             </div>
           ))}
@@ -523,6 +653,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                 </span>
                 Thinking...
               </div>
+              <div className="mt-2 text-xs" style={{ color: "var(--color-text-muted)" }}>{new Date().toLocaleString()}</div>
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -557,6 +688,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
               id: `pending-${Date.now()}`,
               role: "user",
               content: pendingContent,
+              createdAt: new Date(),
             },
           ]));
 

@@ -687,8 +687,8 @@ export const aiRouter = createTRPCRouter({
           provider: {
             select: { id: true, label: true, scope: true, isEnabled: true },
           },
-          messages: { orderBy: { createdAt: "asc" } },
-          actionExecutions: { orderBy: { createdAt: "asc" } },
+          messages: { orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
+          actionExecutions: { orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
         },
       });
 
@@ -1010,7 +1010,7 @@ export const aiRouter = createTRPCRouter({
 
       return ctx.prisma.aiActionExecution.findMany({
         where: { conversationId: input.conversationId },
-        orderBy: { createdAt: "asc" },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       }).then((executions) => executions.map(mapExecutionForClient));
     }),
 

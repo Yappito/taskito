@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { AI_PERMISSION_VALUES } from "@/lib/ai-types";
 import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@/lib/password-policy";
@@ -27,9 +28,30 @@ function uniqueProjectIds(projectIds: string[] | undefined) {
 function getAiPreferences(settings: unknown) {
   const root = (settings ?? {}) as Record<string, unknown>;
   const preferences = (root.aiPreferences ?? {}) as Record<string, unknown>;
+  const draftProviderIds = (preferences.draftProviderIds ?? {}) as Record<string, unknown>;
+  const draftModes = (preferences.draftModes ?? {}) as Record<string, unknown>;
+  const draftPermissionsByProject = (preferences.draftPermissionsByProject ?? {}) as Record<string, unknown>;
+
+  const normalizedDraftPermissionsByProject = Object.fromEntries(
+    Object.entries(draftPermissionsByProject).map(([projectId, value]) => [
+      projectId,
+      Array.isArray(value)
+        ? value.filter((permission): permission is typeof AI_PERMISSION_VALUES[number] =>
+            typeof permission === "string" && AI_PERMISSION_VALUES.includes(permission as typeof AI_PERMISSION_VALUES[number])
+          )
+        : [],
+    ])
+  );
 
   return {
     sendOnEnter: preferences.sendOnEnter === true,
+    draftProviderIds: Object.fromEntries(
+      Object.entries(draftProviderIds).filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+    ) as Record<string, string>,
+    draftModes: Object.fromEntries(
+      Object.entries(draftModes).filter(([, value]) => value === "approval" || value === "yolo")
+    ) as Record<string, "approval" | "yolo">,
+    draftPermissionsByProject: normalizedDraftPermissionsByProject,
   };
 }
 
@@ -119,6 +141,9 @@ export const userRouter = createTRPCRouter({
     .input(
       z.object({
         sendOnEnter: z.boolean(),
+        draftProviderIds: z.record(z.string(), z.string()).optional(),
+        draftModes: z.record(z.string(), z.enum(["approval", "yolo"])).optional(),
+        draftPermissionsByProject: z.record(z.string(), z.array(z.enum(AI_PERMISSION_VALUES))).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -128,18 +153,22 @@ export const userRouter = createTRPCRouter({
       });
 
       const settings = (user.settings ?? {}) as Record<string, unknown>;
+      const nextPreferences = {
+        ...getAiPreferences(settings),
+        ...input,
+      };
 
       await ctx.prisma.user.update({
         where: { id: ctx.session.user.id },
         data: {
           settings: {
             ...settings,
-            aiPreferences: input,
+            aiPreferences: nextPreferences,
           } as Prisma.InputJsonValue,
         },
       });
 
-      return input;
+      return nextPreferences;
     }),
 
   /** Update the current user's profile */

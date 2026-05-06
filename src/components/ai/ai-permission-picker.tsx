@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
+
 import type { AiPermission } from "@/lib/ai-types";
 
 interface AiPermissionPickerProps {
@@ -31,6 +33,8 @@ export function AiPermissionPicker({ permissions, value, disabled = false, onCha
   const permissionSet = new Set(permissions);
   const allSelected = permissions.length > 0 && permissions.every((permission) => value.includes(permission));
   const selectedCount = permissions.filter((permission) => value.includes(permission)).length;
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   function toggleAll() {
     onChange(
@@ -40,17 +44,45 @@ export function AiPermissionPicker({ permissions, value, disabled = false, onCha
     );
   }
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handleClick(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open]);
+
   if (compact) {
     return (
-      <details className="relative" onClick={(event) => disabled && event.preventDefault()}>
-        <summary
-          className="flex h-9 cursor-pointer list-none items-center justify-between rounded-lg border px-3 text-sm"
+      <div ref={containerRef} className="relative">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setOpen((current) => !current)}
+          className="flex h-9 w-full items-center justify-between rounded-lg border px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
           style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
         >
           <span>{selectedCount === 0 ? "No permissions" : `${selectedCount} permission${selectedCount === 1 ? "" : "s"} selected`}</span>
-          <span style={{ color: "var(--color-text-muted)" }}>v</span>
-        </summary>
-        {!disabled && (
+          <span style={{ color: "var(--color-text-muted)" }}>{open ? "^" : "v"}</span>
+        </button>
+        {open && !disabled && (
           <div
             className="absolute left-0 right-0 z-20 mt-2 max-h-80 overflow-y-auto rounded-2xl border p-3 shadow-xl"
             style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
@@ -93,7 +125,7 @@ export function AiPermissionPicker({ permissions, value, disabled = false, onCha
             </div>
           </div>
         )}
-      </details>
+      </div>
     );
   }
 

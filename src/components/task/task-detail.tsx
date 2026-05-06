@@ -79,6 +79,7 @@ function formatBytes(sizeBytes: number) {
 export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [editing, setEditing] = useState(false);
   const [showLinkForm, setShowLinkForm] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
   const [linkTargetId, setLinkTargetId] = useState("");
   const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -683,32 +684,6 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               </div>
             </div>
 
-            <label
-              className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border p-4 text-sm"
-              style={{
-                backgroundColor: "var(--color-bg-overlay)",
-                borderColor: "var(--color-border)",
-                color: "var(--color-text-secondary)",
-              }}
-            >
-              <span className="min-w-0">
-                <span className="block font-medium" style={{ color: "var(--color-text)" }}>
-                  Due-date alert
-                </span>
-                <span className="mt-1 block text-xs" style={{ color: "var(--color-text-muted)" }}>
-                  {alertAcknowledged ? "Acknowledged for this task" : "Not acknowledged yet"}
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                className="rounded"
-                checked={alertAcknowledged}
-                onChange={(e) => {
-                  updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
-                }}
-              />
-            </label>
-
             {taskBody && (
               <section
                 className="rounded-2xl border p-4"
@@ -733,6 +708,159 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </div>
               </section>
             )}
+
+            <section
+              className="rounded-2xl border p-4"
+              style={{
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+              }}
+            >
+              <h4
+                className="text-sm font-semibold"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Comments
+              </h4>
+              <div className="mt-3 space-y-2">
+                {task.comments.map(
+                  (comment: {
+                    id: string;
+                    content: string;
+                    createdAt: string | Date;
+                    author: { name: string | null };
+                    attachments?: Array<{
+                      id: string;
+                      originalName: string;
+                      mimeType: string;
+                      sizeBytes: number;
+                    }>;
+                  }) => (
+                    <div
+                      key={comment.id}
+                      className="rounded-xl border p-3 text-sm"
+                      style={{
+                        backgroundColor: "var(--color-bg-overlay)",
+                        borderColor: "var(--color-border)",
+                      }}
+                    >
+                      <div
+                        className="flex justify-between text-xs"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        <span>{comment.author.name ?? "User"}</span>
+                        <span>
+                          {new Date(comment.createdAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap break-words">{comment.content}</p>
+                      {(comment.attachments?.length ?? 0) > 0 && (
+                        <div className="mt-3 space-y-2">
+                          {comment.attachments!.map((attachment) => {
+                            const attachmentUrl = `/api/comment-attachments/${attachment.id}`;
+                            const isImage = attachment.mimeType.startsWith("image/");
+
+                            return (
+                              <div key={attachment.id} className="rounded-md border p-2" style={{ borderColor: "var(--color-border)" }}>
+                                {isImage && (
+                                  <a href={attachmentUrl} target="_blank" rel="noreferrer">
+                                    <Image
+                                      src={attachmentUrl}
+                                      alt={attachment.originalName}
+                                      width={720}
+                                      height={420}
+                                      unoptimized
+                                      className="mb-2 max-h-44 rounded object-contain"
+                                    />
+                                  </a>
+                                )}
+                                <a
+                                  href={attachmentUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm font-medium underline"
+                                  style={{ color: "var(--color-accent)" }}
+                                >
+                                  {attachment.originalName}
+                                </a>
+                                <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                                  {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )
+                )}
+                {task.comments.length === 0 && (
+                  <p
+                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                  >
+                    No comments yet
+                  </p>
+                )}
+              </div>
+              <form onSubmit={handleAddComment} className="mt-3 space-y-2">
+                {commentError && (
+                  <div
+                    className="rounded-lg border px-3 py-2 text-sm"
+                    style={{
+                      backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                      borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                      color: "var(--color-danger)",
+                    }}
+                  >
+                    {commentError}
+                  </div>
+                )}
+                <textarea
+                  name="content"
+                  value={commentContent}
+                  onChange={(event) => setCommentContent(event.target.value)}
+                  placeholder="Add a comment..."
+                  maxLength={5000}
+                  rows={3}
+                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                  style={{
+                    backgroundColor: "var(--color-surface)",
+                    borderColor: "var(--color-border)",
+                    color: "var(--color-text)",
+                  }}
+                />
+                <div>
+                  <input
+                    type="file"
+                    multiple
+                    onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
+                    className="block w-full text-xs"
+                  />
+                  {commentFiles.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {commentFiles.map((file) => (
+                        <span
+                          key={`${file.name}-${file.size}`}
+                          className="rounded-full px-2 py-1 text-xs"
+                          style={{
+                            backgroundColor: "var(--color-bg-muted)",
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          {file.name} · {formatBytes(file.size)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-end">
+                  <Button type="submit" size="sm" disabled={isSubmittingComment || (!commentContent.trim() && commentFiles.length === 0)}>
+                    {isSubmittingComment ? "Sending..." : "Send"}
+                  </Button>
+                </div>
+              </form>
+            </section>
 
             {(task.tags.length > 0 || task.customFieldValues.length > 0) && (
               <section
@@ -798,6 +926,32 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 )}
               </section>
             )}
+
+            <label
+              className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border p-4 text-sm"
+              style={{
+                backgroundColor: "var(--color-bg-overlay)",
+                borderColor: "var(--color-border)",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              <span className="min-w-0">
+                <span className="block font-medium" style={{ color: "var(--color-text)" }}>
+                  Due-date alert
+                </span>
+                <span className="mt-1 block text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {alertAcknowledged ? "Acknowledged for this task" : "Not acknowledged yet"}
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                className="rounded"
+                checked={alertAcknowledged}
+                onChange={(e) => {
+                  updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
+                }}
+              />
+            </label>
 
             <section
               className="rounded-2xl border p-4"
@@ -976,28 +1130,24 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 borderColor: "var(--color-border)",
               }}
             >
-              <h4
-                className="text-sm font-semibold"
-                style={{ color: "var(--color-text-secondary)" }}
+              <button
+                type="button"
+                onClick={() => setShowActivity((current) => !current)}
+                className="flex w-full items-center justify-between gap-3 text-left"
               >
-                Comments
-              </h4>
-              <div className="mt-3 space-y-2">
-                {task.comments.map(
-                  (comment: {
-                    id: string;
-                    content: string;
-                    createdAt: string | Date;
-                    author: { name: string | null };
-                    attachments?: Array<{
-                      id: string;
-                      originalName: string;
-                      mimeType: string;
-                      sizeBytes: number;
-                    }>;
-                  }) => (
+                <h4
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Activity
+                </h4>
+                <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>{showActivity ? "Hide" : "Show"}</span>
+              </button>
+              {showActivity && (
+                <div className="mt-3 space-y-2">
+                  {activityEvents.map((event) => (
                     <div
-                      key={comment.id}
+                      key={event.id}
                       className="rounded-xl border p-3 text-sm"
                       style={{
                         backgroundColor: "var(--color-bg-overlay)",
@@ -1005,166 +1155,26 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                       }}
                     >
                       <div
-                        className="flex justify-between text-xs"
+                        className="flex justify-between gap-3 text-xs"
                         style={{ color: "var(--color-text-muted)" }}
                       >
-                        <span>{comment.author.name ?? "User"}</span>
                         <span>
-                          {new Date(comment.createdAt).toLocaleDateString()}
+                          {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
                         </span>
+                        <span className="shrink-0">{new Date(event.createdAt).toLocaleString()}</span>
                       </div>
-                      <p className="mt-1 whitespace-pre-wrap break-words">{comment.content}</p>
-                      {(comment.attachments?.length ?? 0) > 0 && (
-                        <div className="mt-3 space-y-2">
-                          {comment.attachments!.map((attachment) => {
-                            const attachmentUrl = `/api/comment-attachments/${attachment.id}`;
-                            const isImage = attachment.mimeType.startsWith("image/");
-
-                            return (
-                              <div key={attachment.id} className="rounded-md border p-2" style={{ borderColor: "var(--color-border)" }}>
-                                {isImage && (
-                                  <a href={attachmentUrl} target="_blank" rel="noreferrer">
-                                    <Image
-                                      src={attachmentUrl}
-                                      alt={attachment.originalName}
-                                      width={720}
-                                      height={420}
-                                      unoptimized
-                                      className="mb-2 max-h-44 rounded object-contain"
-                                    />
-                                  </a>
-                                )}
-                                <a
-                                  href={attachmentUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-sm font-medium underline"
-                                  style={{ color: "var(--color-accent)" }}
-                                >
-                                  {attachment.originalName}
-                                </a>
-                                <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                                  {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
                     </div>
-                  )
-                )}
-                {task.comments.length === 0 && (
-                  <p
-                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
-                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
-                  >
-                    No comments yet
-                  </p>
-                )}
-              </div>
-              <form onSubmit={handleAddComment} className="mt-3 space-y-2">
-                {commentError && (
-                  <div
-                    className="rounded-lg border px-3 py-2 text-sm"
-                    style={{
-                      backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                      borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                      color: "var(--color-danger)",
-                    }}
-                  >
-                    {commentError}
-                  </div>
-                )}
-                <textarea
-                  name="content"
-                  value={commentContent}
-                  onChange={(event) => setCommentContent(event.target.value)}
-                  placeholder="Add a comment..."
-                  maxLength={5000}
-                  rows={3}
-                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                  style={{
-                    backgroundColor: "var(--color-surface)",
-                    borderColor: "var(--color-border)",
-                    color: "var(--color-text)",
-                  }}
-                />
-                <div>
-                  <input
-                    type="file"
-                    multiple
-                    onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
-                    className="block w-full text-xs"
-                  />
-                  {commentFiles.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {commentFiles.map((file) => (
-                        <span
-                          key={`${file.name}-${file.size}`}
-                          className="rounded-full px-2 py-1 text-xs"
-                          style={{
-                            backgroundColor: "var(--color-bg-muted)",
-                            color: "var(--color-text-secondary)",
-                          }}
-                        >
-                          {file.name} · {formatBytes(file.size)}
-                        </span>
-                      ))}
-                    </div>
+                  ))}
+                  {activityEvents.length === 0 && (
+                    <p
+                      className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                      style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                    >
+                      No activity recorded yet
+                    </p>
                   )}
                 </div>
-                <div className="flex justify-end">
-                  <Button type="submit" size="sm" disabled={isSubmittingComment || (!commentContent.trim() && commentFiles.length === 0)}>
-                    {isSubmittingComment ? "Sending..." : "Send"}
-                  </Button>
-                </div>
-              </form>
-            </section>
-
-            <section
-              className="rounded-2xl border p-4"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-              }}
-            >
-              <h4
-                className="text-sm font-semibold"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Activity
-              </h4>
-              <div className="mt-3 space-y-2">
-                {activityEvents.map((event) => (
-                  <div
-                    key={event.id}
-                    className="rounded-xl border p-3 text-sm"
-                    style={{
-                      backgroundColor: "var(--color-bg-overlay)",
-                      borderColor: "var(--color-border)",
-                    }}
-                  >
-                    <div
-                      className="flex justify-between gap-3 text-xs"
-                      style={{ color: "var(--color-text-muted)" }}
-                    >
-                      <span>
-                        {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
-                      </span>
-                      <span className="shrink-0">{new Date(event.createdAt).toLocaleString()}</span>
-                    </div>
-                  </div>
-                ))}
-                {activityEvents.length === 0 && (
-                  <p
-                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
-                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
-                  >
-                    No activity recorded yet
-                  </p>
-                )}
-              </div>
+              )}
             </section>
 
             <section
