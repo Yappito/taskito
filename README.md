@@ -245,8 +245,8 @@ Useful commands from the repository root:
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 - The documented `docker compose up -d --pull always` command refreshes the published app image before startup.
-- AI providers are remote endpoints; local desktop model assumptions are not part of the hosted deployment model.
 - AI provider URLs are validated before use and can be restricted further with `AI_PROVIDER_HOST_ALLOWLIST`.
+- AI providers may use either `http://` or `https://`, including local or private-network endpoints for self-hosted LLMs.
 - AI-generated writes are permission-scoped and approval-based unless `Yolo mode` is explicitly enabled for the conversation and allowed by project policy.
 
 ## Development

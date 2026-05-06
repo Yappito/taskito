@@ -93,9 +93,6 @@ Since commit `d80815b` (`UI overhaul, security fixes`), Taskito has gained a ful
 - Provider calls are server-side only.
 - Provider URL validation now enforces:
   - HTTP/HTTPS only
-  - HTTPS unless explicitly allowlisted
-  - loopback blocking
-  - private/reserved IP blocking
   - DNS resolution checks
 - Reserved headers such as `Authorization`, `x-api-key`, and `anthropic-version` cannot be overridden by user-supplied defaults.
 - AI provider request timeout is configurable via `AI_PROVIDER_REQUEST_TIMEOUT_MS`.

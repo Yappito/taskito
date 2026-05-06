@@ -1,22 +1,43 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { normalizeAiProviderHeaders, normalizeAiProviderModel, validateAiProviderBaseUrl } from "@/lib/ai-provider-validation";
+const lookupMock = vi.fn();
+
+vi.mock("node:dns/promises", () => ({
+  lookup: lookupMock,
+}));
+
+import {
+  assertAiProviderBaseUrlFetchAllowed,
+  normalizeAiProviderHeaders,
+  normalizeAiProviderModel,
+  validateAiProviderBaseUrl,
+} from "@/lib/ai-provider-validation";
 
 describe("ai-provider-validation", () => {
+  beforeEach(() => {
+    lookupMock.mockReset();
+  });
+
   it("normalizes a valid provider URL", () => {
     expect(validateAiProviderBaseUrl("https://api.example.com/v1/")).toBe("https://api.example.com/v1");
   });
 
-  it("rejects loopback hosts", () => {
-    expect(() => validateAiProviderBaseUrl("http://localhost:11434")).toThrow(/Loopback/);
+  it("allows HTTP provider URLs", () => {
+    expect(validateAiProviderBaseUrl("http://api.example.com/v1")).toBe("http://api.example.com/v1");
   });
 
-  it("rejects non-HTTPS public provider URLs unless allowlisted", () => {
-    expect(() => validateAiProviderBaseUrl("http://api.example.com/v1")).toThrow(/HTTPS/);
+  it("allows loopback hosts for local providers", () => {
+    expect(validateAiProviderBaseUrl("http://localhost:11434")).toBe("http://localhost:11434");
   });
 
-  it("rejects private IP provider URLs", () => {
-    expect(() => validateAiProviderBaseUrl("https://10.0.0.5/v1")).toThrow(/private or reserved/);
+  it("allows private IP provider URLs", () => {
+    expect(validateAiProviderBaseUrl("https://10.0.0.5/v1")).toBe("https://10.0.0.5/v1");
+  });
+
+  it("allows resolved loopback or private addresses during provider fetches", async () => {
+    lookupMock.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+
+    await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).resolves.toBe("http://localhost:11434");
   });
 
   it("normalizes provider model names", () => {
