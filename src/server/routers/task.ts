@@ -84,6 +84,49 @@ async function validateAssigneeAccess(
   }
 }
 
+type TaskNumberTx = Pick<typeof import("@/lib/prisma").prisma, "task">;
+
+async function getNextTaskNumber(tx: TaskNumberTx, projectId: string) {
+  const lastTask = await tx.task.findFirst({
+    where: { projectId },
+    orderBy: { taskNumber: "desc" },
+    select: { taskNumber: true },
+  });
+
+  return (lastTask?.taskNumber ?? 0) + 1;
+}
+
+function isTaskNumberConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError
+    && error.code === "P2002"
+    && Array.isArray(error.meta?.target)
+    && error.meta.target.includes("projectId")
+    && error.meta.target.includes("taskNumber");
+}
+
+export async function createTaskWithNextNumber<T>(
+  tx: TaskNumberTx,
+  projectId: string,
+  factory: (taskNumber: number) => Promise<T>,
+  options?: { maxAttempts?: number }
+) {
+  const maxAttempts = options?.maxAttempts ?? 5;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const nextTaskNumber = await getNextTaskNumber(tx, projectId);
+
+    try {
+      return await factory(nextTaskNumber);
+    } catch (error) {
+      if (!isTaskNumberConflict(error) || attempt === maxAttempts) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("Unable to allocate a task number");
+}
+
 const customFieldValueInputSchema = z.object({
   customFieldId: z.string().cuid(),
   value: z.union([z.string(), z.number(), z.null()]),
@@ -522,18 +565,10 @@ export const taskRouter = createTRPCRouter({
       }
 
       const task = await ctx.prisma.$transaction(async (tx) => {
-        // Get the next task number for this project
-        const lastTask = await tx.task.findFirst({
-          where: { projectId: data.projectId },
-          orderBy: { taskNumber: "desc" },
-          select: { taskNumber: true },
-        });
-        const nextNumber = (lastTask?.taskNumber ?? 0) + 1;
-
-        return tx.task.create({
+        return createTaskWithNextNumber(tx, data.projectId, (taskNumber) => tx.task.create({
           data: {
             ...data,
-            taskNumber: nextNumber,
+            taskNumber,
             creatorId: ctx.session.user.id,
             assigneeId: effectiveAssigneeId,
             closedAt: initialStatusIsFinal ? new Date() : null,
@@ -561,7 +596,7 @@ export const taskRouter = createTRPCRouter({
             assignee: { select: { id: true, name: true, email: true, image: true } },
             project: { select: { key: true, slug: true } },
           },
-        });
+        }));
       });
 
       // Fire-and-forget auto-tagging
@@ -1032,16 +1067,10 @@ export const taskRouter = createTRPCRouter({
           },
         });
 
-        const lastTask = await tx.task.findFirst({
-          where: { projectId: currentTask.projectId },
-          orderBy: { taskNumber: "desc" },
-          select: { taskNumber: true },
-        });
-
-        const duplicatedTask = await tx.task.create({
+        return createTaskWithNextNumber(tx, currentTask.projectId, (taskNumber) => tx.task.create({
           data: {
             projectId: currentTask.projectId,
-            taskNumber: (lastTask?.taskNumber ?? 0) + 1,
+            taskNumber,
             title: input.title ?? `Copy of ${currentTask.title}`,
             description: currentTask.description ?? Prisma.JsonNull,
             body: currentTask.body,
@@ -1065,9 +1094,7 @@ export const taskRouter = createTRPCRouter({
             assignee: { select: { id: true, name: true, email: true, image: true } },
             project: { select: { key: true, slug: true } },
           },
-        });
-
-        return duplicatedTask;
+        }));
       });
       createTaskActivity({
         taskId: task.id,
