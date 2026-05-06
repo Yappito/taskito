@@ -217,7 +217,28 @@ async function resolveTaskReference(prisma: PrismaClient, projectId: string, ref
 
   const match = trimmed.match(taskKeyPattern);
   if (!match) {
-    throw new Error(`Unsupported task reference \"${trimmed}\". Use a task id or task key like PROJECT-123.`);
+    const titleMatches = await prisma.task.findMany({
+      where: {
+        projectId,
+        title: {
+          equals: trimmed,
+          mode: "insensitive",
+        },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { id: true },
+      take: 2,
+    });
+
+    if (titleMatches.length === 1) {
+      return titleMatches[0].id;
+    }
+
+    if (titleMatches.length > 1) {
+      throw new Error(`Task reference \"${trimmed}\" matched multiple tasks in this project. Use a task key like PROJECT-123.`);
+    }
+
+    throw new Error(`Unsupported task reference \"${trimmed}\". Use a task id, exact task title, or task key like PROJECT-123.`);
   }
 
   const resolvedTask = await prisma.task.findFirst({

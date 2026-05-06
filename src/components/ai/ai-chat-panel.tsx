@@ -26,6 +26,33 @@ interface PendingMessage {
   createdAt: Date;
 }
 
+type TimelineItem =
+  | {
+      id: string;
+      kind: "message";
+      role: string;
+      content: string;
+      createdAt: string | Date;
+    }
+  | {
+      id: string;
+      kind: "proposal-group";
+      createdAt: string | Date;
+      proposals: Array<{
+        id: string;
+        actionType: string;
+        title?: string | null;
+        summary?: string | null;
+        status: string;
+        rollbackStatus?: string;
+        rollbackErrorMessage?: string | null;
+        rolledBackAt?: string | Date | null;
+        createdAt: string | Date;
+        errorMessage?: string | null;
+        proposedPayload: Record<string, unknown>;
+      }>;
+    };
+
 function formatMessageTimestamp(value: string | Date) {
   return new Date(value).toLocaleString();
 }
@@ -234,6 +261,53 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     }))),
     ...pendingMessages,
   ]);
+  const timeline = useMemo(() => {
+    const proposalsByMessageId = new Map<string, typeof proposals>();
+    const ungroupedProposals: typeof proposals = [];
+
+    for (const proposal of proposals) {
+      const messageId = proposal.messageId;
+      if (messageId) {
+        const existing = proposalsByMessageId.get(messageId) ?? [];
+        existing.push(proposal);
+        proposalsByMessageId.set(messageId, existing);
+      } else {
+        ungroupedProposals.push(proposal);
+      }
+    }
+
+    const items: TimelineItem[] = [];
+    for (const message of messages) {
+      items.push({
+        id: message.id,
+        kind: "message",
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+      });
+
+      const groupedProposals = proposalsByMessageId.get(message.id);
+      if (groupedProposals && groupedProposals.length > 0) {
+        items.push({
+          id: `proposal-group-${message.id}`,
+          kind: "proposal-group",
+          createdAt: groupedProposals[0].createdAt,
+          proposals: sortProposals(groupedProposals),
+        });
+      }
+    }
+
+    for (const proposal of sortProposals(ungroupedProposals)) {
+      items.push({
+        id: `proposal-group-${proposal.id}`,
+        kind: "proposal-group",
+        createdAt: proposal.createdAt,
+        proposals: [proposal],
+      });
+    }
+
+    return sortProposals(items);
+  }, [messages, proposals]);
 
   const canUseYolo = policy?.allowYoloMode ?? true;
   const displayName = currentUser?.name?.trim() || currentUser?.email || "You";
@@ -253,7 +327,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [isThinking, messages.length, proposals.length]);
+  }, [isThinking, timeline.length]);
 
   useEffect(() => {
     if (!canUseYolo && mode === "yolo") {
@@ -633,15 +707,30 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
           </div>
         )}
         <div className="space-y-3">
-          {messages.map((item) => (
-            <div key={item.id} className="rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: item.role === "assistant" ? "var(--color-bg-overlay)" : "var(--color-surface)" }}>
-              <div className="mb-1 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
-                <span className="font-semibold">{getMessageLabel(item.role)}</span>
-                <span className="shrink-0">{formatMessageTimestamp(item.createdAt)}</span>
+          {timeline.map((item) => {
+            if (item.kind === "proposal-group") {
+              return (
+                <AiActionProposals
+                  key={item.id}
+                  proposals={item.proposals}
+                  isPending={approveAction.isPending || rejectAction.isPending || rollbackAction.isPending}
+                  onApprove={(proposalId) => approveAction.mutate({ id: proposalId })}
+                  onReject={(proposalId) => rejectAction.mutate({ id: proposalId })}
+                  onRollback={(proposalId) => rollbackAction.mutate({ id: proposalId })}
+                />
+              );
+            }
+
+            return (
+              <div key={item.id} className="rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: item.role === "assistant" ? "var(--color-bg-overlay)" : "var(--color-surface)" }}>
+                <div className="mb-1 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  <span className="font-semibold">{getMessageLabel(item.role)}</span>
+                  <span className="shrink-0">{formatMessageTimestamp(item.createdAt)}</span>
+                </div>
+                {renderMessageContent(item.role, item.content)}
               </div>
-              {renderMessageContent(item.role, item.content)}
-            </div>
-          ))}
+            );
+          })}
           {isThinking && (
             <div className="rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
               <div className="mb-1 text-xs font-semibold" style={{ color: "var(--color-text-muted)" }}>Taskito AI</div>
@@ -657,16 +746,6 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
             </div>
           )}
           <div ref={messagesEndRef} />
-        </div>
-
-        <div className="mt-4">
-          <AiActionProposals
-            proposals={proposals}
-            isPending={approveAction.isPending || rejectAction.isPending || rollbackAction.isPending}
-            onApprove={(proposalId) => approveAction.mutate({ id: proposalId })}
-            onReject={(proposalId) => rejectAction.mutate({ id: proposalId })}
-            onRollback={(proposalId) => rollbackAction.mutate({ id: proposalId })}
-          />
         </div>
       </div>
 

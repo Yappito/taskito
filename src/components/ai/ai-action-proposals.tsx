@@ -22,15 +22,20 @@ interface AiActionProposalsProps {
   onApprove: (proposalId: string) => void;
   onReject: (proposalId: string) => void;
   onRollback: (proposalId: string) => void;
+  className?: string;
 }
 
-export function AiActionProposals({ proposals, isPending = false, onApprove, onReject, onRollback }: AiActionProposalsProps) {
+function formatProposalTimestamp(value: string | Date) {
+  return new Date(value).toLocaleString();
+}
+
+export function AiActionProposals({ proposals, isPending = false, onApprove, onReject, onRollback, className }: AiActionProposalsProps) {
   if (proposals.length === 0) {
     return null;
   }
 
   return (
-    <div className="space-y-3">
+    <div className={className ?? "space-y-3"}>
       {proposals.map((proposal) => {
         const isExecuted = proposal.status === "executed";
 
@@ -85,6 +90,10 @@ export function AiActionProposals({ proposals, isPending = false, onApprove, onR
               className="rounded-2xl border p-3"
               style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
             >
+              <div className="mb-2 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                <span className="font-semibold">Taskito AI action</span>
+                <span className="shrink-0">{formatProposalTimestamp(proposal.createdAt)}</span>
+              </div>
               <div className="flex items-start gap-3">
                 <details className="min-w-0 flex-1">
                   <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
@@ -112,6 +121,10 @@ export function AiActionProposals({ proposals, isPending = false, onApprove, onR
             className="rounded-2xl border p-4"
             style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
           >
+            <div className="mb-2 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
+              <span className="font-semibold">Taskito AI action</span>
+              <span className="shrink-0">{formatProposalTimestamp(proposal.createdAt)}</span>
+            </div>
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div className="min-w-0">
                 {badges}

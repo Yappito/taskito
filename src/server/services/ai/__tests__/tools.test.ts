@@ -111,6 +111,7 @@ describe("ai tools", () => {
   it("resolves task-key link payloads to task ids", async () => {
     const prisma = {
       task: {
+        findMany: vi.fn(),
         findFirst: vi
           .fn()
           .mockResolvedValueOnce({ id: taskId })
@@ -137,6 +138,7 @@ describe("ai tools", () => {
   it("resolves remove link proposals by task tuple", async () => {
     const prisma = {
       task: {
+        findMany: vi.fn(),
         findFirst: vi
           .fn()
           .mockResolvedValueOnce({ id: taskId })
@@ -164,6 +166,7 @@ describe("ai tools", () => {
   it("resolves depends_on payloads with the correct blocker direction", async () => {
     const prisma = {
       task: {
+        findMany: vi.fn(),
         findFirst: vi
           .fn()
           .mockResolvedValueOnce({ id: otherTaskId })
@@ -184,6 +187,33 @@ describe("ai tools", () => {
       sourceTaskId: otherTaskId,
       targetTaskId: taskId,
       linkType: "blocks",
+    });
+  });
+
+  it("resolves add link proposals by exact task title when task keys are unavailable", async () => {
+    const prisma = {
+      task: {
+        findFirst: vi.fn(),
+        findMany: vi
+          .fn()
+          .mockResolvedValueOnce([{ id: taskId }])
+          .mockResolvedValueOnce([{ id: otherTaskId }]),
+      },
+      taskLink: {
+        findFirst: vi.fn(),
+      },
+    } as unknown as typeof import("@/lib/prisma").prisma;
+
+    const payload = await resolveAiActionPayload(prisma, projectId, "addLink", {
+      sourceTaskId: "Coordinate non-critical SC2, SC3 and SC4 verification cluster deployment with Aya and Manijeh",
+      targetTaskId: "Add new dataflow for Jens' neuvector connection for the Non-Critical Verification clusters",
+      linkType: "parent",
+    });
+
+    expect(payload).toMatchObject({
+      sourceTaskId: taskId,
+      targetTaskId: otherTaskId,
+      linkType: "parent",
     });
   });
 });
