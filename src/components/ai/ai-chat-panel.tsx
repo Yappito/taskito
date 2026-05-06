@@ -64,6 +64,29 @@ function sortProposals<T extends { id: string; createdAt: string | Date }>(items
   });
 }
 
+function dedupePendingMessages(
+  persistedMessages: Array<{ role: string; content: string; createdAt: string | Date }>,
+  optimisticMessages: PendingMessage[]
+) {
+  if (optimisticMessages.length === 0 || persistedMessages.length === 0) {
+    return optimisticMessages;
+  }
+
+  const remaining = [...optimisticMessages];
+  const recentPersistedUserMessages = persistedMessages
+    .filter((message) => message.role === "user")
+    .slice(-optimisticMessages.length);
+
+  for (const persistedMessage of recentPersistedUserMessages) {
+    const matchingIndex = remaining.findIndex((pendingMessage) => pendingMessage.content === persistedMessage.content);
+    if (matchingIndex !== -1) {
+      remaining.splice(matchingIndex, 1);
+    }
+  }
+
+  return remaining;
+}
+
 export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, onClose }: AiChatPanelProps) {
   const utils = trpc.useUtils();
   const { data: permissions } = trpc.ai.listPermissions.useQuery();
@@ -252,14 +275,16 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     ...proposal,
     proposedPayload: proposal.proposedPayload as Record<string, unknown>,
   })));
+  const persistedMessages = ((conversation?.messages ?? []).map((item) => ({
+    id: item.id,
+    role: item.role,
+    content: item.content,
+    createdAt: item.createdAt,
+  })));
+  const visiblePendingMessages = dedupePendingMessages(persistedMessages, pendingMessages);
   const messages = sortProposals([
-    ...((conversation?.messages ?? []).map((item) => ({
-      id: item.id,
-      role: item.role,
-      content: item.content,
-      createdAt: item.createdAt,
-    }))),
-    ...pendingMessages,
+    ...persistedMessages,
+    ...visiblePendingMessages,
   ]);
   const timeline = useMemo(() => {
     const proposalsByMessageId = new Map<string, typeof proposals>();
