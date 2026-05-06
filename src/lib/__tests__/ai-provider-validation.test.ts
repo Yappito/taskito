@@ -1,9 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const lookupMock = vi.fn();
-
 vi.mock("node:dns/promises", () => ({
-  lookup: lookupMock,
+  lookup: vi.fn(),
 }));
 
 import {
@@ -12,6 +10,9 @@ import {
   normalizeAiProviderModel,
   validateAiProviderBaseUrl,
 } from "@/lib/ai-provider-validation";
+import { lookup } from "node:dns/promises";
+
+const lookupMock = vi.mocked(lookup);
 
 describe("ai-provider-validation", () => {
   beforeEach(() => {

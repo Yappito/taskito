@@ -27,10 +27,6 @@ function normalizeHostname(hostname: string) {
   return hostname.trim().toLowerCase().replace(/^\[(.*)]$/, "$1");
 }
 
-function isAllowlistedHost(hostname: string) {
-  return getAllowedHosts().includes(normalizeHostname(hostname));
-}
-
 function normalizeBaseUrl(rawUrl: string) {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
