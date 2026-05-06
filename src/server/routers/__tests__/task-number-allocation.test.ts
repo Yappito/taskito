@@ -12,6 +12,7 @@ describe("task number allocation", () => {
           .mockResolvedValueOnce({ taskNumber: 7 })
           .mockResolvedValueOnce({ taskNumber: 8 }),
       },
+      $transaction: vi.fn(async (callback) => callback(tx)),
     } as const;
 
     const create = vi
@@ -23,10 +24,11 @@ describe("task number allocation", () => {
       }))
       .mockResolvedValueOnce({ id: "task-9", taskNumber: 9 });
 
-    const result = await createTaskWithNextNumber(tx as never, "project-1", create);
+    const result = await createTaskWithNextNumber(tx as never, "project-1", (_innerTx, taskNumber) => create(taskNumber));
 
     expect(create).toHaveBeenNthCalledWith(1, 8);
     expect(create).toHaveBeenNthCalledWith(2, 9);
+    expect(tx.$transaction).toHaveBeenCalledTimes(2);
     expect(result).toEqual({ id: "task-9", taskNumber: 9 });
   });
 
@@ -35,11 +37,12 @@ describe("task number allocation", () => {
       task: {
         findFirst: vi.fn().mockResolvedValue({ taskNumber: 3 }),
       },
+      $transaction: vi.fn(async (callback) => callback(tx)),
     } as const;
 
     const create = vi.fn().mockRejectedValue(new Error("boom"));
 
-    await expect(createTaskWithNextNumber(tx as never, "project-1", create)).rejects.toThrow("boom");
+    await expect(createTaskWithNextNumber(tx as never, "project-1", (_innerTx, taskNumber) => create(taskNumber))).rejects.toThrow("boom");
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith(4);
   });

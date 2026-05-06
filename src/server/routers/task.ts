@@ -84,10 +84,11 @@ async function validateAssigneeAccess(
   }
 }
 
-type TaskNumberTx = Pick<typeof import("@/lib/prisma").prisma, "task">;
+type TaskNumberClient = Pick<typeof import("@/lib/prisma").prisma, "$transaction" | "task">;
+type TaskNumberTransactionClient = Pick<typeof import("@/lib/prisma").prisma, "task">;
 
-async function getNextTaskNumber(tx: TaskNumberTx, projectId: string) {
-  const lastTask = await tx.task.findFirst({
+async function getNextTaskNumber(client: Pick<typeof import("@/lib/prisma").prisma, "task">, projectId: string) {
+  const lastTask = await client.task.findFirst({
     where: { projectId },
     orderBy: { taskNumber: "desc" },
     select: { taskNumber: true },
@@ -105,18 +106,18 @@ function isTaskNumberConflict(error: unknown) {
 }
 
 export async function createTaskWithNextNumber<T>(
-  tx: TaskNumberTx,
+  client: TaskNumberClient,
   projectId: string,
-  factory: (taskNumber: number) => Promise<T>,
+  factory: (tx: TaskNumberTransactionClient, taskNumber: number) => Promise<T>,
   options?: { maxAttempts?: number }
 ) {
   const maxAttempts = options?.maxAttempts ?? 5;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const nextTaskNumber = await getNextTaskNumber(tx, projectId);
+    const nextTaskNumber = await getNextTaskNumber(client, projectId);
 
     try {
-      return await factory(nextTaskNumber);
+      return await client.$transaction(async (tx) => factory(tx, nextTaskNumber));
     } catch (error) {
       if (!isTaskNumberConflict(error) || attempt === maxAttempts) {
         throw error;
@@ -564,8 +565,7 @@ export const taskRouter = createTRPCRouter({
         initialStatusIsFinal = initialStatus.isFinal;
       }
 
-      const task = await ctx.prisma.$transaction(async (tx) => {
-        return createTaskWithNextNumber(tx, data.projectId, (taskNumber) => tx.task.create({
+      const task = await createTaskWithNextNumber(ctx.prisma, data.projectId, (tx, taskNumber) => tx.task.create({
           data: {
             ...data,
             taskNumber,
@@ -597,7 +597,6 @@ export const taskRouter = createTRPCRouter({
             project: { select: { key: true, slug: true } },
           },
         }));
-      });
 
       // Fire-and-forget auto-tagging
       autoTagTask(ctx.prisma, task.id).catch(() => {});
@@ -1059,15 +1058,14 @@ export const taskRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
 
-      const task = await ctx.prisma.$transaction(async (tx) => {
-        const currentTask = await tx.task.findUniqueOrThrow({
+      const currentTask = await ctx.prisma.task.findUniqueOrThrow({
           where: { id: input.id },
           include: {
             tags: { select: { tagId: true } },
           },
         });
 
-        return createTaskWithNextNumber(tx, currentTask.projectId, (taskNumber) => tx.task.create({
+      const task = await createTaskWithNextNumber(ctx.prisma, currentTask.projectId, (tx, taskNumber) => tx.task.create({
           data: {
             projectId: currentTask.projectId,
             taskNumber,
@@ -1095,7 +1093,6 @@ export const taskRouter = createTRPCRouter({
             project: { select: { key: true, slug: true } },
           },
         }));
-      });
       createTaskActivity({
         taskId: task.id,
         actorId: ctx.session.user.id,
