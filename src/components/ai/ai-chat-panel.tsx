@@ -28,7 +28,7 @@ interface PendingMessage {
 export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, onClose }: AiChatPanelProps) {
   const utils = trpc.useUtils();
   const { data: permissions } = trpc.ai.listPermissions.useQuery();
-  const { data: providers = [] } = trpc.ai.listProviders.useQuery({ projectId });
+  const { data: providers = [] } = trpc.ai.listProviders.useQuery({ projectId, actorScope: "chat" });
   const { data: policy } = trpc.ai.getProjectPolicy.useQuery({ projectId });
   const { data: currentUser } = trpc.user.me.useQuery();
   const { data: aiPreferences } = trpc.user.aiPreferences.useQuery();
@@ -76,7 +76,9 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
 
   useEffect(() => {
     if (!providerId && visibleProviders.length > 0) {
-      const defaultProvider = visibleProviders.find((provider) => provider.isDefault) ?? visibleProviders[0];
+      const defaultProvider = visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
+        ?? visibleProviders.find((provider) => provider.isDefault)
+        ?? visibleProviders[0];
       setProviderId(defaultProvider.id);
     }
     if (providerId && visibleProviders.length > 0 && !visibleProviders.some((provider) => provider.id === providerId)) {
@@ -85,7 +87,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     if (providerId && visibleProviders.length === 0) {
       setProviderId("");
     }
-  }, [providerId, visibleProviders]);
+  }, [policy?.defaultProviderId, providerId, visibleProviders]);
 
   useEffect(() => {
     const defaults = Array.isArray(policy?.defaultPermissions)
@@ -351,7 +353,9 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     setPendingMessages([]);
     setMode(mode === "yolo" && canUseYolo ? "yolo" : "approval");
     setGrantedPermissions(draftPermissions.filter((permission) => maxPermissions.includes(permission)));
-    const defaultProvider = visibleProviders.find((provider) => provider.isDefault) ?? visibleProviders[0];
+    const defaultProvider = visibleProviders.find((provider) => provider.id === policy?.defaultProviderId)
+      ?? visibleProviders.find((provider) => provider.isDefault)
+      ?? visibleProviders[0];
     setProviderId(defaultProvider?.id ?? "");
   }
 

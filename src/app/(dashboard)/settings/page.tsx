@@ -73,7 +73,7 @@ export default function SettingsPage() {
       </div>
 
       {tab === "profile" && <ProfileSettings currentUser={currentUser} />}
-      {tab === "ai" && <PersonalAiSettings />}
+      {tab === "ai" && <PersonalAiSettings currentUserRole={currentUser.role} />}
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}
       {tab === "users" && currentUser.role === "admin" && <UserManagement currentUserId={currentUser.id} />}
     </div>
@@ -423,28 +423,37 @@ function ProfileSettings({
   );
 }
 
-function PersonalAiSettings() {
+function PersonalAiSettings({ currentUserRole }: { currentUserRole: string }) {
   const utils = trpc.useUtils();
-  const { data: providers = [] } = trpc.ai.listProviders.useQuery();
+  const isAdmin = currentUserRole === "admin";
+  const { data: providers = [] } = trpc.ai.listProviders.useQuery({ actorScope: "manage" });
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [editingSharedProviderId, setEditingSharedProviderId] = useState<string | null>(null);
   const [revealedSecret, setRevealedSecret] = useState<{ providerId: string; label: string; secret: string } | null>(null);
 
   const createMutation = trpc.ai.createUserProvider.useMutation({
     onSuccess: async () => {
-      await utils.ai.listProviders.invalidate();
+      await utils.ai.listProviders.invalidate({ actorScope: "manage" });
+    },
+  });
+
+  const createSharedMutation = trpc.ai.createSharedProvider.useMutation({
+    onSuccess: async () => {
+      await utils.ai.listProviders.invalidate({ actorScope: "manage" });
     },
   });
 
   const updateMutation = trpc.ai.updateProvider.useMutation({
     onSuccess: async () => {
       setEditingProviderId(null);
-      await utils.ai.listProviders.invalidate();
+      setEditingSharedProviderId(null);
+      await utils.ai.listProviders.invalidate({ actorScope: "manage" });
     },
   });
 
   const deleteMutation = trpc.ai.deleteProvider.useMutation({
     onSuccess: async () => {
-      await utils.ai.listProviders.invalidate();
+      await utils.ai.listProviders.invalidate({ actorScope: "manage" });
     },
   });
 
@@ -452,7 +461,30 @@ function PersonalAiSettings() {
 
   const testMutation = trpc.ai.testProvider.useMutation();
 
-  const editingProvider = providers.find((provider) => provider.id === editingProviderId) ?? null;
+  const personalProviders = providers.filter((provider) => provider.scope === "user") as Array<{
+    id: string;
+    label: string;
+    adapter: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    isEnabled: boolean;
+    isDefault: boolean;
+    scope: "user" | "project" | "shared";
+    canManage?: boolean;
+  }>;
+  const sharedProviders = providers.filter((provider) => provider.scope === "shared") as Array<{
+    id: string;
+    label: string;
+    adapter: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    isEnabled: boolean;
+    isDefault: boolean;
+    scope: "user" | "project" | "shared";
+    canManage?: boolean;
+  }>;
+  const editingProvider = personalProviders.find((provider) => provider.id === editingProviderId) ?? null;
+  const editingSharedProvider = sharedProviders.find((provider) => provider.id === editingSharedProviderId) ?? null;
 
   return (
     <div className="space-y-6">
@@ -487,16 +519,7 @@ function PersonalAiSettings() {
         </p>
         <div className="mt-4">
           <AiProviderList
-            providers={providers.filter((provider) => provider.scope === "user") as Array<{
-              id: string;
-              label: string;
-              adapter: string;
-              model: string;
-              baseUrl: string;
-              isEnabled: boolean;
-              isDefault: boolean;
-              scope: "user" | "project";
-            }>}
+            providers={personalProviders}
             onEdit={(provider) => {
               setEditingProviderId(provider.id);
             }}
@@ -547,9 +570,9 @@ function PersonalAiSettings() {
               error={updateMutation.error?.message ?? null}
               initialValues={{
                 label: editingProvider.label,
-                adapter: editingProvider.adapter as "openai_compatible" | "anthropic",
-                baseUrl: editingProvider.baseUrl,
-                model: editingProvider.model,
+                adapter: (editingProvider.adapter ?? "openai_compatible") as "openai_compatible" | "anthropic",
+                baseUrl: editingProvider.baseUrl ?? "",
+                model: editingProvider.model ?? "",
                 secret: "",
                 isEnabled: editingProvider.isEnabled,
                 isDefault: editingProvider.isDefault,
@@ -560,6 +583,89 @@ function PersonalAiSettings() {
           )}
         </DialogContent>
       </Dialog>
+
+      {isAdmin && (
+        <>
+          <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+            <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+              Shared AI
+            </p>
+            <h2 className="mt-2 text-xl font-semibold" style={{ color: "var(--color-text)" }}>
+              Admin Shared Providers
+            </h2>
+            <p className="mt-2 text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+              Configure centrally managed providers that can be enabled per project without exposing their configuration to regular users.
+            </p>
+          </section>
+
+          <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+            <AiProviderForm
+              title="Add Shared Provider"
+              submitLabel="Create Shared Provider"
+              isPending={createSharedMutation.isPending}
+              error={createSharedMutation.error?.message ?? null}
+              showDefaultToggle={false}
+              onSubmit={(values) => createSharedMutation.mutate(values)}
+            />
+          </section>
+
+          <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+            <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>
+              Configured Shared Providers
+            </h2>
+            <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+              These providers can be made available across projects through project AI policy.
+            </p>
+            <div className="mt-4">
+              <AiProviderList
+                providers={sharedProviders}
+                onEdit={(provider) => {
+                  setEditingSharedProviderId(provider.id);
+                }}
+                onDelete={(provider) => {
+                  if (confirm(`Delete provider \"${provider.label}\"?`)) {
+                    deleteMutation.mutate({ id: provider.id });
+                  }
+                }}
+                onRevealSecret={async (provider) => {
+                  const result = await aiClient.ai.revealProviderSecret.fetch({ id: provider.id });
+                  setRevealedSecret({ providerId: provider.id, label: provider.label, secret: result.secret ?? "" });
+                }}
+                onTest={(provider) => testMutation.mutate({ id: provider.id })}
+              />
+            </div>
+          </section>
+
+          <Dialog open={!!editingSharedProvider} onOpenChange={(open) => {
+            if (!open) {
+              setEditingSharedProviderId(null);
+            }
+          }}>
+            <DialogContent>
+              {editingSharedProvider && (
+                <AiProviderForm
+                  title="Edit Shared Provider"
+                  submitLabel="Save Shared Provider"
+                  isPending={updateMutation.isPending}
+                  error={updateMutation.error?.message ?? null}
+                  showDefaultToggle={false}
+                  initialValues={{
+                    label: editingSharedProvider.label,
+                    adapter: (editingSharedProvider.adapter ?? "openai_compatible") as "openai_compatible" | "anthropic",
+                    baseUrl: editingSharedProvider.baseUrl ?? "",
+                    model: editingSharedProvider.model ?? "",
+                    secret: "",
+                    isEnabled: editingSharedProvider.isEnabled,
+                    isDefault: editingSharedProvider.isDefault,
+                  }}
+                  secretRequired={false}
+                  onSubmit={(values) => updateMutation.mutate({ id: editingSharedProvider.id, ...values })}
+                />
+              )}
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
     </div>
   );
 }

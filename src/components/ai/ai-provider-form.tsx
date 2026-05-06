@@ -13,6 +13,7 @@ interface AiProviderFormProps {
   isPending?: boolean;
   error?: string | null;
   secretRequired?: boolean;
+  showDefaultToggle?: boolean;
   initialValues?: {
     label?: string;
     adapter?: ProviderAdapter;
@@ -39,6 +40,7 @@ export function AiProviderForm({
   isPending = false,
   error,
   secretRequired = true,
+  showDefaultToggle = true,
   initialValues,
   onSubmit,
 }: AiProviderFormProps) {
@@ -131,10 +133,12 @@ export function AiProviderForm({
           <input type="checkbox" checked={isEnabled} onChange={(event) => setIsEnabled(event.target.checked)} />
           Enabled
         </label>
-        <label className="flex items-center gap-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-          <input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} />
-          Set as default
-        </label>
+        {showDefaultToggle && (
+          <label className="flex items-center gap-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            <input type="checkbox" checked={isDefault} onChange={(event) => setIsDefault(event.target.checked)} />
+            Set as default
+          </label>
+        )}
       </div>
       {error && (
         <p className="text-sm" style={{ color: "var(--color-danger)" }}>

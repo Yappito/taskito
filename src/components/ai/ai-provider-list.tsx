@@ -5,18 +5,19 @@ import { Button } from "@/components/ui/button";
 interface AiProviderListItem {
   id: string;
   label: string;
-  adapter: string;
-  model: string;
-  baseUrl: string;
+  adapter: string | null;
+  model: string | null;
+  baseUrl: string | null;
   isEnabled: boolean;
   isDefault: boolean;
-  scope: "user" | "project";
+  scope: "user" | "project" | "shared";
+  canManage?: boolean;
 }
 
 interface AiProviderListProps {
   providers: AiProviderListItem[];
-  onEdit: (provider: AiProviderListItem) => void;
-  onDelete: (provider: AiProviderListItem) => void;
+  onEdit?: (provider: AiProviderListItem) => void;
+  onDelete?: (provider: AiProviderListItem) => void;
   onRevealSecret?: (provider: AiProviderListItem) => void;
   onTest?: (provider: AiProviderListItem) => void;
 }
@@ -56,18 +57,27 @@ export function AiProviderList({ providers, onEdit, onDelete, onRevealSecret, on
                   </span>
                 )}
               </div>
-              <div className="mt-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                {provider.adapter} · {provider.model}
-              </div>
-              <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
-                {provider.baseUrl}
-              </div>
+              {provider.adapter && provider.model && (
+                <div className="mt-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+                  {provider.adapter} · {provider.model}
+                </div>
+              )}
+              {provider.baseUrl && (
+                <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {provider.baseUrl}
+                </div>
+              )}
+              {!provider.canManage && (
+                <div className="mt-2 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  Managed centrally. Configuration is hidden.
+                </div>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
-              {onTest && <Button variant="outline" size="sm" onClick={() => onTest(provider)}>Test</Button>}
-              {onRevealSecret && <Button variant="outline" size="sm" onClick={() => onRevealSecret(provider)}>Reveal Secret</Button>}
-              <Button variant="outline" size="sm" onClick={() => onEdit(provider)}>Edit</Button>
-              <Button variant="destructive" size="sm" onClick={() => onDelete(provider)}>Delete</Button>
+              {onTest && provider.canManage !== false && <Button variant="outline" size="sm" onClick={() => onTest(provider)}>Test</Button>}
+              {onRevealSecret && provider.canManage !== false && <Button variant="outline" size="sm" onClick={() => onRevealSecret(provider)}>Reveal Secret</Button>}
+              {onEdit && provider.canManage !== false && <Button variant="outline" size="sm" onClick={() => onEdit(provider)}>Edit</Button>}
+              {onDelete && provider.canManage !== false && <Button variant="destructive" size="sm" onClick={() => onDelete(provider)}>Delete</Button>}
             </div>
           </div>
         </div>

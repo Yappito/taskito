@@ -395,6 +395,7 @@ model CustomFieldValue {
 enum AiProviderScope {
   user
   project
+  shared
 }
 
 enum AiProviderAdapter {
@@ -473,6 +474,7 @@ model AiProjectPolicy {
   defaultProviderId  String?
   allowUserProviders Boolean  @default(true)
   allowProjectProviders Boolean @default(true)
+  allowSharedProviders Boolean @default(true)
   allowYoloMode      Boolean  @default(true)
   defaultPermissions Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\"]")
   maxPermissions     Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\",\"add_comment\",\"link_tasks\",\"move_status\",\"assign_task\",\"edit_core_fields\",\"edit_tags\",\"edit_custom_fields\",\"bulk_update_selected\",\"create_task\",\"duplicate_task\",\"archive_task\"]")

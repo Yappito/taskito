@@ -27,14 +27,16 @@ export default function AiSettingsPage({
 
 function AiSettingsContent({ projectId, projectName }: { projectId: string; projectName: string }) {
   const utils = trpc.useUtils();
+  const policyQuery = trpc.ai.getProjectPolicy.useQuery({ projectId });
   const { data: permissions } = trpc.ai.listPermissions.useQuery();
-  const { data: providers = [] } = trpc.ai.listProviders.useQuery({ projectId });
-  const { data: policy } = trpc.ai.getProjectPolicy.useQuery({ projectId });
+  const { data: providers = [] } = trpc.ai.listProviders.useQuery({ projectId, actorScope: "manage" });
+  const policy = policyQuery.data;
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [revealedSecret, setRevealedSecret] = useState<{ providerId: string; label: string; secret: string } | null>(null);
   const [defaultProviderId, setDefaultProviderId] = useState<string>("");
   const [allowUserProviders, setAllowUserProviders] = useState(true);
   const [allowProjectProviders, setAllowProjectProviders] = useState(true);
+  const [allowSharedProviders, setAllowSharedProviders] = useState(true);
   const [allowYoloMode, setAllowYoloMode] = useState(false);
   const [defaultPermissions, setDefaultPermissions] = useState<AiPermission[]>([]);
   const [maxPermissions, setMaxPermissions] = useState<AiPermission[]>([]);
@@ -42,7 +44,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
   const createMutation = trpc.ai.createProjectProvider.useMutation({
     onSuccess: async () => {
       await Promise.all([
-        utils.ai.listProviders.invalidate({ projectId }),
+        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
         utils.ai.getProjectPolicy.invalidate({ projectId }),
       ]);
     },
@@ -52,7 +54,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     onSuccess: async () => {
       setEditingProviderId(null);
       await Promise.all([
-        utils.ai.listProviders.invalidate({ projectId }),
+        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
         utils.ai.getProjectPolicy.invalidate({ projectId }),
       ]);
     },
@@ -61,7 +63,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
   const deleteMutation = trpc.ai.deleteProvider.useMutation({
     onSuccess: async () => {
       await Promise.all([
-        utils.ai.listProviders.invalidate({ projectId }),
+        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
         utils.ai.getProjectPolicy.invalidate({ projectId }),
       ]);
     },
@@ -73,7 +75,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     onSuccess: async () => {
       await Promise.all([
         utils.ai.getProjectPolicy.invalidate({ projectId }),
-        utils.ai.listProviders.invalidate({ projectId }),
+        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
       ]);
     },
   });
@@ -83,14 +85,27 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
   const projectProviders = providers.filter((provider) => provider.scope === "project") as Array<{
     id: string;
     label: string;
-    adapter: string;
-    model: string;
-    baseUrl: string;
+    adapter: string | null;
+    model: string | null;
+    baseUrl: string | null;
     isEnabled: boolean;
     isDefault: boolean;
-    scope: "user" | "project";
+    scope: "user" | "project" | "shared";
+    canManage?: boolean;
   }>;
-  const editingProvider = projectProviders.find((provider) => provider.id === editingProviderId) ?? null;
+  const sharedProviders = providers.filter((provider) => provider.scope === "shared") as Array<{
+    id: string;
+    label: string;
+    adapter: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    isEnabled: boolean;
+    isDefault: boolean;
+    scope: "user" | "project" | "shared";
+    canManage?: boolean;
+  }>;
+  const policyDefaultCandidates = [...sharedProviders, ...projectProviders];
+  const editingProvider = [...projectProviders, ...sharedProviders].find((provider) => provider.id === editingProviderId) ?? null;
   const availablePermissions = useMemo(() => (permissions ?? []) as AiPermission[], [permissions]);
 
   useEffect(() => {
@@ -99,11 +114,16 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     setDefaultProviderId(policy?.defaultProviderId ?? "");
     setAllowUserProviders(policy?.allowUserProviders ?? true);
     setAllowProjectProviders(policy?.allowProjectProviders ?? true);
+    setAllowSharedProviders(policy?.allowSharedProviders ?? true);
     setAllowYoloMode(policy?.allowYoloMode ?? true);
     setMaxPermissions(nextMaxPermissions);
     setDefaultPermissions((Array.isArray(policy?.defaultPermissions) ? (policy.defaultPermissions as AiPermission[]) : fallbackPermissions)
       .filter((permission) => nextMaxPermissions.includes(permission)));
   }, [availablePermissions, policy]);
+
+  if (policyQuery.error) {
+    return <div className="p-8" style={{ color: "var(--color-danger)" }}>{policyQuery.error.message}</div>;
+  }
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 lg:px-6">
@@ -132,7 +152,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
       <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
         <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>Project Providers</h2>
         <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
-          Shared remote providers available to members of this project.
+          Providers configured directly for this project.
         </p>
         <div className="mt-4">
           <AiProviderList
@@ -172,6 +192,16 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
       </section>
 
       <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>Shared Admin Providers</h2>
+        <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+          Centrally managed providers that can be enabled for this project without exposing their configuration to non-admin users.
+        </p>
+        <div className="mt-4">
+          <AiProviderList providers={sharedProviders} />
+        </div>
+      </section>
+
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
         <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>Project Policy</h2>
         <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
           Limit how AI can operate inside this project, even when a user has their own provider.
@@ -186,13 +216,13 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
               style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
             >
               <option value="">No default</option>
-              {projectProviders.map((provider) => (
+              {policyDefaultCandidates.map((provider) => (
                 <option key={provider.id} value={provider.id}>{provider.label}</option>
               ))}
             </select>
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-4">
             <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
               <input type="checkbox" checked={allowUserProviders} onChange={(event) => setAllowUserProviders(event.target.checked)} />
               Allow personal providers
@@ -200,6 +230,10 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
             <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
               <input type="checkbox" checked={allowProjectProviders} onChange={(event) => setAllowProjectProviders(event.target.checked)} />
               Allow project providers
+            </label>
+            <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
+              <input type="checkbox" checked={allowSharedProviders} onChange={(event) => setAllowSharedProviders(event.target.checked)} />
+              Allow shared providers
             </label>
             <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
               <input type="checkbox" checked={allowYoloMode} onChange={(event) => setAllowYoloMode(event.target.checked)} />
@@ -242,6 +276,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
                     defaultProviderId: defaultProviderId || null,
                     allowUserProviders,
                     allowProjectProviders,
+                    allowSharedProviders,
                     allowYoloMode,
                     defaultPermissions: defaultPermissions.filter((permission) => maxPermissions.includes(permission)),
                     maxPermissions,
@@ -269,9 +304,9 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
               error={updateMutation.error?.message ?? null}
               initialValues={{
                 label: editingProvider.label,
-                adapter: editingProvider.adapter as "openai_compatible" | "anthropic",
-                baseUrl: editingProvider.baseUrl,
-                model: editingProvider.model,
+                adapter: (editingProvider.adapter ?? "openai_compatible") as "openai_compatible" | "anthropic",
+                baseUrl: editingProvider.baseUrl ?? "",
+                model: editingProvider.model ?? "",
                 secret: "",
                 isEnabled: editingProvider.isEnabled,
                 isDefault: editingProvider.isDefault,

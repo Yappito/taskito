@@ -6,7 +6,7 @@ import { normalizeAiPermissions } from "@/lib/ai-permissions";
 import { normalizeAiProviderHeaders, normalizeAiProviderModel, validateAiProviderBaseUrl } from "@/lib/ai-provider-validation";
 import { AI_PERMISSION_PRESETS, AI_PERMISSION_VALUES, type AiPermission } from "@/lib/ai-types";
 import { consumeRateLimit } from "@/lib/rate-limit";
-import { requireProjectAccess, requireTaskAccess } from "@/server/authz";
+import { requireGlobalAdmin, requireProjectAccess, requireTaskAccess } from "@/server/authz";
 import { appendAiAssistantTurn } from "@/server/services/ai/orchestrator";
 import { executeAiAction } from "@/server/services/ai/action-executor";
 import { rollbackAiActionCheckpoint } from "@/server/services/ai/checkpoints";
@@ -37,6 +37,7 @@ const projectPolicySchema = z.object({
   defaultProviderId: z.string().cuid().nullable().optional(),
   allowUserProviders: z.boolean(),
   allowProjectProviders: z.boolean(),
+  allowSharedProviders: z.boolean(),
   allowYoloMode: z.boolean(),
   defaultPermissions: z.array(z.enum(AI_PERMISSION_VALUES)).default([]),
   maxPermissions: z.array(z.enum(AI_PERMISSION_VALUES)).default([]),
@@ -47,6 +48,67 @@ const DEFAULT_AI_POLICY_DEFAULT_PERMISSIONS = [...AI_PERMISSION_PRESETS.read_onl
 const DEFAULT_AI_POLICY_MAX_PERMISSIONS = [...AI_PERMISSION_VALUES] satisfies AiPermission[];
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
+
+function canManageProvider(
+  provider: { scope: "user" | "project" | "shared"; ownerUserId: string | null; projectId: string | null },
+  options: {
+    userId: string;
+    isGlobalAdmin: boolean;
+    projectOwnerScope: boolean;
+  }
+) {
+  if (provider.scope === "user") {
+    return provider.ownerUserId === options.userId;
+  }
+  if (provider.scope === "project") {
+    return options.isGlobalAdmin || options.projectOwnerScope;
+  }
+  return options.isGlobalAdmin;
+}
+
+function sanitizeProviderForList(
+  provider: {
+    id: string;
+    scope: "user" | "project" | "shared";
+    ownerUserId: string | null;
+    projectId: string | null;
+    label: string;
+    adapter: "openai_compatible" | "anthropic";
+    baseUrl: string;
+    model: string;
+    defaultHeaders: Prisma.JsonValue | null;
+    isEnabled: boolean;
+    isDefault: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  options: {
+    userId: string;
+    isGlobalAdmin: boolean;
+    projectOwnerScope: boolean;
+    includeConfig: boolean;
+  }
+) {
+  const canManage = canManageProvider(provider, options);
+  const shouldIncludeConfig = options.includeConfig && canManage;
+
+  return {
+    id: provider.id,
+    scope: provider.scope,
+    ownerUserId: provider.ownerUserId,
+    projectId: provider.projectId,
+    label: provider.label,
+    adapter: shouldIncludeConfig ? provider.adapter : null,
+    baseUrl: shouldIncludeConfig ? provider.baseUrl : null,
+    model: shouldIncludeConfig ? provider.model : null,
+    defaultHeaders: shouldIncludeConfig ? provider.defaultHeaders : null,
+    isEnabled: provider.isEnabled,
+    isDefault: provider.isDefault,
+    createdAt: provider.createdAt,
+    updatedAt: provider.updatedAt,
+    canManage,
+  };
+}
 
 function mapExecutionForClient(execution: AiActionExecution) {
   return {
@@ -67,6 +129,7 @@ async function getEffectiveProjectAiPolicy(prisma: PrismaClient, projectId: stri
     defaultProviderId: policy?.defaultProviderId ?? null,
     allowUserProviders: policy?.allowUserProviders ?? true,
     allowProjectProviders: policy?.allowProjectProviders ?? true,
+    allowSharedProviders: policy?.allowSharedProviders ?? true,
     allowYoloMode: policy?.allowYoloMode ?? true,
     defaultPermissions,
     maxPermissions,
@@ -122,6 +185,10 @@ async function getUsableProviderForProjectOrThrow(
 
   if (provider.scope === "project" && !policy.allowProjectProviders) {
     throw new Error("Project AI providers are disabled for this project");
+  }
+
+  if (provider.scope === "shared" && !policy.allowSharedProviders) {
+    throw new Error("Shared AI providers are disabled for this project");
   }
 
   return { provider, policy };
@@ -180,12 +247,25 @@ async function getVisibleProviderOrThrow(
   providerId: string,
   projectId?: string
 ) {
+  const actor = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { role: true },
+  });
   const provider = await prisma.aiProviderConnection.findUniqueOrThrow({
     where: { id: providerId },
   });
 
   if (provider.scope === "user") {
     if (provider.ownerUserId !== userId) {
+      throw new Error("You do not have access to this provider");
+    }
+    return provider;
+  }
+
+  if (provider.scope === "shared") {
+    if (projectId) {
+      await requireProjectAccess(prisma, userId, projectId);
+    } else if (actor.role !== "admin") {
       throw new Error("You do not have access to this provider");
     }
     return provider;
@@ -205,11 +285,22 @@ async function getVisibleProviderOrThrow(
 
 export const aiRouter = createTRPCRouter({
   listProviders: protectedProcedure
-    .input(z.object({ projectId: z.string().cuid().optional() }).optional())
+    .input(z.object({ projectId: z.string().cuid().optional(), actorScope: z.enum(["chat", "manage"]).optional() }).optional())
     .query(async ({ ctx, input }) => {
       const projectId = input?.projectId;
+      const actorScope = input?.actorScope ?? "chat";
       if (projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, projectId);
+      }
+
+      const actor = await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: ctx.session.user.id },
+        select: { role: true },
+      });
+      const isProjectOwnerScope = actorScope === "manage" && Boolean(projectId);
+
+      if (projectId && isProjectOwnerScope) {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, projectId, { minimumRole: "owner" });
       }
 
       const providerVisibilityClauses: Prisma.AiProviderConnectionWhereInput[] = [
@@ -218,9 +309,12 @@ export const aiRouter = createTRPCRouter({
 
       if (projectId) {
         providerVisibilityClauses.push({ scope: "project", projectId });
+        providerVisibilityClauses.push({ scope: "shared" });
+      } else if (actor.role === "admin") {
+        providerVisibilityClauses.push({ scope: "shared" });
       }
 
-      return ctx.prisma.aiProviderConnection.findMany({
+      const providers = await ctx.prisma.aiProviderConnection.findMany({
         where: {
           OR: providerVisibilityClauses,
         },
@@ -239,6 +333,37 @@ export const aiRouter = createTRPCRouter({
           isDefault: true,
           createdAt: true,
           updatedAt: true,
+        },
+      });
+
+      return providers.map((provider) => sanitizeProviderForList(provider, {
+        userId: ctx.session.user.id,
+        isGlobalAdmin: actor.role === "admin",
+        projectOwnerScope: isProjectOwnerScope,
+        includeConfig: actorScope === "manage",
+      }));
+    }),
+
+  createSharedProvider: protectedProcedure
+    .input(providerInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+
+      const normalizedBaseUrl = validateAiProviderBaseUrl(input.baseUrl);
+      const normalizedHeaders = normalizeAiProviderHeaders(input.defaultHeaders);
+      const model = normalizeAiProviderModel(input.model);
+
+      return ctx.prisma.aiProviderConnection.create({
+        data: {
+          scope: "shared",
+          label: input.label,
+          adapter: input.adapter,
+          baseUrl: normalizedBaseUrl,
+          model,
+          encryptedSecret: encryptAiSecret(input.secret),
+          defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
+          isEnabled: input.isEnabled,
+          isDefault: false,
         },
       });
     }),
@@ -327,7 +452,9 @@ export const aiRouter = createTRPCRouter({
     .input(providerUpdateInputSchema)
     .mutation(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
-      if (provider.scope === "project" && provider.projectId) {
+      if (provider.scope === "shared") {
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+      } else if (provider.scope === "project" && provider.projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
       }
 
@@ -336,12 +463,14 @@ export const aiRouter = createTRPCRouter({
       const defaultHeaders = input.defaultHeaders ? normalizeAiProviderHeaders(input.defaultHeaders) : undefined;
       const secret = input.secret?.trim();
 
-      if (input.isDefault) {
+      if (input.isDefault && provider.scope !== "shared") {
         await ctx.prisma.aiProviderConnection.updateMany({
           where:
             provider.scope === "user"
               ? { scope: "user", ownerUserId: provider.ownerUserId }
-              : { scope: "project", projectId: provider.projectId },
+              : provider.scope === "project"
+                ? { scope: "project", projectId: provider.projectId }
+                : { scope: "shared" },
           data: { isDefault: false },
         });
       }
@@ -356,7 +485,7 @@ export const aiRouter = createTRPCRouter({
           ...(secret ? { encryptedSecret: encryptAiSecret(secret) } : {}),
           ...(defaultHeaders !== undefined ? { defaultHeaders: defaultHeaders as Prisma.InputJsonValue } : {}),
           ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
-          ...(input.isDefault !== undefined ? { isDefault: input.isDefault } : {}),
+          ...(provider.scope !== "shared" && input.isDefault !== undefined ? { isDefault: input.isDefault } : {}),
         },
       });
 
@@ -392,7 +521,13 @@ export const aiRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
-      if (provider.scope === "project" && provider.projectId) {
+      if (provider.scope === "shared") {
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+        await ctx.prisma.aiProjectPolicy.updateMany({
+          where: { defaultProviderId: provider.id },
+          data: { defaultProviderId: null },
+        });
+      } else if (provider.scope === "project" && provider.projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
         await ctx.prisma.aiProjectPolicy.updateMany({
           where: { projectId: provider.projectId, defaultProviderId: provider.id },
@@ -408,7 +543,9 @@ export const aiRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
-      if (provider.scope === "project" && provider.projectId) {
+      if (provider.scope === "shared") {
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+      } else if (provider.scope === "project" && provider.projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
       }
 
@@ -428,6 +565,9 @@ export const aiRouter = createTRPCRouter({
       }
 
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
+      if (provider.scope === "shared") {
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+      }
       const responsePreview = await runProviderTest(provider);
       return {
         success: true,
@@ -454,13 +594,23 @@ export const aiRouter = createTRPCRouter({
         .filter((permission) => maxPermissions.includes(permission));
 
       if (input.policy.defaultProviderId && !input.policy.allowProjectProviders) {
-        throw new Error("Project providers must be allowed to use a project default provider");
+        const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.policy.defaultProviderId, input.projectId);
+        if (provider.scope === "project") {
+          throw new Error("Project providers must be allowed to use a project default provider");
+        }
+      }
+
+      if (input.policy.defaultProviderId && !input.policy.allowSharedProviders) {
+        const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.policy.defaultProviderId, input.projectId);
+        if (provider.scope === "shared") {
+          throw new Error("Shared providers must be allowed to use a shared default provider");
+        }
       }
 
       if (input.policy.defaultProviderId) {
         const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.policy.defaultProviderId, input.projectId);
         if (provider.scope === "user") {
-          throw new Error("Project default provider must be project-scoped");
+          throw new Error("Project default provider must be project-scoped or shared");
         }
         if (!provider.isEnabled) {
           throw new Error("Project default provider must be enabled");
@@ -474,6 +624,7 @@ export const aiRouter = createTRPCRouter({
           defaultProviderId: input.policy.defaultProviderId ?? null,
           allowUserProviders: input.policy.allowUserProviders,
           allowProjectProviders: input.policy.allowProjectProviders,
+          allowSharedProviders: input.policy.allowSharedProviders,
           allowYoloMode: input.policy.allowYoloMode,
           defaultPermissions: defaultPermissions as Prisma.InputJsonValue,
           maxPermissions: maxPermissions as Prisma.InputJsonValue,
@@ -482,6 +633,7 @@ export const aiRouter = createTRPCRouter({
           defaultProviderId: input.policy.defaultProviderId ?? null,
           allowUserProviders: input.policy.allowUserProviders,
           allowProjectProviders: input.policy.allowProjectProviders,
+          allowSharedProviders: input.policy.allowSharedProviders,
           allowYoloMode: input.policy.allowYoloMode,
           defaultPermissions: defaultPermissions as Prisma.InputJsonValue,
           maxPermissions: maxPermissions as Prisma.InputJsonValue,
@@ -520,7 +672,7 @@ export const aiRouter = createTRPCRouter({
         orderBy: { updatedAt: "desc" },
         include: {
           provider: {
-            select: { id: true, label: true, scope: true, adapter: true, model: true, isEnabled: true },
+            select: { id: true, label: true, scope: true, isEnabled: true },
           },
         },
       });
@@ -533,7 +685,7 @@ export const aiRouter = createTRPCRouter({
         where: { id: input.id },
         include: {
           provider: {
-            select: { id: true, label: true, scope: true, adapter: true, model: true, isEnabled: true },
+            select: { id: true, label: true, scope: true, isEnabled: true },
           },
           messages: { orderBy: { createdAt: "asc" } },
           actionExecutions: { orderBy: { createdAt: "asc" } },
@@ -717,7 +869,7 @@ export const aiRouter = createTRPCRouter({
         data: { title },
         include: {
           provider: {
-            select: { id: true, label: true, scope: true, adapter: true, model: true, isEnabled: true },
+            select: { id: true, label: true, scope: true, isEnabled: true },
           },
         },
       });
