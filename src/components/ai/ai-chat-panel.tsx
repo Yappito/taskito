@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -46,6 +46,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sendOnEnter, setSendOnEnter] = useState<boolean | null>(null);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const availablePermissions = useMemo(
     () => (permissions ?? []) as AiPermission[],
@@ -115,7 +116,6 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const sendMessage = trpc.ai.sendMessage.useMutation({
     onSuccess: async (_data, variables) => {
       setErrorMessage(null);
-      setMessage("");
       setPendingMessages([]);
       const id = variables.id;
       if (id) {
@@ -131,6 +131,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     },
     onError: async (error, variables) => {
       setErrorMessage(error.message);
+      setMessage(variables.content);
       setPendingMessages([]);
       if (variables.id) {
         await utils.ai.getConversation.invalidate({ id: variables.id });
@@ -229,6 +230,10 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const visibleContextTasks = contextTasks.slice(0, 12);
 
   useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [isThinking, messages.length, proposals.length]);
+
+  useEffect(() => {
     if (!canUseYolo && mode === "yolo") {
       setMode("approval");
     }
@@ -255,7 +260,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     setDraftPermissions(nextPermissions);
   }, [canUseYolo, conversation, maxPermissions]);
 
-  async function ensureConversation() {
+  async function ensureConversation(initialContent: string) {
     if (conversationId) {
       return conversationId;
     }
@@ -264,7 +269,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       projectId,
       taskId,
       providerId,
-      title: message.trim().slice(0, 80),
+      title: initialContent.slice(0, 80),
       mode,
       grantedPermissions: draftPermissions.filter((permission) => maxPermissions.includes(permission)),
       selectedTaskIds,
@@ -520,6 +525,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
               </div>
             </div>
           )}
+          <div ref={messagesEndRef} />
         </div>
 
         <div className="mt-4">
@@ -538,25 +544,29 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
         style={{ borderColor: "var(--color-border)" }}
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!message.trim() || !providerId) {
+          const pendingContent = message.trim();
+          if (!pendingContent || !providerId) {
             return;
           }
 
+          setErrorMessage(null);
+          setMessage("");
+          setPendingMessages((current) => ([
+            ...current,
+            {
+              id: `pending-${Date.now()}`,
+              role: "user",
+              content: pendingContent,
+            },
+          ]));
+
           try {
-            setErrorMessage(null);
-            const pendingContent = message.trim();
-            setPendingMessages((current) => ([
-              ...current,
-              {
-                id: `pending-${Date.now()}`,
-                role: "user",
-                content: pendingContent,
-              },
-            ]));
-            const id = await ensureConversation();
+            const id = await ensureConversation(pendingContent);
             setConversationId(id);
             await sendMessage.mutateAsync({ id, content: pendingContent });
           } catch (error) {
+            setPendingMessages([]);
+            setMessage(pendingContent);
             setErrorMessage(error instanceof Error ? error.message : "AI message failed");
           }
         }}
