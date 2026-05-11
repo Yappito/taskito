@@ -160,6 +160,26 @@ test.describe("Task body/description", () => {
     // View mode should show the description
     await expect(page.getByText("Test description body content")).toBeVisible({ timeout: 10000 });
   });
+
+  test("quick add description keeps focus while typing", async ({ page }) => {
+    await page.getByRole("button", { name: "New Task" }).click();
+    await expect(page.getByRole("heading", { name: "New Task" })).toBeVisible();
+
+    const titleInput = page.getByPlaceholder("Task title...");
+    const descriptionInput = page.getByPlaceholder("Add task details...");
+    const title = "Focus regression title";
+    const description = "Typing stays in description";
+
+    await titleInput.fill(title);
+    await descriptionInput.click();
+    await expect(descriptionInput).toBeFocused();
+
+    await descriptionInput.pressSequentially(description);
+
+    await expect(descriptionInput).toHaveValue(description);
+    await expect(descriptionInput).toBeFocused();
+    await expect(titleInput).toHaveValue(title);
+  });
 });
 
 test.describe("Archive system", () => {

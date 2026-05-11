@@ -30,6 +30,11 @@ function Dialog({
   panelClassName?: string;
 }) {
   const panelRef = React.useRef<HTMLDivElement>(null);
+  const onCloseRef = React.useRef(onClose);
+
+  React.useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   React.useEffect(() => {
     if (!open) {
@@ -52,7 +57,7 @@ function Dialog({
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -97,7 +102,7 @@ function Dialog({
       document.body.style.overflow = previousOverflow;
       previouslyFocusedElement?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
