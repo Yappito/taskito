@@ -61,6 +61,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   const suppressClickRef = useRef(false);
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: sprints = [] } = trpc.sprint.list.useQuery({ projectId });
   const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   const taskListInput = useMemo(
@@ -321,6 +322,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   function applyBulkUpdate(input: {
     statusId?: string;
     assigneeId?: string | null;
+    sprintId?: string | null;
     addTagIds?: string[];
     removeTagIds?: string[];
     archive?: boolean;
@@ -374,6 +376,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       <BulkActionBar
         selectedCount={selectedTaskIds.length}
         statuses={statuses}
+        sprints={sprints.map((sprint) => ({ id: sprint.id, name: sprint.name, status: sprint.status }))}
         tags={tags}
         assignees={people ?? []}
         isPending={bulkUpdate.isPending}
@@ -382,6 +385,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
         onClearSelection={() => setSelectedTaskIds([])}
         onApplyStatus={(statusId) => applyBulkUpdate({ statusId })}
         onApplyAssignee={(assigneeId) => applyBulkUpdate({ assigneeId })}
+        onApplySprint={(sprintId) => applyBulkUpdate({ sprintId })}
         onAddTag={(tagId) => applyBulkUpdate({ addTagIds: [tagId] })}
         onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
         onArchive={() => applyBulkUpdate({ archive: true })}

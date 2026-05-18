@@ -136,6 +136,24 @@ export function SearchModal() {
   );
 
   const resultsList = useMemo(() => (results?.hits ?? []) as SearchTaskHit[], [results]);
+  const commands = useMemo(() => {
+    if (!activeProjectSlug) return [];
+    const items = [
+      { id: "dashboard", label: "Open dashboard", href: `/${activeProjectSlug}?view=dashboard`, group: "Views" },
+      { id: "list", label: "Open list view", href: `/${activeProjectSlug}?view=list`, group: "Views" },
+      { id: "board", label: "Open board view", href: `/${activeProjectSlug}?view=board`, group: "Views" },
+      { id: "calendar", label: "Open calendar", href: `/${activeProjectSlug}?view=calendar`, group: "Views" },
+      { id: "gantt", label: "Open Gantt timeline", href: `/${activeProjectSlug}?view=gantt`, group: "Views" },
+      { id: "sprint", label: "Open sprints", href: `/${activeProjectSlug}?view=sprint`, group: "Views" },
+      { id: "graph", label: "Open dependency graph", href: `/${activeProjectSlug}?view=graph`, group: "Views" },
+      { id: "archive", label: "Open archive", href: `/${activeProjectSlug}?view=archive`, group: "Views" },
+      { id: "automation", label: "Automation settings", href: `/${activeProjectSlug}/settings/automation`, group: "Settings" },
+      { id: "workflow", label: "Workflow settings", href: `/${activeProjectSlug}/settings/workflow`, group: "Settings" },
+      { id: "ai", label: "AI settings", href: `/${activeProjectSlug}/settings/ai`, group: "Settings" },
+    ];
+    const normalized = query.trim().toLowerCase();
+    return normalized ? items.filter((item) => item.label.toLowerCase().includes(normalized) || item.group.toLowerCase().includes(normalized)) : items;
+  }, [activeProjectSlug, query]);
 
   const openHit = useCallback((hit: SearchTaskHit) => {
     closeModal();
@@ -290,7 +308,7 @@ export function SearchModal() {
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search tasks..."
+              placeholder="Search tasks or run a command..."
               className="flex-1 border-0 bg-transparent px-3 py-4 text-sm focus:outline-none"
               role="combobox"
               aria-expanded="true"
@@ -348,6 +366,26 @@ export function SearchModal() {
 
           {/* Results */}
           <div id="search-modal-results" className="max-h-80 overflow-y-auto" role="listbox">
+            {commands.length > 0 && (
+              <div className="border-b p-2" style={{ borderColor: "var(--color-border)" }}>
+                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: "var(--color-text-muted)" }}>Commands</div>
+                {commands.slice(0, 8).map((command) => (
+                  <button
+                    key={command.id}
+                    type="button"
+                    onClick={() => {
+                      closeModal();
+                      router.push(command.href);
+                    }}
+                    className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--color-surface-hover)]"
+                    style={{ color: "var(--color-text)" }}
+                  >
+                    <span>{command.label}</span>
+                    <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>{command.group}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             {resultsList.length > 0 ? (
               <ul>
                 {resultsList.map((hit, index) => {

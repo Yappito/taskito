@@ -12,6 +12,8 @@ import { Badge } from "@/components/ui/badge";
 import { TaskSearchInput } from "@/components/ui/task-search-input";
 import { Avatar } from "@/components/ui/avatar";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
+import { TimeTrackingControls } from "@/components/time/time-tracking-controls";
+import { RecurrenceControls } from "@/components/recurrence/recurrence-controls";
 
 interface TaskDetailProps {
   taskId: string;
@@ -102,6 +104,10 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     { enabled: !!task?.projectId }
   );
   const { data: people } = trpc.project.people.useQuery(
+    { projectId: task?.projectId ?? "" },
+    { enabled: !!task?.projectId }
+  );
+  const { data: sprints = [] } = trpc.sprint.list.useQuery(
     { projectId: task?.projectId ?? "" },
     { enabled: !!task?.projectId }
   );
@@ -270,6 +276,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       startDate: form.get("startDate")
         ? new Date(form.get("startDate") as string)
         : null,
+      sprintId: ((form.get("sprintId") as string) || null),
       tagIds: form.getAll("tags") as string[],
       customFieldValues: effectiveCustomFieldValues,
     });
@@ -511,6 +518,20 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 className="mb-1 block text-xs font-medium"
                 style={{ color: "var(--color-text-secondary)" }}
               >
+                Sprint
+              </label>
+              <Select name="sprintId" defaultValue={(task as { sprintId?: string | null }).sprintId ?? ""}>
+                <option value="">No sprint</option>
+                {sprints.map((sprint) => (
+                  <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
                 Description
               </label>
               <textarea
@@ -627,6 +648,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           </form>
         ) : (
           <div className="flex flex-col gap-5">
+            <TimeTrackingControls projectId={task.projectId} taskId={taskId} />
+            <RecurrenceControls taskId={taskId} dueDate={task.dueDate} rule={(task as { recurrenceRule?: { frequency: "daily" | "weekly" | "monthly" | "yearly"; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null }).recurrenceRule ?? null} />
             {dependencyMessages.length > 0 && (
               <div
                 className="rounded-2xl border p-4 text-sm"

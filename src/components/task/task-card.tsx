@@ -107,6 +107,14 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {task.sprint && (
+          <Badge
+            className="text-[10px]"
+            style={{ backgroundColor: "var(--color-accent-muted)", color: "var(--color-accent)" } as React.CSSProperties}
+          >
+            Sprint: {task.sprint.name}
+          </Badge>
+        )}
         {task.tags.slice(0, 3).map(({ tag }) => (
           <Badge
             key={tag.id}

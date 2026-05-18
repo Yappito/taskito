@@ -11,6 +11,7 @@ import { BulkActionBar } from "./bulk-action-bar";
 import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
@@ -32,6 +33,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   const filters = useTaskViewFilters();
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
+  const { data: sprints = [] } = trpc.sprint.list.useQuery({ projectId });
   const { data: presets = [] } = trpc.project.filterPresets.useQuery({ projectId });
 
   const taskListInput = useMemo(
@@ -139,6 +141,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   function applyBulkUpdate(input: {
     statusId?: string;
     assigneeId?: string | null;
+    sprintId?: string | null;
     addTagIds?: string[];
     removeTagIds?: string[];
     archive?: boolean;
@@ -192,6 +195,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
       <BulkActionBar
         selectedCount={selectedTaskIds.length}
         statuses={statuses}
+        sprints={sprints.map((sprint) => ({ id: sprint.id, name: sprint.name, status: sprint.status }))}
         tags={tags}
         assignees={people ?? []}
         isPending={bulkUpdate.isPending}
@@ -200,6 +204,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
         onClearSelection={() => setSelectedTaskIds([])}
         onApplyStatus={(statusId) => applyBulkUpdate({ statusId })}
         onApplyAssignee={(assigneeId) => applyBulkUpdate({ assigneeId })}
+        onApplySprint={(sprintId) => applyBulkUpdate({ sprintId })}
         onAddTag={(tagId) => applyBulkUpdate({ addTagIds: [tagId] })}
         onRemoveTag={(tagId) => applyBulkUpdate({ removeTagIds: [tagId] })}
         onArchive={() => applyBulkUpdate({ archive: true })}
@@ -322,6 +327,16 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                     </span>
                   )}
                   <div>{task.title}</div>
+                  {task.sprint && (
+                    <div className="mt-1">
+                      <Badge
+                        className="text-[10px]"
+                        style={{ backgroundColor: "var(--color-accent-muted)", color: "var(--color-accent)" }}
+                      >
+                        Sprint: {task.sprint.name}
+                      </Badge>
+                    </div>
+                  )}
                   {((task.dependencyState?.blockingTaskCount ?? 0) > 0 || (task.dependencyState?.openChildCount ?? 0) > 0) && (
                     <div className="mt-1 text-xs font-normal" style={{ color: "var(--color-danger)" }}>
                       {(task.dependencyState?.blockingTaskCount ?? 0) > 0 && (

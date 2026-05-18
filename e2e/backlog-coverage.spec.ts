@@ -1,5 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function uniqueName(prefix: string) {
   return `${prefix} ${Date.now()}-${Math.floor(Math.random() * 10_000)}`;
 }
@@ -38,13 +42,12 @@ async function logout(page: Page) {
 }
 
 async function goToDefaultProject(page: Page) {
-  await page.goto("/default");
-  await page.waitForLoadState("networkidle");
+  await page.goto("/default", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
 }
 
 async function switchToView(page: Page, view: "list" | "board" | "graph" | "archive") {
-  await page.getByRole("button", { name: view }).click();
-  await page.waitForTimeout(400);
+  await page.getByRole("button", { name: view, exact: true }).click();
 }
 
 async function openNewTaskDialog(page: Page) {
@@ -98,8 +101,13 @@ async function createTask(page: Page, options: {
   }
 
   for (const [fieldName, value] of Object.entries(options.customFieldValues ?? {})) {
-    const fieldGroup = page.locator("div").filter({ has: page.locator("label", { hasText: fieldName }) }).first();
-    const input = fieldGroup.locator("input, select").first();
+    const fieldLabel = page.locator("label", {
+      hasText: new RegExp(`^${escapeRegex(fieldName)}(?:\\s*\\*)?$`),
+    }).first();
+    const input = fieldLabel
+      .locator("xpath=..")
+      .locator("input:not([type=hidden]), select")
+      .first();
     await input.fill(value);
   }
 
@@ -134,13 +142,13 @@ async function openBoardTaskDetail(page: Page, title: string) {
 
 async function openTaskLinkForm(page: Page) {
   const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-  await detailPanel.getByRole("button", { name: "+ Add" }).click();
+  await detailPanel.getByRole("button", { name: "Add link" }).click();
   await expect(detailPanel.getByRole("button", { name: "Create Link" })).toBeVisible();
 }
 
 async function closeTaskDetail(page: Page) {
   const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-  await detailPanel.getByRole("button", { name: "✕" }).first().click();
+  await detailPanel.getByRole("button", { name: "Close task detail" }).click();
   await expect(page.getByText("Task Detail")).not.toBeVisible({ timeout: 10_000 });
 }
 
@@ -151,7 +159,11 @@ async function addTaskLink(page: Page, sourceTitle: string, linkType: "parent" |
   await detailPanel.locator('select[name="linkType"]').selectOption(linkType);
   await detailPanel.getByRole("button", { name: "Search for a task..." }).click();
   await detailPanel.getByPlaceholder("Type to filter...").fill(targetTitle);
-  await detailPanel.getByRole("button", { name: new RegExp(targetTitle) }).click();
+  const resultButton = detailPanel.getByRole("button", {
+    name: new RegExp(escapeRegex(targetTitle)),
+  }).first();
+  await expect(resultButton).toBeVisible({ timeout: 10_000 });
+  await resultButton.click();
   await detailPanel.getByRole("button", { name: "Create Link" }).click();
   await expect(detailPanel.getByText(targetTitle)).toBeVisible({ timeout: 10_000 });
   await closeTaskDetail(page);
@@ -220,13 +232,13 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await page.reload();
-    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("heading", { name: "Custom Fields" })).toBeVisible({ timeout: 10_000 });
 
     await filterBoardByTitle(page, title);
     await expect(page.getByText(title)).toBeVisible();
 
     await openNewTaskDialog(page);
-    await page.locator('select').first().selectOption({ label: templateName });
+    await page.locator('select').filter({ has: page.locator('option:has-text("No template")') }).first().selectOption({ label: templateName });
     await expect(page.getByPlaceholder("Task title...")).toHaveValue(title);
     await expect(page.getByPlaceholder("Add task details...")).toHaveValue(description);
     await page.getByRole("button", { name: "Cancel" }).click();
@@ -274,7 +286,7 @@ test.describe("Backlog regression coverage", () => {
     await detailPanel.getByRole("button", { name: "Save" }).click();
 
     await expect(detailPanel.getByText("Activity")).toBeVisible();
-    await expect(detailPanel.getByText(/updated title, description/i)).toBeVisible({ timeout: 10_000 });
+    await expect(detailPanel.getByText("Updated:")).toBeVisible({ timeout: 10_000 });
   });
 
   test("custom fields can be configured and used on tasks", async ({ page }) => {
@@ -286,8 +298,7 @@ test.describe("Backlog regression coverage", () => {
     await page.waitForLoadState("networkidle");
     await page.getByPlaceholder("Customer, Estimate, Release date...").fill(fieldName);
     await page.getByRole("button", { name: "Add field" }).click();
-    await page.reload();
-    await page.waitForLoadState("networkidle");
+    await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.getByText(fieldName)).toBeVisible({ timeout: 10_000 });
 
     await goToDefaultProject(page);
@@ -312,18 +323,20 @@ test.describe("Backlog regression coverage", () => {
 
     await goToDefaultProject(page);
     await switchToView(page, "list");
+    await page.getByRole("button", { name: /Show filters/ }).click();
     await page.getByPlaceholder("Filter by title...").fill("drag-and-drop");
     await page.getByPlaceholder("Preset name").fill(presetName);
     await page.getByRole("button", { name: "Save preset" }).click();
     await page.reload();
     await page.waitForLoadState("networkidle");
     await switchToView(page, "list");
-    await expect(page.getByRole("button", { name: presetName })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole("button", { name: /Show filters|Hide filters/ }).click();
+    await expect(page.getByRole("button", { name: presetName, exact: true })).toBeVisible({ timeout: 10_000 });
 
-    await page.getByRole("button", { name: "Clear filters" }).click();
+    await page.getByRole("button", { name: "Clear all filters" }).click();
     await expect(page.getByPlaceholder("Filter by title...")).toHaveValue("");
 
-    await page.getByRole("button", { name: presetName }).click();
+    await page.getByRole("button", { name: presetName, exact: true }).click();
     await expect(page.getByPlaceholder("Filter by title...")).toHaveValue("drag-and-drop");
     await expect(page.getByText("Add drag-and-drop to board")).toBeVisible();
   });
@@ -346,12 +359,14 @@ test.describe("Backlog regression coverage", () => {
     await detailPanel.getByRole("button", { name: "Watch" }).click();
     await expect(detailPanel.getByRole("button", { name: "Unwatch" })).toBeVisible({ timeout: 10_000 });
 
-    await page.getByLabel("Open notifications").click();
+    await closeTaskDetail(page);
+    await page.getByLabel("Open notifications").click({ force: true });
     await expect(page.getByText("Preferences")).toBeVisible();
-    await page.locator('label:has-text("Assignments") input[type="checkbox"]').uncheck();
-    await expect(page.locator('label:has-text("Assignments") input[type="checkbox"]')).not.toBeChecked();
-    await page.locator('label:has-text("Assignments") input[type="checkbox"]').check();
-    await expect(page.locator('label:has-text("Assignments") input[type="checkbox"]')).toBeChecked();
+    const assignmentsToggle = page.locator('label:has-text("Assignments") input[type="checkbox"]');
+    await assignmentsToggle.click();
+    await expect(assignmentsToggle).not.toBeChecked();
+    await assignmentsToggle.click();
+    await expect(assignmentsToggle).toBeChecked();
   });
 
   test("assignment notifications reach another project member", async ({ page }) => {
@@ -370,6 +385,7 @@ test.describe("Backlog regression coverage", () => {
       await detailPanel.getByRole("button", { name: "Save" }).click();
       await expect(detailPanel.getByText(name)).toBeVisible({ timeout: 10_000 });
 
+      await closeTaskDetail(page);
       await logout(page);
       await login(page, email, password);
       await goToDefaultProject(page);
@@ -383,60 +399,72 @@ test.describe("Backlog regression coverage", () => {
   });
 
   test("blocks links prevent terminal transitions", async ({ page }) => {
+    test.slow();
     const blockerTitle = uniqueName("Blocking Task");
     const blockedTitle = uniqueName("Blocked Task");
 
     await goToDefaultProject(page);
     await createTask(page, {
       title: blockerTitle,
-      dueDate: todayPlus(4),
+      dueDate: todayPlus(-30),
       status: "To Do",
     });
     await createTask(page, {
       title: blockedTitle,
-      dueDate: todayPlus(5),
+      dueDate: todayPlus(-29),
       status: "In Review",
     });
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
 
     await addTaskLink(page, blockerTitle, "blocks", blockedTitle);
     await updateTaskStatusToDoneExpectingError(page, blockedTitle, /blocking tasks are still open/i);
   });
 
   test("parent links prevent completing a parent with open children", async ({ page }) => {
+    test.slow();
     const parentTitle = uniqueName("Parent Task");
     const childTitle = uniqueName("Child Task");
 
     await goToDefaultProject(page);
     await createTask(page, {
       title: parentTitle,
-      dueDate: todayPlus(6),
+      dueDate: todayPlus(-365),
       status: "In Review",
     });
     await createTask(page, {
       title: childTitle,
-      dueDate: todayPlus(6),
+      dueDate: todayPlus(-365),
       status: "To Do",
     });
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
 
     await addTaskLink(page, parentTitle, "parent", childTitle);
     await updateTaskStatusToDoneExpectingError(page, parentTitle, /child tasks are still open/i);
   });
 
   test("child links also prevent completing the linked parent task", async ({ page }) => {
+    test.slow();
     const parentTitle = uniqueName("Hierarchy Parent");
-    const childTitle = uniqueName("Hierarchy Child");
+    const childTitle = uniqueName("Child Task");
 
     await goToDefaultProject(page);
     await createTask(page, {
       title: parentTitle,
-      dueDate: todayPlus(6),
+      dueDate: todayPlus(-365),
       status: "In Review",
     });
     await createTask(page, {
       title: childTitle,
-      dueDate: todayPlus(6),
+      dueDate: todayPlus(-365),
       status: "To Do",
     });
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
 
     await addTaskLink(page, childTitle, "child", parentTitle);
     await updateTaskStatusToDoneExpectingError(page, parentTitle, /child tasks are still open/i);

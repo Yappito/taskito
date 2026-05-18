@@ -27,7 +27,7 @@ export default async function middleware(req: Request & { nextUrl: URL }) {
   const { pathname } = req.nextUrl;
 
   // Public routes that don't require auth
-  const publicRoutes = ["/login", "/api/auth"];
+  const publicRoutes = ["/login", "/api/auth", "/manifest.json", "/sw.js", "/icon.svg", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"];
   const isPublicRoute = publicRoutes.some((route) => pathname.startsWith(route));
 
   // Allow public routes and API/trpc health endpoint

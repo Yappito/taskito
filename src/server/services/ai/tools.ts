@@ -131,6 +131,103 @@ const proposalSchema = z.object({
   taskId: cuid.optional(),
 });
 
+export interface AiNativeToolCall {
+  id?: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface AiNativeToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+const commonNativeToolFields = {
+  title: { type: "string", description: "Short human-readable title for the proposed action." },
+  summary: { type: "string", description: "One-sentence explanation of why this action should run." },
+} satisfies Record<string, unknown>;
+
+const nativeToolPayloadSchemas: Record<AiToolProposal["actionType"], Record<string, unknown>> = {
+  addComment: {
+    type: "object",
+    required: ["title", "summary", "taskId", "content"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" }, content: { type: "string" } },
+  },
+  addLink: {
+    type: "object",
+    required: ["title", "summary", "sourceTaskId", "targetTaskId", "linkType"],
+    properties: { ...commonNativeToolFields, sourceTaskId: { type: "string" }, targetTaskId: { type: "string" }, linkType: { type: "string", enum: ["blocks", "relates", "parent", "child"] } },
+  },
+  removeLink: {
+    type: "object",
+    required: ["title", "summary"],
+    properties: { ...commonNativeToolFields, linkId: { type: "string" }, sourceTaskId: { type: "string" }, targetTaskId: { type: "string" }, linkType: { type: "string", enum: ["blocks", "relates", "parent", "child"] } },
+  },
+  moveStatus: {
+    type: "object",
+    required: ["title", "summary", "taskId", "statusId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" }, statusId: { type: "string" } },
+  },
+  assignTask: {
+    type: "object",
+    required: ["title", "summary", "taskId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" }, assigneeId: { anyOf: [{ type: "string" }, { type: "null" }] } },
+  },
+  editTask: {
+    type: "object",
+    required: ["title", "summary", "taskId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" }, body: { anyOf: [{ type: "string" }, { type: "null" }] }, priority: { type: "string", enum: ["none", "low", "medium", "high", "urgent"] }, dueDate: { type: "string" }, startDate: { anyOf: [{ type: "string" }, { type: "null" }] }, tagIds: { type: "array", items: { type: "string" } }, customFieldValues: { type: "array", items: { type: "object" } } },
+  },
+  bulkUpdate: {
+    type: "object",
+    required: ["title", "summary", "taskIds"],
+    properties: { ...commonNativeToolFields, taskIds: { type: "array", items: { type: "string" } }, statusId: { type: "string" }, assigneeId: { anyOf: [{ type: "string" }, { type: "null" }] }, addTagIds: { type: "array", items: { type: "string" } }, removeTagIds: { type: "array", items: { type: "string" } }, archive: { type: "boolean" } },
+  },
+  createTask: {
+    type: "object",
+    required: ["title", "summary", "taskTitle", "dueDate"],
+    properties: { ...commonNativeToolFields, taskTitle: { type: "string", description: "Title of the new task." }, body: { anyOf: [{ type: "string" }, { type: "null" }] }, priority: { type: "string", enum: ["none", "low", "medium", "high", "urgent"] }, dueDate: { type: "string" }, startDate: { type: "string" }, statusId: { type: "string" }, assigneeId: { anyOf: [{ type: "string" }, { type: "null" }] }, tagIds: { type: "array", items: { type: "string" } }, customFieldValues: { type: "array", items: { type: "object" } } },
+  },
+  duplicateTask: {
+    type: "object",
+    required: ["title", "summary", "taskId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" }, newTitle: { type: "string" } },
+  },
+  archiveTask: {
+    type: "object",
+    required: ["title", "summary", "taskId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" } },
+  },
+  unarchiveTask: {
+    type: "object",
+    required: ["title", "summary", "taskId"],
+    properties: { ...commonNativeToolFields, taskId: { type: "string" } },
+  },
+};
+
+function normalizeNativeToolName(name: string): AiToolProposal["actionType"] | null {
+  const actionName = name.replace(/^taskito_/, "") as AiToolProposal["actionType"];
+  return actionPayloadSchemas[actionName] ? actionName : null;
+}
+
+export function buildAiToolDefinitions(permissions: unknown): AiNativeToolDefinition[] {
+  const grantedPermissions = normalizeAiPermissions(permissions);
+  const grantedSet = new Set(grantedPermissions);
+  return (Object.keys(nativeToolPayloadSchemas) as AiToolProposal["actionType"][])
+    .filter((actionType) => {
+      if (actionType === "editTask") {
+        return grantedSet.has("edit_core_fields") || grantedSet.has("edit_tags") || grantedSet.has("edit_custom_fields");
+      }
+      return grantedSet.has(actionPermissionMap[actionType as Exclude<AiToolProposal["actionType"], "editTask">]);
+    })
+    .map((actionType) => ({
+      name: `taskito_${actionType}`,
+      description: `Propose the Taskito ${actionType} action. The user must still approve it unless yolo mode is enabled.`,
+      inputSchema: nativeToolPayloadSchemas[actionType],
+    }));
+}
+
 function getTaskIdFromPayload(actionType: AiToolProposal["actionType"], payload: Record<string, unknown>) {
   switch (actionType) {
     case "addComment":
@@ -412,4 +509,37 @@ export function normalizeAiToolProposals(
   }
 
   return normalized;
+}
+
+export function normalizeAiNativeToolCalls(
+  nativeToolCalls: AiNativeToolCall[],
+  input: {
+    projectId: string;
+    grantedPermissions: unknown;
+    selectedTaskIds?: string[];
+  }
+) {
+  const proposalInputs = nativeToolCalls.flatMap((toolCall) => {
+    const actionType = normalizeNativeToolName(toolCall.name);
+    if (!actionType) {
+      return [];
+    }
+
+    const { title, summary, taskTitle, newTitle, ...payload } = toolCall.arguments;
+    const normalizedPayload: Record<string, unknown> = {
+      ...payload,
+      ...(actionType === "createTask" && typeof taskTitle === "string" ? { title: taskTitle } : {}),
+      ...(actionType === "duplicateTask" && typeof newTitle === "string" ? { title: newTitle } : {}),
+    };
+
+    return [{
+      actionType,
+      title: typeof title === "string" && title.trim() ? title : `Propose ${actionType}`,
+      summary: typeof summary === "string" && summary.trim() ? summary : `AI proposed ${actionType}.`,
+      payload: normalizedPayload,
+      taskId: typeof normalizedPayload.taskId === "string" ? normalizedPayload.taskId : undefined,
+    }];
+  });
+
+  return normalizeAiToolProposals(proposalInputs, input);
 }

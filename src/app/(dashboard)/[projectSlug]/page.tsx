@@ -8,6 +8,10 @@ import { ListView } from "@/components/task/list-view";
 import { BoardView } from "@/components/task/board-view";
 import { TimelineGraph } from "@/components/graph/timeline-graph";
 import { ArchivedTasks } from "@/components/task/archived-tasks";
+import { CalendarView } from "@/components/calendar/calendar-view";
+import { GanttView } from "@/components/gantt/gantt-view";
+import { DashboardView } from "@/components/dashboard/dashboard-view";
+import { SprintView } from "@/components/sprint/sprint-view";
 import { TaskDetail } from "@/components/task/task-detail";
 import { QuickAdd } from "@/components/task/quick-add";
 import { ProjectSwitcher } from "@/components/ui/project-switcher";
@@ -15,6 +19,14 @@ import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 import { cn } from "@/lib/utils";
 
 /** Project page with list, board, and graph view tabs */
+type ProjectView = "dashboard" | "list" | "board" | "calendar" | "gantt" | "sprint" | "graph" | "archive";
+const projectViews: ProjectView[] = ["dashboard", "list", "board", "calendar", "gantt", "sprint", "graph", "archive"];
+const LAST_PROJECT_VIEW_KEY = "taskito-last-project-view";
+
+function getProjectViewStorageKey(projectSlug: string) {
+  return `${LAST_PROJECT_VIEW_KEY}:${projectSlug}`;
+}
+
 export default function ProjectPage({
   params,
 }: {
@@ -25,7 +37,17 @@ export default function ProjectPage({
 }
 
 function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
-  const [view, setView] = useState<"list" | "board" | "graph" | "archive">("board");
+  const [view, setView] = useState<ProjectView>(() => {
+    if (typeof window === "undefined") {
+      return "dashboard";
+    }
+
+    const storedView = window.localStorage.getItem(getProjectViewStorageKey(projectSlug))
+      ?? window.localStorage.getItem(LAST_PROJECT_VIEW_KEY);
+    return storedView && projectViews.includes(storedView as ProjectView)
+      ? storedView as ProjectView
+      : "dashboard";
+  });
   const [selectedSearchTaskId, setSelectedSearchTaskId] = useState<string | null>(null);
   const [isRecoveringProject, setIsRecoveringProject] = useState(false);
   const searchParams = useSearchParams();
@@ -33,6 +55,17 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
   // Open task from URL query param (?task=<id>)
   useEffect(() => {
+    const requestedView = searchParams.get("view");
+    if (requestedView && projectViews.includes(requestedView as ProjectView)) {
+      setView(requestedView as ProjectView);
+    } else if (typeof window !== "undefined") {
+      const storedView = window.localStorage.getItem(getProjectViewStorageKey(projectSlug))
+        ?? window.localStorage.getItem(LAST_PROJECT_VIEW_KEY);
+      if (storedView && projectViews.includes(storedView as ProjectView)) {
+        setView(storedView as ProjectView);
+      }
+    }
+
     const taskId = searchParams.get("task");
     if (taskId) {
       setSelectedSearchTaskId(taskId);
@@ -40,6 +73,15 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
       router.replace(`/${projectSlug}`, { scroll: false });
     }
   }, [searchParams, projectSlug, router]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(LAST_PROJECT_VIEW_KEY, view);
+    window.localStorage.setItem(getProjectViewStorageKey(projectSlug), view);
+  }, [projectSlug, view]);
 
   const { data: project, isLoading } = trpc.project.bySlug.useQuery({
     slug: projectSlug,
@@ -89,8 +131,12 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
   const statuses = project.statuses ?? [];
   const projectSettings = (project as { settings?: Record<string, unknown> | null }).settings ?? null;
   const viewDescriptions: Record<typeof view, string> = {
+    dashboard: "Monitor project health, velocity, risk, and logged time.",
     list: "Scan, sort, and bulk edit tasks.",
     board: "Move work through delivery stages.",
+    calendar: "Plan due dates on a calendar grid.",
+    gantt: "See schedules as task bars across time.",
+    sprint: "Plan and inspect time-boxed cycles.",
     graph: "Inspect schedule and dependency risk.",
     archive: "Review completed and archived work.",
   };
@@ -150,10 +196,10 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
           <div className="flex flex-col gap-3 md:flex-row md:items-center xl:justify-end">
             <div
-              className="grid grid-cols-4 rounded-2xl p-1"
+              className="flex flex-wrap rounded-2xl p-1"
               style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
             >
-              {(["list", "board", "graph", "archive"] as const).map((v) => (
+              {projectViews.map((v) => (
                 <button
                   key={v}
                   onClick={() => setView(v)}
@@ -170,8 +216,8 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
                         }
                       : { color: "var(--color-text-secondary)" }
                   }
-                >
-                  {v}
+                  >
+                  {v === "gantt" ? "Gantt" : v}
                 </button>
               ))}
             </div>
@@ -217,10 +263,25 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
           >
             AI
           </Link>
+          <Link
+            href={`/${projectSlug}/settings/automation`}
+            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
+          >
+            Automation
+          </Link>
         </div>
       </div>
 
       {/* View content */}
+      {view === "dashboard" && (
+        <DashboardView
+          projectId={project.id}
+          statuses={statuses}
+          tags={tags ?? []}
+          projectSettings={projectSettings}
+        />
+      )}
       {view === "list" && (
         <ListView
           projectId={project.id}
@@ -231,6 +292,30 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
       )}
       {view === "board" && (
         <BoardView
+          projectId={project.id}
+          statuses={statuses}
+          tags={tags ?? []}
+          projectSettings={projectSettings}
+        />
+      )}
+      {view === "calendar" && (
+        <CalendarView
+          projectId={project.id}
+          statuses={statuses}
+          tags={tags ?? []}
+          projectSettings={projectSettings}
+        />
+      )}
+      {view === "gantt" && (
+        <GanttView
+          projectId={project.id}
+          statuses={statuses}
+          tags={tags ?? []}
+          projectSettings={projectSettings}
+        />
+      )}
+      {view === "sprint" && (
+        <SprintView
           projectId={project.id}
           statuses={statuses}
           tags={tags ?? []}

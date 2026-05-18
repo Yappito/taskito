@@ -205,11 +205,12 @@ function getConversationSelectedTaskIds(conversation: { selectedTaskIds: unknown
 
 async function assertAiActionStillAllowed(
   prisma: PrismaClient,
-  execution: AiActionExecution & { conversation: { grantedPermissions: unknown; selectedTaskIds: unknown } }
+  execution: AiActionExecution & { conversation: { grantedPermissions: unknown; selectedTaskIds: unknown } },
+  payloadOverride?: Record<string, unknown>
 ) {
   const policy = await getEffectiveProjectAiPolicy(prisma, execution.projectId);
   const selectedTaskIds = getConversationSelectedTaskIds(execution.conversation);
-  const payload = await resolveAiActionPayload(prisma, execution.projectId, execution.actionType, execution.proposedPayload, { selectedTaskIds });
+  const payload = await resolveAiActionPayload(prisma, execution.projectId, execution.actionType, payloadOverride ?? execution.proposedPayload, { selectedTaskIds });
   const effectivePermissions = getEffectiveConversationPermissions(policy, execution.conversation.grantedPermissions);
   const grantedSet = new Set(effectivePermissions);
   const requiredPermissions = getRequiredPermissionsForActionPayload(execution.actionType, payload);
@@ -218,7 +219,7 @@ async function assertAiActionStillAllowed(
     throw new Error("This AI action is no longer allowed by the current project policy or conversation permissions");
   }
 
-  return { selectedTaskIds };
+  return { selectedTaskIds, payload };
 }
 
 async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisibleProviderOrThrow>>) {
@@ -231,6 +232,9 @@ async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisi
       content: "Reply with exactly: OK",
       toolName: null,
       toolPayload: null,
+      toolCalls: null,
+      toolCallId: null,
+      isStreaming: false,
       createdAt: new Date(),
     },
   ] satisfies AiMessage[];
@@ -841,6 +845,9 @@ export const aiRouter = createTRPCRouter({
           ].join("\n"),
           toolName: null,
           toolPayload: null,
+          toolCalls: null,
+          toolCallId: null,
+          isStreaming: false,
           createdAt: new Date(0),
         },
         {
@@ -850,6 +857,9 @@ export const aiRouter = createTRPCRouter({
           content: `Conversation mode: ${conversation.mode}\nAllowed permissions: ${effectivePermissions.join(", ") || "none"}`,
           toolName: null,
           toolPayload: null,
+          toolCalls: null,
+          toolCallId: null,
+          isStreaming: false,
           createdAt: new Date(0),
         },
         ...conversation.messages,
@@ -876,7 +886,7 @@ export const aiRouter = createTRPCRouter({
     }),
 
   approveAction: protectedProcedure
-    .input(z.object({ id: z.string().cuid() }))
+    .input(z.object({ id: z.string().cuid(), overridePayload: z.record(z.string(), z.unknown()).optional() }))
     .mutation(async ({ ctx, input }) => {
       const execution = await ctx.prisma.aiActionExecution.findUniqueOrThrow({
         where: { id: input.id },
@@ -888,11 +898,16 @@ export const aiRouter = createTRPCRouter({
         throw new Error("You do not have access to this AI action");
       }
 
-      const { selectedTaskIds } = await assertAiActionStillAllowed(ctx.prisma, execution);
+      const { selectedTaskIds, payload } = await assertAiActionStillAllowed(ctx.prisma, execution, input.overridePayload);
+      const executionPayload = payload as Prisma.JsonValue;
 
       const claim = await ctx.prisma.aiActionExecution.updateMany({
         where: { id: input.id, status: "proposed" },
-        data: { status: "approved", errorMessage: null },
+        data: {
+          status: "approved",
+          errorMessage: null,
+          ...(input.overridePayload ? { proposedPayload: executionPayload as Prisma.InputJsonValue } : {}),
+        },
       });
 
       if (claim.count !== 1) {
@@ -903,7 +918,10 @@ export const aiRouter = createTRPCRouter({
 
       try {
         const result = await executeAiAction(ctx.prisma, {
-          actionExecution: approved,
+          actionExecution: {
+            ...approved,
+            proposedPayload: executionPayload,
+          },
           requestedByUserId: ctx.session.user.id,
           selectedTaskIds,
         });
@@ -913,7 +931,7 @@ export const aiRouter = createTRPCRouter({
           data: {
             status: "executed",
             executedByUserId: ctx.session.user.id,
-            executedPayload: approved.proposedPayload as Prisma.InputJsonValue,
+            executedPayload: executionPayload as Prisma.InputJsonValue,
             result: (result ?? null) as Prisma.InputJsonValue,
           },
         }).then(mapExecutionForClient);

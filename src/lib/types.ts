@@ -211,6 +211,11 @@ export interface TaskCardData {
   tags: TaskTagSummary[];
   creator?: TaskPersonSummary | null;
   assignee?: TaskPersonSummary | null;
+  sprint?: {
+    id: string;
+    name: string;
+    status?: "planning" | "active" | "completed";
+  } | null;
   project?: ProjectReference;
   alertAcknowledged?: boolean;
   dependencyState?: {

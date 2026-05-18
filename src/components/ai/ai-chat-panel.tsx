@@ -26,6 +26,12 @@ interface PendingMessage {
   createdAt: Date;
 }
 
+interface StreamingAssistantMessage {
+  id: string;
+  content: string;
+  createdAt: Date;
+}
+
 type TimelineItem =
   | {
       id: string;
@@ -108,6 +114,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sendOnEnter, setSendOnEnter] = useState<boolean | null>(null);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const [streamingAssistant, setStreamingAssistant] = useState<StreamingAssistantMessage | null>(null);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const contextMenuRef = useRef<HTMLDetailsElement | null>(null);
@@ -338,6 +345,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
   const displayName = currentUser?.name?.trim() || currentUser?.email || "You";
   const effectiveSendOnEnter = sendOnEnter ?? aiPreferences?.sendOnEnter ?? false;
   const isThinking = sendMessage.isPending;
+  const isStreaming = Boolean(streamingAssistant);
   const hasActiveConversation = Boolean(conversationId);
   const contextTasks = useMemo(() => {
     if (contextSnapshot?.currentTask) {
@@ -352,7 +360,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [isThinking, timeline.length]);
+  }, [isThinking, isStreaming, streamingAssistant?.content, timeline.length]);
 
   useEffect(() => {
     if (!canUseYolo && mode === "yolo") {
@@ -538,6 +546,73 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     );
   }
 
+  async function invalidateAfterAiTurn(id: string) {
+    await Promise.all([
+      utils.ai.getConversation.invalidate({ id }),
+      utils.ai.listActionExecutions.invalidate({ conversationId: id }),
+      utils.ai.listConversations.invalidate(historyInput),
+      utils.task.list.invalidate(),
+      utils.task.links.invalidate({ projectId }),
+      ...(taskId ? [utils.task.byId.invalidate({ id: taskId })] : []),
+    ]);
+  }
+
+  async function streamAiMessage(id: string, content: string) {
+    if (!window.ReadableStream || !window.TextDecoder) {
+      await sendMessage.mutateAsync({ id, content });
+      return;
+    }
+
+    setStreamingAssistant({ id: `streaming-${Date.now()}`, content: "", createdAt: new Date() });
+    const response = await fetch("/api/ai/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: id, content }),
+    });
+
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      throw new Error(payload?.error ?? "AI stream failed");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let streamError: string | null = null;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+
+      for (const event of events) {
+        const dataLine = event.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        try {
+          const parsed = JSON.parse(dataLine.slice(5).trim()) as { type?: string; delta?: string; error?: string };
+          if (parsed.type === "content" && parsed.delta) {
+            setStreamingAssistant((current) => current ? { ...current, content: `${current.content}${parsed.delta}` } : current);
+          }
+          if (parsed.type === "error") {
+            streamError = parsed.error ?? "AI stream failed";
+          }
+        } catch {
+          // Ignore malformed SSE events.
+        }
+      }
+    }
+
+    if (streamError) {
+      throw new Error(streamError);
+    }
+
+    setPendingMessages([]);
+    setStreamingAssistant(null);
+    await invalidateAfterAiTurn(id);
+  }
+
   function startNewConversation() {
     setConversationId(null);
     setErrorMessage(null);
@@ -644,7 +719,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                 }
                 setGrantedPermissions(filteredPermissions);
               }}
-              disabled={hasActiveConversation || startConversation.isPending || sendMessage.isPending}
+              disabled={hasActiveConversation || startConversation.isPending || sendMessage.isPending || isStreaming}
               compact
             />
           </div>
@@ -739,7 +814,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                   key={item.id}
                   proposals={item.proposals}
                   isPending={approveAction.isPending || rejectAction.isPending || rollbackAction.isPending}
-                  onApprove={(proposalId) => approveAction.mutate({ id: proposalId })}
+                  onApprove={(proposalId, overridePayload) => approveAction.mutate({ id: proposalId, ...(overridePayload ? { overridePayload } : {}) })}
                   onReject={(proposalId) => rejectAction.mutate({ id: proposalId })}
                   onRollback={(proposalId) => rollbackAction.mutate({ id: proposalId })}
                 />
@@ -768,6 +843,24 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                 Thinking...
               </div>
               <div className="mt-2 text-xs" style={{ color: "var(--color-text-muted)" }}>{new Date().toLocaleString()}</div>
+            </div>
+          )}
+          {streamingAssistant && (
+            <div className="rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+              <div className="mb-1 flex items-center justify-between gap-3 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                <span className="font-semibold">Taskito AI</span>
+                <span className="shrink-0">Streaming...</span>
+              </div>
+              {streamingAssistant.content ? renderMessageContent("assistant", streamingAssistant.content) : (
+                <div className="flex items-center gap-2 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+                  <span className="inline-flex gap-1">
+                    <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: "var(--color-accent)" }} />
+                    <span className="h-2 w-2 animate-pulse rounded-full [animation-delay:120ms]" style={{ backgroundColor: "var(--color-accent)" }} />
+                    <span className="h-2 w-2 animate-pulse rounded-full [animation-delay:240ms]" style={{ backgroundColor: "var(--color-accent)" }} />
+                  </span>
+                  Connecting to provider...
+                </div>
+              )}
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -799,9 +892,10 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
           try {
             const id = await ensureConversation(pendingContent);
             setConversationId(id);
-            await sendMessage.mutateAsync({ id, content: pendingContent });
+            await streamAiMessage(id, pendingContent);
           } catch (error) {
             setPendingMessages([]);
+            setStreamingAssistant(null);
             setMessage(pendingContent);
             setErrorMessage(error instanceof Error ? error.message : "AI message failed");
           }
@@ -830,7 +924,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
               type="button"
               size="sm"
               variant="ghost"
-              disabled={!conversationId || generateConversationTitle.isPending || sendMessage.isPending || startConversation.isPending}
+              disabled={!conversationId || generateConversationTitle.isPending || sendMessage.isPending || isStreaming || startConversation.isPending}
               onClick={() => {
                 if (!conversationId) {
                   return;
@@ -855,8 +949,8 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
               />
               Enter sends
             </label>
-            <Button type="submit" disabled={sendMessage.isPending || startConversation.isPending || !providerId || !message.trim()}>
-              {sendMessage.isPending ? "Thinking..." : "Send"}
+            <Button type="submit" disabled={sendMessage.isPending || isStreaming || startConversation.isPending || !providerId || !message.trim()}>
+              {sendMessage.isPending || isStreaming ? "Thinking..." : "Send"}
             </Button>
           </div>
         </div>

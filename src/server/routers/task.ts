@@ -5,6 +5,7 @@ import { autoTagTask } from "../services/auto-tagger";
 import { createTaskActivity } from "../services/task-activity";
 import { createNotification, notifyTaskWatchers } from "../services/notifications";
 import { createTaskComment } from "../services/comment-service";
+import { evaluateAutomationRules, isAutomationExecutionActive } from "../services/automation-evaluator";
 import {
   requireProjectAccess,
   requireTagAccess,
@@ -81,6 +82,34 @@ async function validateAssigneeAccess(
 
   if (user.role !== "admin" && user.projectMemberships.length === 0) {
     throw new Error("Assignee must be a member of the selected project");
+  }
+}
+
+async function validateSprintAccess(
+  ctx: { prisma: typeof import("@/lib/prisma").prisma },
+  projectId: string,
+  sprintId: string | null | undefined,
+  projectLabel = "selected project"
+) {
+  if (!sprintId) {
+    return;
+  }
+
+  const sprint = await ctx.prisma.sprint.findUnique({
+    where: { id: sprintId },
+    select: { projectId: true, status: true },
+  });
+
+  if (!sprint) {
+    throw new Error("Sprint no longer exists");
+  }
+
+  if (sprint.projectId !== projectId) {
+    throw new Error(`Sprint does not belong to the ${projectLabel}`);
+  }
+
+  if (sprint.status === "completed") {
+    throw new Error("Cannot assign tasks to a completed sprint");
   }
 }
 
@@ -299,6 +328,7 @@ export const taskRouter = createTRPCRouter({
         closedAtTo: z.date().optional(),
         search: z.string().optional(),
         assigneeIds: z.array(z.string().cuid()).optional(),
+        sprintId: z.string().cuid().nullable().optional(),
         includeArchived: z.boolean().optional(),
         archivedOnly: z.boolean().optional(),
         cursor: z.string().optional(),
@@ -320,6 +350,7 @@ export const taskRouter = createTRPCRouter({
         closedAtTo,
         search,
         assigneeIds,
+        sprintId,
         includeArchived,
         archivedOnly,
       } = input;
@@ -355,6 +386,7 @@ export const taskRouter = createTRPCRouter({
           ? { tags: { some: { tagId: { in: tagIds } } } }
           : {}),
         ...(assigneeIds?.length ? { assigneeId: { in: assigneeIds } } : {}),
+        ...(sprintId !== undefined ? { sprintId } : {}),
         ...(search
           ? { title: { contains: search, mode: "insensitive" as const } }
           : {}),
@@ -367,6 +399,9 @@ export const taskRouter = createTRPCRouter({
           tags: { include: { tag: true } },
           creator: { select: { id: true, name: true, email: true, image: true } },
           assignee: { select: { id: true, name: true, email: true, image: true } },
+          sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
+          timeLogs: { select: { duration: true, endedAt: true, startedAt: true, userId: true } },
+          recurrenceRule: true,
           watchers: { select: { userId: true } },
           sourceLinks: {
             select: {
@@ -424,6 +459,9 @@ export const taskRouter = createTRPCRouter({
           project: { select: { key: true } },
           creator: { select: { id: true, name: true, email: true, image: true } },
           assignee: { select: { id: true, name: true, email: true, image: true } },
+          sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
+          timeLogs: { include: { user: { select: { id: true, name: true, email: true, image: true } } }, orderBy: { startedAt: "desc" } },
+          recurrenceRule: true,
           watchers: { select: { userId: true } },
           tags: { include: { tag: true } },
           sourceLinks: {
@@ -503,6 +541,7 @@ export const taskRouter = createTRPCRouter({
         body: z.string().max(20000).nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
         statusId: z.string().cuid().optional(),
+        sprintId: z.string().cuid().nullable().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).default("none"),
         dueDate: z.date(),
         startDate: z.date().optional(),
@@ -511,7 +550,7 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { tagIds, description, body, assigneeId, customFieldValues, ...data } = input;
+      const { tagIds, description, body, assigneeId, customFieldValues, sprintId, ...data } = input;
       const effectiveAssigneeId = assigneeId ?? ctx.session.user.id;
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId);
       await validateAssigneeAccess(ctx, data.projectId, effectiveAssigneeId);
@@ -523,6 +562,8 @@ export const taskRouter = createTRPCRouter({
           throw new Error("Status does not belong to the specified project");
         }
       }
+
+      await validateSprintAccess(ctx, data.projectId, sprintId, "specified project");
 
       if (tagIds?.length) {
         const matchingTags = await ctx.prisma.tag.findMany({
@@ -571,6 +612,7 @@ export const taskRouter = createTRPCRouter({
             taskNumber,
             creatorId: ctx.session.user.id,
             assigneeId: effectiveAssigneeId,
+            sprintId: sprintId ?? null,
             closedAt: initialStatusIsFinal ? new Date() : null,
             description: (description ?? body ?? undefined) as Prisma.InputJsonValue | undefined,
             body,
@@ -617,6 +659,16 @@ export const taskRouter = createTRPCRouter({
         },
       }).catch(() => {});
 
+      if (!isAutomationExecutionActive()) {
+        evaluateAutomationRules(ctx.prisma, {
+          projectId: task.projectId,
+          trigger: "taskCreated",
+          taskId: task.id,
+          actorId: ctx.session.user.id,
+          after: { statusId: task.statusId, assigneeId: task.assigneeId, priority: task.priority },
+        }).catch(() => {});
+      }
+
       return task;
     }),
 
@@ -630,6 +682,7 @@ export const taskRouter = createTRPCRouter({
         body: z.string().nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
         statusId: z.string().cuid().optional(),
+        sprintId: z.string().cuid().nullable().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).optional(),
         dueDate: z.date().optional(),
         startDate: z.date().nullable().optional(),
@@ -639,11 +692,11 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, title, description, body, assigneeId, statusId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
+      const { id, title, description, body, assigneeId, statusId, sprintId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
       const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
       const currentTaskSnapshot = await ctx.prisma.task.findUniqueOrThrow({
         where: { id },
-        select: { assigneeId: true, closedAt: true },
+        select: { assigneeId: true, closedAt: true, statusId: true, priority: true, sprintId: true },
       });
       await validateAssigneeAccess(ctx, currentTask.projectId, assigneeId);
       const normalizedCustomFieldValues = await validateCustomFieldValues(ctx, currentTask.projectId, customFieldValues);
@@ -663,6 +716,8 @@ export const taskRouter = createTRPCRouter({
           throw new Error("One or more tags do not belong to the task project");
         }
       }
+
+      await validateSprintAccess(ctx, currentTask.projectId, sprintId, "task project");
 
       // Validate status transition if statusId is being changed
       if (statusId) {
@@ -746,6 +801,7 @@ export const taskRouter = createTRPCRouter({
         ...(body !== undefined && { body }),
         ...(assigneeId !== undefined && { assigneeId }),
         ...(statusId !== undefined && { statusId }),
+        ...(sprintId !== undefined && { sprintId }),
         ...(priority !== undefined && { priority }),
         ...(dueDate !== undefined && { dueDate }),
         ...(startDate !== undefined && { startDate }),
@@ -808,6 +864,7 @@ export const taskRouter = createTRPCRouter({
             ...(description !== undefined || body !== undefined ? ["description"] : []),
             ...(assigneeId !== undefined ? ["assigneeId"] : []),
             ...(statusId !== undefined ? ["statusId"] : []),
+            ...(sprintId !== undefined ? ["sprintId"] : []),
             ...(closedAt !== undefined ? ["closedAt"] : []),
             ...(priority !== undefined ? ["priority"] : []),
             ...(dueDate !== undefined ? ["dueDate"] : []),
@@ -842,6 +899,29 @@ export const taskRouter = createTRPCRouter({
         }).catch(() => {});
       }
 
+      if (!isAutomationExecutionActive()) {
+        if (statusId !== undefined && statusId !== currentTaskSnapshot.statusId) {
+          evaluateAutomationRules(ctx.prisma, {
+            projectId: currentTask.projectId,
+            trigger: "statusChanged",
+            taskId: updated.id,
+            actorId: ctx.session.user.id,
+            before: { statusId: currentTaskSnapshot.statusId, assigneeId: currentTaskSnapshot.assigneeId, priority: currentTaskSnapshot.priority },
+            after: { statusId: updated.statusId, assigneeId: updated.assigneeId, priority: updated.priority },
+          }).catch(() => {});
+        }
+        if (assigneeId !== undefined && assigneeId !== currentTaskSnapshot.assigneeId) {
+          evaluateAutomationRules(ctx.prisma, {
+            projectId: currentTask.projectId,
+            trigger: "taskAssigned",
+            taskId: updated.id,
+            actorId: ctx.session.user.id,
+            before: { statusId: currentTaskSnapshot.statusId, assigneeId: currentTaskSnapshot.assigneeId, priority: currentTaskSnapshot.priority },
+            after: { statusId: updated.statusId, assigneeId: updated.assigneeId, priority: updated.priority },
+          }).catch(() => {});
+        }
+      }
+
       return updated;
     }),
 
@@ -853,6 +933,7 @@ export const taskRouter = createTRPCRouter({
         taskIds: z.array(z.string().cuid()).min(1).max(100),
         statusId: z.string().cuid().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
+        sprintId: z.string().cuid().nullable().optional(),
         addTagIds: z.array(z.string().cuid()).optional(),
         removeTagIds: z.array(z.string().cuid()).optional(),
         archive: z.boolean().optional(),
@@ -860,6 +941,7 @@ export const taskRouter = createTRPCRouter({
         (value) =>
           value.statusId !== undefined ||
           value.assigneeId !== undefined ||
+          value.sprintId !== undefined ||
           (value.addTagIds?.length ?? 0) > 0 ||
           (value.removeTagIds?.length ?? 0) > 0 ||
           value.archive !== undefined,
@@ -909,6 +991,8 @@ export const taskRouter = createTRPCRouter({
       if (input.assigneeId !== undefined) {
         await validateAssigneeAccess(ctx, input.projectId, input.assigneeId);
       }
+
+      await validateSprintAccess(ctx, input.projectId, input.sprintId);
 
       let archivedAt: Date | null | undefined;
       let targetStatus: Awaited<ReturnType<typeof requireWorkflowStatusAccess>> | null = null;
@@ -976,7 +1060,7 @@ export const taskRouter = createTRPCRouter({
       }
 
       await ctx.prisma.$transaction(async (tx) => {
-        if (input.statusId !== undefined || input.assigneeId !== undefined || archivedAt !== undefined) {
+        if (input.statusId !== undefined || input.assigneeId !== undefined || input.sprintId !== undefined || archivedAt !== undefined) {
           await Promise.all(
             tasks.map((task) => {
               const closedAt = input.statusId !== undefined && targetStatus
@@ -988,6 +1072,7 @@ export const taskRouter = createTRPCRouter({
                 data: {
                   ...(input.statusId !== undefined ? { statusId: input.statusId } : {}),
                   ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
+                  ...(input.sprintId !== undefined ? { sprintId: input.sprintId } : {}),
                   ...(archivedAt !== undefined ? { archivedAt } : {}),
                   ...(closedAt !== undefined ? { closedAt } : {}),
                 },
@@ -1022,6 +1107,7 @@ export const taskRouter = createTRPCRouter({
           tags: { include: { tag: true } },
           creator: { select: { id: true, name: true, email: true, image: true } },
           assignee: { select: { id: true, name: true, email: true, image: true } },
+          sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           project: { select: { key: true, slug: true } },
         },
       });
@@ -1034,6 +1120,7 @@ export const taskRouter = createTRPCRouter({
           details: {
             statusId: input.statusId,
             assigneeId: input.assigneeId,
+            sprintId: input.sprintId,
             addTagIds: input.addTagIds ?? [],
             removeTagIds: input.removeTagIds ?? [],
             archive: input.archive,
@@ -1078,7 +1165,8 @@ export const taskRouter = createTRPCRouter({
             dueDate: currentTask.dueDate,
             startDate: currentTask.startDate,
             creatorId: ctx.session.user.id,
-            assigneeId: currentTask.assigneeId,
+        assigneeId: currentTask.assigneeId,
+            sprintId: currentTask.sprintId,
             tags: currentTask.tags.length
               ? {
                   create: currentTask.tags.map(({ tagId }) => ({ tagId })),
@@ -1224,11 +1312,24 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      return createTaskComment(ctx.prisma, {
+      const comment = await createTaskComment(ctx.prisma, {
         taskId: input.taskId,
         authorId: ctx.session.user.id,
         content: input.content,
       });
+      if (!isAutomationExecutionActive()) {
+        const task = await ctx.prisma.task.findUnique({ where: { id: input.taskId }, select: { projectId: true, statusId: true, assigneeId: true, priority: true } });
+        if (task) {
+          evaluateAutomationRules(ctx.prisma, {
+            projectId: task.projectId,
+            trigger: "commentAdded",
+            taskId: input.taskId,
+            actorId: ctx.session.user.id,
+            after: { statusId: task.statusId, assigneeId: task.assigneeId, priority: task.priority },
+          }).catch(() => {});
+        }
+      }
+      return comment;
     }),
 
   watch: protectedProcedure

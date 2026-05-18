@@ -1,26 +1,31 @@
 import { test, expect } from "@playwright/test";
 
+import { login } from "./helpers";
+
+test("unauthenticated user is redirected to login for project routes", async ({ page }) => {
+  await page.goto("/default");
+  await page.waitForURL((url) => url.pathname === "/login", { timeout: 15_000 });
+  await expect(page.locator('input[name="email"]')).toBeVisible();
+});
+
 test("login flow — seeded user signs in and lands on dashboard", async ({ page }) => {
-  // Navigate to /login
   await page.goto("/login");
 
   // Verify login page rendered
   await expect(page.locator("h1")).toHaveText("Taskito");
 
-  // Fill in the seeded credentials
-  await page.fill('input[name="email"]', "admin@taskito.local");
-  await page.fill('input[name="password"]', "taskito-demo-2026");
-
-  // Submit the form
-  await page.click('button[type="submit"]');
-
-  // Wait for navigation away from /login; the seeded user's project slug can vary by local DB state.
-  await page.waitForURL((url) => url.pathname !== "/login", {
-    timeout: 15_000,
-  });
+  await login(page);
 
   // Assert we're on a dashboard project slug route.
   const url = new URL(page.url());
   expect(url.pathname).toMatch(/^\/[^/]+$/);
   expect(["/login", "/no-access", "/settings"]).not.toContain(url.pathname);
+});
+
+test("logged-in user can log out back to login", async ({ page }) => {
+  await login(page);
+
+  await page.getByRole("button", { name: "Log out" }).click();
+  await page.waitForURL("**/login", { timeout: 15_000 });
+  await expect(page.locator('input[name="email"]')).toBeVisible();
 });

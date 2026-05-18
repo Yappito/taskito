@@ -8,6 +8,11 @@ import { userRouter } from "./user";
 import { customFieldRouter } from "./custom-field";
 import { notificationRouter } from "./notification";
 import { aiRouter } from "./ai";
+import { analyticsRouter } from "./analytics";
+import { sprintRouter } from "./sprint";
+import { timeLogRouter } from "./time-log";
+import { automationRouter } from "./automation";
+import { recurrenceRouter } from "./recurrence";
 
 /** Root tRPC router — all sub-routers mounted here */
 export const appRouter = createTRPCRouter({
@@ -20,6 +25,11 @@ export const appRouter = createTRPCRouter({
   search: searchRouter,
   user: userRouter,
   ai: aiRouter,
+  analytics: analyticsRouter,
+  sprint: sprintRouter,
+  timeLog: timeLogRouter,
+  automation: automationRouter,
+  recurrence: recurrenceRouter,
 });
 
 /** Type export for the client */

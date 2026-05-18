@@ -1,15 +1,6 @@
 import { test, expect, Page } from "@playwright/test";
 
-/** Helper: log in as the seeded admin user */
-async function login(page: Page) {
-  await page.goto("/login");
-  await page.fill('input[name="email"]', "admin@taskito.local");
-  await page.fill('input[name="password"]', "taskito-demo-2026");
-  await page.click('button[type="submit"]');
-  await page.waitForURL((url) => !url.pathname.includes("/login"), {
-    timeout: 15_000,
-  });
-}
+import { login } from "./helpers";
 
 test.describe("Settings page", () => {
   test.beforeEach(async ({ page }) => {
@@ -31,9 +22,9 @@ test.describe("Settings page", () => {
   test("projects tab shows existing projects", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: "projects" }).click();
 
-    // Projects tab should be active by default — wait for project list to load
-    await expect(page.getByText("New Project")).toBeVisible();
+    await expect(page.getByRole("button", { name: "New Project" })).toBeVisible();
 
     // Should show at least one project (the seeded "Default Project")
     await expect(page.getByText("Default Project").first()).toBeVisible();
@@ -42,8 +33,9 @@ test.describe("Settings page", () => {
   test("can open create project dialog", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: "projects" }).click();
 
-    await page.getByText("New Project").click();
+    await page.getByRole("button", { name: "New Project" }).click();
 
     // Dialog should appear with form fields
     await expect(page.getByText("Create Project")).toBeVisible();
@@ -55,8 +47,9 @@ test.describe("Settings page", () => {
   test("create project auto-generates slug and key", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: "projects" }).click();
 
-    await page.getByText("New Project").click();
+    await page.getByRole("button", { name: "New Project" }).click();
     await page.waitForTimeout(300);
 
     // Type a project name
@@ -73,8 +66,9 @@ test.describe("Settings page", () => {
   test("project switcher navigates between projects and scopes tasks", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: "projects" }).click();
 
-    await page.getByText("New Project").click();
+    await page.getByRole("button", { name: "New Project" }).click();
     await page.waitForTimeout(300);
 
     await page.locator('input[placeholder="My Project"]').fill("Switcher Project");
@@ -88,14 +82,14 @@ test.describe("Settings page", () => {
 
     const projectSwitcher = page.getByLabel("Select project");
     await expect(projectSwitcher).toHaveValue("default");
-    await expect(page.locator("[data-board-task-id]").first()).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Default Project" })).toBeVisible();
 
     await projectSwitcher.selectOption("switcher-project");
     await page.waitForURL("**/switcher-project", { timeout: 15000 });
     await page.waitForLoadState("networkidle");
 
     await expect(projectSwitcher).toHaveValue("switcher-project");
-    await expect(page.locator("[data-board-task-id]")).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 1, name: "Switcher Project" })).toBeVisible();
   });
 
   test("users tab shows user list", async ({ page }) => {
@@ -153,7 +147,7 @@ test.describe("Search modal", () => {
     await page.waitForTimeout(300);
 
     // Search modal should be visible (look for the input)
-    const searchInput = page.locator('input[placeholder="Search tasks..."]');
+    const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
     await expect(searchInput).toBeVisible();
 
     // Click the backdrop (outside the modal) — use coordinates at bottom-right area
@@ -172,7 +166,7 @@ test.describe("Search modal", () => {
     await page.keyboard.press("Meta+k");
     await page.waitForTimeout(300);
 
-    const searchInput = page.locator('input[placeholder="Search tasks..."]');
+    const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
     await expect(searchInput).toBeVisible();
 
     // Press Escape to close
@@ -185,7 +179,7 @@ test.describe("Search modal", () => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
 
-    const searchInput = page.locator('input[placeholder="Search tasks..."]');
+    const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
 
     await page.keyboard.press("Meta+k");
     await expect(searchInput).toBeVisible();

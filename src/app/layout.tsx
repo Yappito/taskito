@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import { TRPCProvider } from "@/lib/trpc-client";
 import { ThemeProvider } from "@/components/ui/theme-provider";
+import { PwaRegister } from "@/components/pwa/pwa-register";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -29,7 +30,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <ThemeProvider>
-          <TRPCProvider>{children}</TRPCProvider>
+          <TRPCProvider>{children}<PwaRegister /></TRPCProvider>
         </ThemeProvider>
       </body>
     </html>

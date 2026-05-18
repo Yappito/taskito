@@ -30,12 +30,14 @@ model User {
   notificationActors Notification[] @relation("NotificationActor")
   createdTasks  Task[]    @relation("TaskCreator")
   assignedTasks Task[]    @relation("TaskAssignee")
+  sprintAssignments SprintMember[]
   projectMemberships ProjectMember[]
   ownedAiProviders AiProviderConnection[] @relation("OwnedAiProviders")
   aiConversations AiConversation[] @relation("CreatedAiConversations")
   requestedAiActionExecutions AiActionExecution[] @relation("RequestedAiActions")
   executedAiActionExecutions AiActionExecution[] @relation("ExecutedAiActions")
   rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
+  timeLogs      TimeLog[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -101,6 +103,48 @@ model Project {
   aiPolicy    AiProjectPolicy?
   aiConversations AiConversation[]
   aiActionExecutions AiActionExecution[]
+  sprints     Sprint[]
+  automationRules AutomationRule[]
+  automationRuns AutomationRun[]
+}
+
+enum SprintStatus {
+  planning
+  active
+  completed
+}
+
+model Sprint {
+  id        String       @id @default(cuid())
+  projectId String
+  name      String
+  goal      String?
+  startDate DateTime
+  endDate   DateTime
+  status    SprintStatus @default(planning)
+  order     Int          @default(0)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   Task[]
+  members SprintMember[]
+
+  @@unique([projectId, name])
+  @@index([projectId, order])
+  @@index([projectId, status])
+}
+
+model SprintMember {
+  sprintId   String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sprintId, userId])
+  @@index([userId])
 }
 
 enum ProjectMemberRole {
@@ -185,6 +229,7 @@ model Task {
   description Json?
   body        String?      @db.Text
   statusId    String
+  sprintId    String?
   priority    TaskPriority @default(none)
   dueDate     DateTime
   startDate   DateTime?
@@ -198,6 +243,7 @@ model Task {
   creator          User?              @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: SetNull)
   assignee         User?              @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
   status           WorkflowStatus     @relation(fields: [statusId], references: [id])
+  sprint           Sprint?            @relation(fields: [sprintId], references: [id], onDelete: SetNull)
   tags             TaskTag[]
   sourceLinks      TaskLink[]         @relation("SourceTask")
   targetLinks      TaskLink[]         @relation("TargetTask")
@@ -208,13 +254,122 @@ model Task {
   customFieldValues CustomFieldValue[]
   aiConversations  AiConversation[]
   aiActionExecutions AiActionExecution[]
+  timeLogs         TimeLog[]
+  recurrenceRule   RecurrenceRule?
+  automationRuns   AutomationRun[]
 
   @@unique([projectId, taskNumber])
   @@index([projectId, dueDate])
   @@index([projectId, statusId])
+  @@index([projectId, sprintId])
   @@index([projectId, archivedAt])
   @@index([projectId, assigneeId])
   @@index([creatorId])
+}
+
+model TimeLog {
+  id          String    @id @default(cuid())
+  taskId      String
+  userId      String
+  description String?
+  duration    Int
+  startedAt   DateTime
+  endedAt     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, startedAt])
+  @@index([userId, startedAt])
+}
+
+enum RecurrenceFrequency {
+  daily
+  weekly
+  monthly
+  yearly
+}
+
+model RecurrenceRule {
+  id          String              @id @default(cuid())
+  taskId      String              @unique
+  frequency   RecurrenceFrequency
+  interval    Int                 @default(1)
+  dayOfWeek   Int?
+  dayOfMonth  Int?
+  endDate     DateTime?
+  nextDueDate DateTime
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([nextDueDate])
+}
+
+enum AutomationTrigger {
+  taskCreated
+  statusChanged
+  taskAssigned
+  commentAdded
+  dueDatePassed
+}
+
+enum AutomationAction {
+  moveStatus
+  assignTask
+  addTag
+  removeTag
+  addComment
+  archiveTask
+  unarchiveTask
+}
+
+enum AutomationRunStatus {
+  success
+  failed
+  skipped
+}
+
+model AutomationRule {
+  id               String            @id @default(cuid())
+  projectId        String
+  name             String
+  isEnabled        Boolean           @default(true)
+  trigger          AutomationTrigger
+  triggerCondition Json?
+  action           AutomationAction
+  actionPayload    Json
+  lastRunAt        DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs    AutomationRun[]
+
+  @@index([projectId, isEnabled])
+  @@index([projectId, trigger])
+}
+
+model AutomationRun {
+  id        String              @id @default(cuid())
+  ruleId    String
+  projectId String
+  taskId    String?
+  trigger   AutomationTrigger
+  status    AutomationRunStatus
+  message   String?
+  createdAt DateTime            @default(now())
+
+  rule    AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  project Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task    Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([ruleId, createdAt])
+  @@index([taskId, createdAt])
 }
 
 enum TaskActivityAction {
@@ -496,6 +651,7 @@ model AiConversation {
   grantedPermissions Json               @default("[]")
   selectedTaskIds    Json?
   contextSnapshot    Json?
+  streamToken        String?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
@@ -518,6 +674,9 @@ model AiMessage {
   content        String        @db.Text
   toolName       String?
   toolPayload    Json?
+  toolCalls      Json?
+  toolCallId     String?
+  isStreaming    Boolean       @default(false)
   createdAt      DateTime      @default(now())
 
   conversation AiConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)

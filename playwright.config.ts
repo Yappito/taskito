@@ -5,8 +5,14 @@ export default defineConfig({
   timeout: 30_000,
   retries: 0,
   use: {
-    baseURL: "http://localhost:3001",
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001",
     headless: true,
+  },
+  webServer: {
+    command: "npm run dev -- -p 3001",
+    url: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3001",
+    reuseExistingServer: true,
+    timeout: 120_000,
   },
   projects: [
     {

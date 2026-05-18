@@ -2,6 +2,7 @@ import { Prisma, type AiActionExecution } from "@prisma/client";
 
 import { taskRouter } from "@/server/routers/task";
 import { createCallerFactory } from "@/server/trpc";
+import { requireProjectAccess } from "@/server/authz";
 
 import { resolveAiActionPayload } from "./tools";
 import { captureAiCheckpointAfter, captureAiCheckpointBefore } from "./checkpoints";
@@ -33,16 +34,21 @@ export async function executeAiAction(
     selectedTaskIds?: string[];
   }
 ) {
+  await requireProjectAccess(prisma, input.requestedByUserId, input.actionExecution.projectId);
+  const actor = await prisma.user.findUniqueOrThrow({
+    where: { id: input.requestedByUserId },
+    select: { role: true, email: true, name: true, image: true },
+  });
   const caller = createCaller({
     prisma,
     session: {
       expires: new Date(Date.now() + 60_000).toISOString(),
       user: {
         id: input.requestedByUserId,
-        role: "member",
-        email: "",
-        name: null,
-        image: null,
+        role: actor.role === "admin" ? "admin" : "member",
+        email: actor.email,
+        name: actor.name,
+        image: actor.image,
       },
     },
   });

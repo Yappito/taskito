@@ -10,9 +10,16 @@ interface BulkActionStatusOption {
   color: string;
 }
 
+interface BulkActionSprintOption {
+  id: string;
+  name: string;
+  status: "planning" | "active" | "completed";
+}
+
 interface BulkActionBarProps {
   selectedCount: number;
   statuses: BulkActionStatusOption[];
+  sprints: BulkActionSprintOption[];
   tags: TaskFilterTagOption[];
   assignees: TaskFilterAssigneeOption[];
   isPending?: boolean;
@@ -21,16 +28,19 @@ interface BulkActionBarProps {
   onClearSelection: () => void;
   onApplyStatus: (statusId: string) => void;
   onApplyAssignee: (assigneeId: string | null) => void;
+  onApplySprint: (sprintId: string | null) => void;
   onAddTag: (tagId: string) => void;
   onRemoveTag: (tagId: string) => void;
   onArchive: () => void;
 }
 
 const UNASSIGNED_VALUE = "__unassigned";
+const NO_SPRINT_VALUE = "__no_sprint";
 
 export function BulkActionBar({
   selectedCount,
   statuses,
+  sprints,
   tags,
   assignees,
   isPending = false,
@@ -39,12 +49,14 @@ export function BulkActionBar({
   onClearSelection,
   onApplyStatus,
   onApplyAssignee,
+  onApplySprint,
   onAddTag,
   onRemoveTag,
   onArchive,
 }: BulkActionBarProps) {
   const [statusId, setStatusId] = useState("");
   const [assigneeId, setAssigneeId] = useState("");
+  const [sprintId, setSprintId] = useState("");
   const [tagId, setTagId] = useState("");
 
   const assigneeOptions = useMemo(
@@ -133,6 +145,34 @@ export function BulkActionBar({
               style={{ backgroundColor: "var(--color-accent)", color: "white" }}
             >
               Apply assignee
+            </button>
+          </div>
+
+          <div className="flex gap-2">
+            <Select
+              value={sprintId}
+              onChange={(event) => setSprintId(event.target.value)}
+              disabled={isPending || (sprints.length === 0 && sprintId !== NO_SPRINT_VALUE)}
+              className="min-w-44"
+              aria-label="Select sprint for selected tasks"
+            >
+              <option value="">{sprints.length > 0 ? "Assign to sprint..." : "No sprints available"}</option>
+              <option value={NO_SPRINT_VALUE}>No sprint</option>
+              {sprints.map((sprint) => (
+                <option key={sprint.id} value={sprint.id}>{sprint.name} ({sprint.status})</option>
+              ))}
+            </Select>
+            <button
+              type="button"
+              disabled={!sprintId || isPending}
+              onClick={() => {
+                onApplySprint(sprintId === NO_SPRINT_VALUE ? null : sprintId);
+                setSprintId("");
+              }}
+              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              style={{ backgroundColor: "var(--color-accent)", color: "white" }}
+            >
+              Apply sprint
             </button>
           </div>
 
