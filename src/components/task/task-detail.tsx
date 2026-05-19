@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { trpc } from "@/lib/trpc-client";
+import { getCommentBody } from "@/lib/comment-content";
 import { Button } from "@/components/ui/button";
 import { CustomFieldInputs, type TaskCustomFieldValueMap } from "@/components/task/custom-field-inputs";
 import { Input } from "@/components/ui/input";
@@ -89,9 +90,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [commentFiles, setCommentFiles] = useState<File[]>([]);
   const [commentError, setCommentError] = useState<string | null>(null);
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentContent, setEditingCommentContent] = useState("");
+  const [editingCommentError, setEditingCommentError] = useState<string | null>(null);
+  const [isUpdatingComment, setIsUpdatingComment] = useState(false);
   const utils = trpc.useUtils();
 
   const { data: task, isLoading } = trpc.task.byId.useQuery({ id: taskId });
+  const { data: currentUser } = trpc.user.me.useQuery();
 
   // Fetch sibling tasks for the link selector
   const { data: siblingTasks } = trpc.task.list.useQuery(
@@ -311,6 +317,49 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       setCommentError(error instanceof Error ? error.message : "Unable to add comment");
     } finally {
       setIsSubmittingComment(false);
+    }
+  }
+
+  function beginCommentEdit(comment: {
+    id: string;
+    content: string;
+    attachments?: Array<{ originalName: string }>;
+  }) {
+    setEditingCommentId(comment.id);
+    setEditingCommentContent(getCommentBody(comment.content, comment.attachments));
+    setEditingCommentError(null);
+  }
+
+  function cancelCommentEdit() {
+    setEditingCommentId(null);
+    setEditingCommentContent("");
+    setEditingCommentError(null);
+  }
+
+  async function handleUpdateComment(commentId: string) {
+    setIsUpdatingComment(true);
+    setEditingCommentError(null);
+
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/comments/${commentId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ content: editingCommentContent }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "Unable to update comment");
+      }
+
+      cancelCommentEdit();
+      await utils.task.byId.invalidate({ id: taskId });
+    } catch (error) {
+      setEditingCommentError(error instanceof Error ? error.message : "Unable to update comment");
+    } finally {
+      setIsUpdatingComment(false);
     }
   }
 
@@ -749,16 +798,25 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 {task.comments.map(
                   (comment: {
                     id: string;
+                    authorId: string;
                     content: string;
                     createdAt: string | Date;
-                    author: { name: string | null };
+                    author: { id: string; name: string | null };
                     attachments?: Array<{
                       id: string;
                       originalName: string;
                       mimeType: string;
                       sizeBytes: number;
                     }>;
-                  }) => (
+                  }) => {
+                    const canEditComment = currentUser?.id === comment.authorId;
+                    const isEditingComment = editingCommentId === comment.id;
+                    const commentBody = getCommentBody(comment.content, comment.attachments);
+                    const canSaveComment = comment.attachments?.length
+                      ? true
+                      : Boolean(editingCommentContent.trim());
+
+                    return (
                     <div
                       key={comment.id}
                       className="rounded-xl border p-3 text-sm"
@@ -768,15 +826,79 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                       }}
                     >
                       <div
-                        className="flex justify-between text-xs"
+                        className="flex items-start justify-between gap-3 text-xs"
                         style={{ color: "var(--color-text-muted)" }}
                       >
                         <span>{comment.author.name ?? "User"}</span>
-                        <span>
-                          {new Date(comment.createdAt).toLocaleDateString()}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span>
+                            {new Date(comment.createdAt).toLocaleDateString()}
+                          </span>
+                          {canEditComment && !isEditingComment && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-auto px-1 py-0 text-xs"
+                              aria-label="Edit comment"
+                              onClick={() => beginCommentEdit(comment)}
+                            >
+                              Edit
+                            </Button>
+                          )}
+                        </div>
                       </div>
-                      <p className="mt-1 whitespace-pre-wrap break-words">{comment.content}</p>
+                      {isEditingComment ? (
+                        <div className="mt-2 space-y-2">
+                          {editingCommentError && (
+                            <div
+                              className="rounded-lg border px-3 py-2 text-sm"
+                              style={{
+                                backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                                borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                                color: "var(--color-danger)",
+                              }}
+                            >
+                              {editingCommentError}
+                            </div>
+                          )}
+                          <textarea
+                            value={editingCommentContent}
+                            onChange={(event) => setEditingCommentContent(event.target.value)}
+                            rows={3}
+                            maxLength={5000}
+                            className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                            style={{
+                              backgroundColor: "var(--color-surface)",
+                              borderColor: "var(--color-border)",
+                              color: "var(--color-text)",
+                            }}
+                          />
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              aria-label="Cancel comment edit"
+                              onClick={cancelCommentEdit}
+                              disabled={isUpdatingComment}
+                            >
+                              Cancel
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-label="Save comment"
+                              onClick={() => handleUpdateComment(comment.id)}
+                              disabled={isUpdatingComment || !canSaveComment}
+                            >
+                              {isUpdatingComment ? "Saving..." : "Save"}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : commentBody ? (
+                        <p className="mt-1 whitespace-pre-wrap break-words">{commentBody}</p>
+                      ) : null}
                       {(comment.attachments?.length ?? 0) > 0 && (
                         <div className="mt-3 space-y-2">
                           {comment.attachments!.map((attachment) => {
@@ -815,7 +937,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                         </div>
                       )}
                     </div>
-                  )
+                  );}
                 )}
                 {task.comments.length === 0 && (
                   <p

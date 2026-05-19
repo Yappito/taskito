@@ -35,6 +35,7 @@ test.describe("Broader application coverage", () => {
 
     await goToDefaultProject(page);
     await createTask(page, { title, dueDate: todayPlus(5), status: "To Do" });
+    await page.reload({ waitUntil: "domcontentloaded" });
     await openBoardTaskDetail(page, title);
 
     const detail = taskDetailPanel(page);
@@ -51,6 +52,42 @@ test.describe("Broader application coverage", () => {
     await expect(detail.getByText(comment)).toBeVisible({ timeout: 10_000 });
     await expect(detail.getByRole("link", { name: "note.txt" })).toBeVisible({ timeout: 10_000 });
     await expect(detail.getByPlaceholder("Add a comment...")).toHaveValue("");
+  });
+
+  test("task detail lets authors edit comments", async ({ page }) => {
+    const title = uniqueName("Editable Comment Task");
+    const originalComment = uniqueName("Original comment");
+    const updatedComment = uniqueName("Updated comment");
+
+    await goToDefaultProject(page);
+    await createTask(page, { title, dueDate: todayPlus(5), status: "To Do" });
+    await openBoardTaskDetail(page, title);
+
+    const detail = taskDetailPanel(page);
+    await addComment(page, originalComment);
+
+    await detail.getByRole("button", { name: "Edit comment" }).click();
+    await detail.locator("textarea").first().fill(updatedComment);
+    await detail.getByRole("button", { name: "Save comment" }).click();
+
+    await expect(detail.getByText(updatedComment)).toBeVisible({ timeout: 10_000 });
+    await expect(detail.getByText(originalComment)).not.toBeVisible({ timeout: 10_000 });
+  });
+
+  test("new task dialog scales with the viewport without going full-screen", async ({ page }) => {
+    await goToDefaultProject(page);
+    await page.getByRole("button", { name: /New Task/i }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "New Task" })).toBeVisible();
+
+    const dialogBox = await dialog.boundingBox();
+    const viewport = page.viewportSize();
+
+    expect(dialogBox).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    expect(dialogBox!.width).toBeGreaterThanOrEqual(viewport!.width * 0.6);
+    expect(dialogBox!.width).toBeLessThan(viewport!.width * 0.97);
   });
 
   test("task links can be created and removed from task detail", async ({ page }) => {

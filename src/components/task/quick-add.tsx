@@ -197,9 +197,13 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
         + New Task
       </Button>
 
-      <Dialog open={open} onClose={() => setOpen(false)}>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        panelClassName="max-h-[min(88vh,56rem)] max-w-[min(92vw,72rem)]"
+      >
         <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>New Task</h2>
-        <form onSubmit={handleSubmit} className="space-y-3">
+        <form onSubmit={handleSubmit} className="space-y-4">
           <Input
             ref={titleRef}
             name="title"
@@ -227,15 +231,15 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
           ) : null}
 
           <div>
-            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-              Description
-            </label>
-            <textarea
-              name="body"
-              rows={4}
-              placeholder="Add task details..."
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
+              <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                Description
+              </label>
+              <textarea
+                name="body"
+                rows={5}
+                placeholder="Add task details..."
+                value={body}
+                onChange={(event) => setBody(event.target.value)}
               className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2"
               style={{
                 backgroundColor: "var(--color-surface)",
@@ -246,7 +250,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
                 Due Date
@@ -277,39 +281,41 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
             </div>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-              Status
-            </label>
-            <Select
-              name="statusId"
-              value={selectedStatusId}
-              onChange={(event) => setSelectedStatusId(event.target.value)}
-            >
-              {statuses.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </Select>
-          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                Status
+              </label>
+              <Select
+                name="statusId"
+                value={selectedStatusId}
+                onChange={(event) => setSelectedStatusId(event.target.value)}
+              >
+                {statuses.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-              Assignee
-            </label>
-            <Select
-              name="assigneeId"
-              value={selectedAssigneeId}
-              onChange={(event) => setSelectedAssigneeId(event.target.value)}
-            >
-              <option value="">Unassigned</option>
-              {(people ?? []).map((person) => (
-                <option key={person.id} value={person.id}>
-                  {(person.name?.trim() || person.email)}
-                </option>
-              ))}
-            </Select>
+            <div>
+              <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                Assignee
+              </label>
+              <Select
+                name="assigneeId"
+                value={selectedAssigneeId}
+                onChange={(event) => setSelectedAssigneeId(event.target.value)}
+              >
+                <option value="">Unassigned</option>
+                {(people ?? []).map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {(person.name?.trim() || person.email)}
+                  </option>
+                ))}
+              </Select>
+            </div>
           </div>
 
           {tags.length > 0 && (
