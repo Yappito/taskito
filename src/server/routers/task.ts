@@ -312,6 +312,14 @@ function resolveClosedAtForStatusChange(
   return undefined;
 }
 
+function resolveArchivedAtForStatus(status: { autoArchive: boolean; autoArchiveDays: number }) {
+  if (!status.autoArchive) {
+    return null;
+  }
+
+  return new Date(Date.now() + (status.autoArchiveDays || 0) * 86_400_000);
+}
+
 /** Task CRUD router */
 export const taskRouter = createTRPCRouter({
   /** List tasks with filtering and cursor pagination */
@@ -598,12 +606,14 @@ export const taskRouter = createTRPCRouter({
       }
 
       let initialStatusIsFinal = false;
+      let initialArchivedAt: Date | null = null;
       if (data.statusId) {
         const initialStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId);
         if (initialStatus.projectId !== data.projectId) {
           throw new Error("Status does not belong to the specified project");
         }
         initialStatusIsFinal = initialStatus.isFinal;
+        initialArchivedAt = resolveArchivedAtForStatus(initialStatus);
       }
 
       const task = await createTaskWithNextNumber(ctx.prisma, data.projectId, (tx, taskNumber) => tx.task.create({
@@ -614,6 +624,7 @@ export const taskRouter = createTRPCRouter({
             assigneeId: effectiveAssigneeId,
             sprintId: sprintId ?? null,
             closedAt: initialStatusIsFinal ? new Date() : null,
+            archivedAt: initialArchivedAt,
             description: (description ?? body ?? undefined) as Prisma.InputJsonValue | undefined,
             body,
             statusId: data.statusId!,
@@ -694,6 +705,7 @@ export const taskRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { id, title, description, body, assigneeId, statusId, sprintId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
       const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
+      const isStatusChange = statusId !== undefined && statusId !== currentTask.statusId;
       const currentTaskSnapshot = await ctx.prisma.task.findUniqueOrThrow({
         where: { id },
         select: { assigneeId: true, closedAt: true, statusId: true, priority: true, sprintId: true },
@@ -752,7 +764,7 @@ export const taskRouter = createTRPCRouter({
           assertCanEnterTerminalStatus(getDependencyState(dependencyTask));
         }
 
-        if (statusId !== currentTask.statusId) {
+        if (isStatusChange) {
           const transition = await ctx.prisma.workflowTransition.findFirst({
             where: {
               projectId: currentTask.projectId,
@@ -772,14 +784,8 @@ export const taskRouter = createTRPCRouter({
       // Auto-archive: if moving to a status with autoArchive enabled, set archivedAt
       let archivedAt: Date | null | undefined;
       let closedAt: Date | null | undefined;
-      if (statusId && targetStatus) {
-        if (targetStatus?.autoArchive) {
-          const delayMs = (targetStatus.autoArchiveDays || 0) * 86_400_000;
-          archivedAt = new Date(Date.now() + delayMs);
-        } else {
-          // Un-archive if moving away from an auto-archive status
-          archivedAt = null;
-        }
+      if (isStatusChange && targetStatus) {
+        archivedAt = resolveArchivedAtForStatus(targetStatus);
 
         closedAt = resolveClosedAtForStatusChange(
           { statusId: currentTask.statusId, closedAt: currentTaskSnapshot.closedAt },
@@ -1034,15 +1040,11 @@ export const taskRouter = createTRPCRouter({
           }
         }
 
-        if (archivedAt === undefined) {
-          if (targetStatus.autoArchive) {
-            const delayMs = (targetStatus.autoArchiveDays || 0) * 86_400_000;
-            archivedAt = new Date(Date.now() + delayMs);
-          } else {
-            archivedAt = null;
-          }
-        }
       }
+
+      const statusDerivedArchivedAt = archivedAt === undefined && targetStatus
+        ? resolveArchivedAtForStatus(targetStatus)
+        : undefined;
 
       const requestedTagIds = [...new Set([...(input.addTagIds ?? []), ...(input.removeTagIds ?? [])])];
       if (requestedTagIds.length > 0) {
@@ -1063,9 +1065,15 @@ export const taskRouter = createTRPCRouter({
         if (input.statusId !== undefined || input.assigneeId !== undefined || input.sprintId !== undefined || archivedAt !== undefined) {
           await Promise.all(
             tasks.map((task) => {
-              const closedAt = input.statusId !== undefined && targetStatus
+              const statusChanged = input.statusId !== undefined && task.statusId !== input.statusId;
+              const closedAt = statusChanged && targetStatus
                 ? resolveClosedAtForStatusChange(task, targetStatus)
                 : undefined;
+              const nextArchivedAt = archivedAt !== undefined
+                ? archivedAt
+                : statusChanged
+                  ? statusDerivedArchivedAt
+                  : undefined;
 
               return tx.task.update({
                 where: { id: task.id },
@@ -1073,7 +1081,7 @@ export const taskRouter = createTRPCRouter({
                   ...(input.statusId !== undefined ? { statusId: input.statusId } : {}),
                   ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
                   ...(input.sprintId !== undefined ? { sprintId: input.sprintId } : {}),
-                  ...(archivedAt !== undefined ? { archivedAt } : {}),
+                  ...(nextArchivedAt !== undefined ? { archivedAt: nextArchivedAt } : {}),
                   ...(closedAt !== undefined ? { closedAt } : {}),
                 },
               });
@@ -1148,6 +1156,12 @@ export const taskRouter = createTRPCRouter({
       const currentTask = await ctx.prisma.task.findUniqueOrThrow({
           where: { id: input.id },
           include: {
+            status: {
+              select: {
+                autoArchive: true,
+                autoArchiveDays: true,
+              },
+            },
             tags: { select: { tagId: true } },
           },
         });
@@ -1161,6 +1175,7 @@ export const taskRouter = createTRPCRouter({
             body: currentTask.body,
             statusId: currentTask.statusId,
             closedAt: null,
+            archivedAt: resolveArchivedAtForStatus(currentTask.status),
             priority: currentTask.priority,
             dueDate: currentTask.dueDate,
             startDate: currentTask.startDate,
