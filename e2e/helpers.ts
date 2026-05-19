@@ -104,8 +104,29 @@ export function taskDetailPanel(page: Page): Locator {
 }
 
 export async function closeTaskDetail(page: Page) {
-  await taskDetailPanel(page).getByRole("button", { name: "Close task detail" }).click();
-  await expect(page.getByText("Task Detail")).not.toBeVisible({ timeout: 10_000 });
+  const detail = taskDetailPanel(page);
+  await detail.getByRole("button", { name: "Close task detail" }).click();
+  await expect(detail).not.toBeVisible({ timeout: 10_000 });
+}
+
+export async function dragTaskDetailSection(page: Page, sourceSectionId: string, targetSectionId: string) {
+  const detail = taskDetailPanel(page);
+  const sourceSection = detail.locator(`[data-task-detail-section="${sourceSectionId}"]`).first();
+  const targetSection = detail.locator(`[data-task-detail-section="${targetSectionId}"]`).first();
+  const sourceHandle = sourceSection.getByRole("button", { name: /Reorder .* section/ }).first();
+  await sourceHandle.scrollIntoViewIfNeeded();
+  await targetSection.scrollIntoViewIfNeeded();
+  const sourceBox = await sourceHandle.boundingBox();
+  const targetBox = await targetSection.boundingBox();
+
+  if (!sourceBox || !targetBox) {
+    throw new Error("Unable to determine task detail section drag coordinates");
+  }
+
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + Math.min(8, Math.max(4, targetBox.height / 4)), { steps: 16 });
+  await page.mouse.up();
 }
 
 export async function createSprint(page: Page, name: string, goal: string, memberCount = 0) {

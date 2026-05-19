@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc-client";
@@ -14,7 +14,15 @@ function formatSeconds(seconds: number) {
   return `${secs}s`;
 }
 
-export function TimeTrackingControls({ projectId, taskId }: { projectId: string; taskId: string }) {
+export function TimeTrackingControls({
+  projectId,
+  taskId,
+  dragHandle,
+}: {
+  projectId: string;
+  taskId: string;
+  dragHandle?: ReactNode;
+}) {
   const utils = trpc.useUtils();
   const { data: summary } = trpc.timeLog.summary.useQuery({ projectId, taskId });
   const { data: logs = [] } = trpc.timeLog.listForTask.useQuery({ taskId });
@@ -59,11 +67,14 @@ export function TimeTrackingControls({ projectId, taskId }: { projectId: string;
   return (
     <section className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Time tracking</h3>
-          <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
-            Total {formatSeconds(summary?.totalSeconds ?? 0)} · Mine {formatSeconds(summary?.mySeconds ?? 0)}
-          </p>
+        <div className="flex min-w-0 items-start gap-3">
+          {dragHandle ? <div className="shrink-0">{dragHandle}</div> : null}
+          <div>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Time tracking</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+              Total {formatSeconds(summary?.totalSeconds ?? 0)} · Mine {formatSeconds(summary?.mySeconds ?? 0)}
+            </p>
+          </div>
         </div>
         {running ? (
           <Button size="sm" variant="outline" disabled={stopTimer.isPending} onClick={() => stopTimer.mutate({ id: running.id })}>

@@ -1,9 +1,20 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { GripVertical } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { trpc } from "@/lib/trpc-client";
 import { getCommentBody } from "@/lib/comment-content";
+import {
+  DEFAULT_TASK_DETAIL_SECTION_ORDER,
+  getTaskDetailSectionOrderStorageKey,
+  isTaskDetailSectionId,
+  moveTaskDetailSectionOrder,
+  normalizeTaskDetailSectionOrder,
+  type TaskDetailSectionDropPosition,
+  type TaskDetailSectionId,
+} from "@/lib/task-detail-section-order";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { CustomFieldInputs, type TaskCustomFieldValueMap } from "@/components/task/custom-field-inputs";
 import { Input } from "@/components/ui/input";
@@ -78,6 +89,14 @@ function formatBytes(sizeBytes: number) {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+interface TaskDetailSectionDescriptor {
+  id: TaskDetailSectionId;
+  label: string;
+  content: ReactNode;
+}
+
+const SECTION_DRAG_START_DISTANCE = 6;
+
 /** Side panel showing full task details with editing */
 export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [editing, setEditing] = useState(false);
@@ -94,6 +113,21 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [editingCommentContent, setEditingCommentContent] = useState("");
   const [editingCommentError, setEditingCommentError] = useState<string | null>(null);
   const [isUpdatingComment, setIsUpdatingComment] = useState(false);
+  const [sectionOrder, setSectionOrder] = useState<TaskDetailSectionId[]>(DEFAULT_TASK_DETAIL_SECTION_ORDER);
+  const [hasLoadedSectionOrder, setHasLoadedSectionOrder] = useState(false);
+  const [draggingSectionId, setDraggingSectionId] = useState<TaskDetailSectionId | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    targetId: TaskDetailSectionId;
+    position: TaskDetailSectionDropPosition;
+  } | null>(null);
+  const sectionDragStateRef = useRef<{
+    pointerId: number;
+    sourceId: TaskDetailSectionId;
+    originX: number;
+    originY: number;
+    active: boolean;
+    element: HTMLButtonElement;
+  } | null>(null);
   const utils = trpc.useUtils();
 
   const { data: task, isLoading } = trpc.task.byId.useQuery({ id: taskId });
@@ -224,6 +258,39 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     setCustomFieldValues({});
   }, [customFieldValueMap, editing, task]);
 
+  useEffect(() => {
+    if (!task?.projectId || typeof window === "undefined") {
+      return;
+    }
+
+    setHasLoadedSectionOrder(false);
+
+    const storageKey = getTaskDetailSectionOrderStorageKey(task.projectId);
+
+    try {
+      const storedValue = window.localStorage.getItem(storageKey);
+      const parsedValue = storedValue ? JSON.parse(storedValue) : null;
+      setSectionOrder(normalizeTaskDetailSectionOrder(parsedValue));
+    } catch {
+      setSectionOrder(DEFAULT_TASK_DETAIL_SECTION_ORDER);
+    }
+
+    setHasLoadedSectionOrder(true);
+  }, [task?.projectId]);
+
+  useEffect(() => {
+    if (!task?.projectId || typeof window === "undefined" || !hasLoadedSectionOrder) {
+      return;
+    }
+
+    const storageKey = getTaskDetailSectionOrderStorageKey(task.projectId);
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(normalizeTaskDetailSectionOrder(sectionOrder)));
+    } catch {
+      // Ignore persistence failures; section order falls back to the default order.
+    }
+  }, [hasLoadedSectionOrder, sectionOrder, task?.projectId]);
+
   if (isLoading) {
     return (
       <div
@@ -262,6 +329,172 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const otherTasks = (siblingTasks?.items ?? []).filter(
     (t: { id: string }) => t.id !== taskId
   );
+
+  function clearSectionDragState() {
+    sectionDragStateRef.current = null;
+    setDraggingSectionId(null);
+    setDropIndicator(null);
+  }
+
+  function reorderSections(sourceId: TaskDetailSectionId, targetId: TaskDetailSectionId, position: TaskDetailSectionDropPosition) {
+    setSectionOrder((currentOrder) => moveTaskDetailSectionOrder(currentOrder, sourceId, targetId, position));
+  }
+
+  function updateSectionDropIndicator(clientX: number, clientY: number) {
+    const sourceId = sectionDragStateRef.current?.sourceId;
+    if (!sourceId) {
+      setDropIndicator(null);
+      return null;
+    }
+
+    const targetElement = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-task-detail-section]");
+    const rawTargetId = targetElement?.dataset.taskDetailSection;
+    if (!rawTargetId || !isTaskDetailSectionId(rawTargetId) || rawTargetId === sourceId) {
+      setDropIndicator(null);
+      return null;
+    }
+
+    const rect = targetElement.getBoundingClientRect();
+    const midpoint = rect.top + rect.height / 2;
+    const position: TaskDetailSectionDropPosition = clientY < midpoint ? "before" : "after";
+    setDropIndicator((current) => (
+      current?.targetId === rawTargetId && current.position === position
+        ? current
+        : { targetId: rawTargetId, position }
+    ));
+
+    return { targetId: rawTargetId, position };
+  }
+
+  function handleSectionHandlePointerDown(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    sectionId: TaskDetailSectionId
+  ) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.stopPropagation();
+    sectionDragStateRef.current = {
+      pointerId: event.pointerId,
+      sourceId: sectionId,
+      originX: event.clientX,
+      originY: event.clientY,
+      active: false,
+      element: event.currentTarget,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleSectionHandlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const dragState = sectionDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const distance = Math.hypot(event.clientX - dragState.originX, event.clientY - dragState.originY);
+    if (!dragState.active) {
+      if (distance < SECTION_DRAG_START_DISTANCE) {
+        return;
+      }
+
+      dragState.active = true;
+      setDraggingSectionId(dragState.sourceId);
+    }
+
+    updateSectionDropIndicator(event.clientX, event.clientY);
+    event.preventDefault();
+  }
+
+  function finishSectionPointerDrag(clientX: number, clientY: number) {
+    const dragState = sectionDragStateRef.current;
+    if (!dragState) {
+      return;
+    }
+
+    const resolvedDropTarget = dragState.active ? updateSectionDropIndicator(clientX, clientY) : null;
+    if (dragState.active && resolvedDropTarget) {
+      reorderSections(dragState.sourceId, resolvedDropTarget.targetId, resolvedDropTarget.position);
+    }
+
+    clearSectionDragState();
+  }
+
+  function handleSectionHandlePointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    const dragState = sectionDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    finishSectionPointerDrag(event.clientX, event.clientY);
+  }
+
+  function handleSectionHandlePointerCancel(event: ReactPointerEvent<HTMLButtonElement>) {
+    const dragState = sectionDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    clearSectionDragState();
+  }
+
+  function handleSectionHandleLostPointerCapture(event: ReactPointerEvent<HTMLButtonElement>) {
+    const dragState = sectionDragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    clearSectionDragState();
+  }
+
+  function renderSectionDragHandle(sectionId: TaskDetailSectionId, label: string) {
+    return (
+      <button
+        type="button"
+        onPointerDown={(event) => handleSectionHandlePointerDown(event, sectionId)}
+        onPointerMove={handleSectionHandlePointerMove}
+        onPointerUp={handleSectionHandlePointerUp}
+        onPointerCancel={handleSectionHandlePointerCancel}
+        onLostPointerCapture={handleSectionHandleLostPointerCapture}
+        className={cn(
+          "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+          draggingSectionId === sectionId ? "opacity-60" : "opacity-80 hover:opacity-100"
+        )}
+        style={{
+          borderColor: "var(--color-border)",
+          backgroundColor: "var(--color-bg-muted)",
+          color: "var(--color-text-muted)",
+          cursor: "grab",
+          touchAction: "none",
+        }}
+        aria-label={`Reorder ${label} section`}
+        title={`Drag to reorder ${label.toLowerCase()}`}
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+    );
+  }
+
+  function wrapSection(section: TaskDetailSectionDescriptor) {
+    const showBeforeDropIndicator = dropIndicator?.targetId === section.id && dropIndicator.position === "before";
+    const showAfterDropIndicator = dropIndicator?.targetId === section.id && dropIndicator.position === "after";
+
+    return (
+      <div
+        key={section.id}
+        data-task-detail-section={section.id}
+        className="relative"
+      >
+        {showBeforeDropIndicator && (
+          <div className="mb-2 h-1 rounded-full" style={{ backgroundColor: "var(--color-accent)" }} />
+        )}
+        {section.content}
+        {showAfterDropIndicator && (
+          <div className="mt-2 h-1 rounded-full" style={{ backgroundColor: "var(--color-accent)" }} />
+        )}
+      </div>
+    );
+  }
 
   function handleSave(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -384,6 +617,798 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const activityEvents = (task as { activityEvents?: Array<{ id: string; action: string; details?: Record<string, unknown> | null; createdAt: string | Date; actor?: { name: string | null; email: string } | null }> }).activityEvents ?? [];
   const alertAcknowledged = (task as { alertAcknowledged?: boolean }).alertAcknowledged ?? false;
   const hasLinks = task.sourceLinks.length > 0 || task.targetLinks.length > 0;
+  const recurrenceRule = (task as { recurrenceRule?: { frequency: "daily" | "weekly" | "monthly" | "yearly"; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null }).recurrenceRule ?? null;
+
+  const visibleSections: TaskDetailSectionDescriptor[] = (() => {
+    const sections: TaskDetailSectionDescriptor[] = [
+      {
+        id: "timeTracking",
+        label: "Time tracking",
+        content: (
+          <TimeTrackingControls
+            projectId={task.projectId}
+            taskId={taskId}
+            dragHandle={renderSectionDragHandle("timeTracking", "Time tracking")}
+          />
+        ),
+      },
+      {
+        id: "recurrence",
+        label: "Recurring task",
+        content: (
+          <RecurrenceControls
+            taskId={taskId}
+            dueDate={task.dueDate}
+            rule={recurrenceRule}
+            dragHandle={renderSectionDragHandle("recurrence", "Recurring task")}
+          />
+        ),
+      },
+      ...(dependencyMessages.length > 0
+        ? [
+            {
+              id: "dependencyWarning" as const,
+              label: "Dependency warning",
+              content: (
+                <section
+                  className="rounded-2xl border p-4 text-sm"
+                  style={{
+                    backgroundColor: "color-mix(in srgb, var(--color-danger) 8%, transparent)",
+                    borderColor: "color-mix(in srgb, var(--color-danger) 30%, var(--color-border))",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  <div className="flex items-start gap-3">
+                    {renderSectionDragHandle("dependencyWarning", "Dependency warning")}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold" style={{ color: "var(--color-danger)" }}>
+                        Dependency warning
+                      </div>
+                      <div className="mt-2 space-y-1">
+                        {dependencyMessages.map((message) => (
+                          <div key={message}>{message}</div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              ),
+            },
+          ]
+        : []),
+      {
+        id: "overview",
+        label: "Overview",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("overview", "Overview")}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                  Overview
+                </h4>
+                <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+                  <div
+                    className="rounded-2xl border p-4"
+                    style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                  >
+                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                      Due
+                    </div>
+                    <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
+                      {new Date(task.dueDate).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <div
+                    className="rounded-2xl border p-4"
+                    style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                  >
+                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                      Start
+                    </div>
+                    <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
+                      {task.startDate ? new Date(task.startDate).toLocaleDateString() : "Not set"}
+                    </div>
+                  </div>
+                  <div
+                    className="rounded-2xl border p-4"
+                    style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                  >
+                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                      Assignee
+                    </div>
+                    <div className="mt-2 flex min-w-0 items-center gap-2 font-semibold" style={{ color: "var(--color-text)" }}>
+                      {assignee && <Avatar name={assignee.name} email={assignee.email} image={assignee.image} size="xs" />}
+                      <span className="truncate">{assigneeLabel}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        ),
+      },
+      ...(taskBody
+        ? [
+            {
+              id: "description" as const,
+              label: "Description",
+              content: (
+                <section
+                  className="rounded-2xl border p-4"
+                  style={{
+                    backgroundColor: "var(--color-bg-overlay)",
+                    borderColor: "var(--color-border)",
+                  }}
+                >
+                  <div className="flex items-start gap-3">
+                    {renderSectionDragHandle("description", "Description")}
+                    <div className="min-w-0 flex-1">
+                      <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                        Description
+                      </h4>
+                      <div className="mt-3 whitespace-pre-wrap text-sm leading-6" style={{ color: "var(--color-text)" }}>
+                        {taskBody}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              ),
+            },
+          ]
+        : []),
+      {
+        id: "comments",
+        label: "Comments",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("comments", "Comments")}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                  Comments
+                </h4>
+                <div className="mt-3 space-y-2">
+                  {task.comments.map(
+                    (comment: {
+                      id: string;
+                      authorId: string;
+                      content: string;
+                      createdAt: string | Date;
+                      author: { id: string; name: string | null };
+                      attachments?: Array<{
+                        id: string;
+                        originalName: string;
+                        mimeType: string;
+                        sizeBytes: number;
+                      }>;
+                    }) => {
+                      const canEditComment = currentUser?.id === comment.authorId;
+                      const isEditingComment = editingCommentId === comment.id;
+                      const commentBody = getCommentBody(comment.content, comment.attachments);
+                      const canSaveComment = comment.attachments?.length
+                        ? true
+                        : Boolean(editingCommentContent.trim());
+
+                      return (
+                        <div
+                          key={comment.id}
+                          className="rounded-xl border p-3 text-sm"
+                          style={{
+                            backgroundColor: "var(--color-bg-overlay)",
+                            borderColor: "var(--color-border)",
+                          }}
+                        >
+                          <div
+                            className="flex items-start justify-between gap-3 text-xs"
+                            style={{ color: "var(--color-text-muted)" }}
+                          >
+                            <span>{comment.author.name ?? "User"}</span>
+                            <div className="flex items-center gap-2">
+                              <span>
+                                {new Date(comment.createdAt).toLocaleDateString()}
+                              </span>
+                              {canEditComment && !isEditingComment && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-auto px-1 py-0 text-xs"
+                                  aria-label="Edit comment"
+                                  onClick={() => beginCommentEdit(comment)}
+                                >
+                                  Edit
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          {isEditingComment ? (
+                            <div className="mt-2 space-y-2">
+                              {editingCommentError && (
+                                <div
+                                  className="rounded-lg border px-3 py-2 text-sm"
+                                  style={{
+                                    backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                                    borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                                    color: "var(--color-danger)",
+                                  }}
+                                >
+                                  {editingCommentError}
+                                </div>
+                              )}
+                              <textarea
+                                value={editingCommentContent}
+                                onChange={(event) => setEditingCommentContent(event.target.value)}
+                                rows={3}
+                                maxLength={5000}
+                                className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                                style={{
+                                  backgroundColor: "var(--color-surface)",
+                                  borderColor: "var(--color-border)",
+                                  color: "var(--color-text)",
+                                }}
+                              />
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  aria-label="Cancel comment edit"
+                                  onClick={cancelCommentEdit}
+                                  disabled={isUpdatingComment}
+                                >
+                                  Cancel
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  aria-label="Save comment"
+                                  onClick={() => handleUpdateComment(comment.id)}
+                                  disabled={isUpdatingComment || !canSaveComment}
+                                >
+                                  {isUpdatingComment ? "Saving..." : "Save"}
+                                </Button>
+                              </div>
+                            </div>
+                          ) : commentBody ? (
+                            <p className="mt-1 whitespace-pre-wrap break-words">{commentBody}</p>
+                          ) : null}
+                          {(comment.attachments?.length ?? 0) > 0 && (
+                            <div className="mt-3 space-y-2">
+                              {comment.attachments!.map((attachment) => {
+                                const attachmentUrl = `/api/comment-attachments/${attachment.id}`;
+                                const isImage = attachment.mimeType.startsWith("image/");
+
+                                return (
+                                  <div key={attachment.id} className="rounded-md border p-2" style={{ borderColor: "var(--color-border)" }}>
+                                    {isImage && (
+                                      <a href={attachmentUrl} target="_blank" rel="noreferrer">
+                                        <Image
+                                          src={attachmentUrl}
+                                          alt={attachment.originalName}
+                                          width={720}
+                                          height={420}
+                                          unoptimized
+                                          className="mb-2 max-h-44 rounded object-contain"
+                                        />
+                                      </a>
+                                    )}
+                                    <a
+                                      href={attachmentUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-sm font-medium underline"
+                                      style={{ color: "var(--color-accent)" }}
+                                    >
+                                      {attachment.originalName}
+                                    </a>
+                                    <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                                      {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+                  )}
+                  {task.comments.length === 0 && (
+                    <p
+                      className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                      style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                    >
+                      No comments yet
+                    </p>
+                  )}
+                </div>
+                <form onSubmit={handleAddComment} className="mt-3 space-y-2">
+                  {commentError && (
+                    <div
+                      className="rounded-lg border px-3 py-2 text-sm"
+                      style={{
+                        backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
+                        borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
+                        color: "var(--color-danger)",
+                      }}
+                    >
+                      {commentError}
+                    </div>
+                  )}
+                  <textarea
+                    name="content"
+                    value={commentContent}
+                    onChange={(event) => setCommentContent(event.target.value)}
+                    placeholder="Add a comment..."
+                    maxLength={5000}
+                    rows={3}
+                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
+                    style={{
+                      backgroundColor: "var(--color-surface)",
+                      borderColor: "var(--color-border)",
+                      color: "var(--color-text)",
+                    }}
+                  />
+                  <div>
+                    <input
+                      type="file"
+                      multiple
+                      onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
+                      className="block w-full text-xs"
+                    />
+                    {commentFiles.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {commentFiles.map((file) => (
+                          <span
+                            key={`${file.name}-${file.size}`}
+                            className="rounded-full px-2 py-1 text-xs"
+                            style={{
+                              backgroundColor: "var(--color-bg-muted)",
+                              color: "var(--color-text-secondary)",
+                            }}
+                          >
+                            {file.name} · {formatBytes(file.size)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex justify-end">
+                    <Button type="submit" size="sm" disabled={isSubmittingComment || (!commentContent.trim() && commentFiles.length === 0)}>
+                      {isSubmittingComment ? "Sending..." : "Send"}
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </section>
+        ),
+      },
+      ...((task.tags.length > 0 || task.customFieldValues.length > 0)
+        ? [
+            {
+              id: "details" as const,
+              label: "Details",
+              content: (
+                <section
+                  className="rounded-2xl border p-4"
+                  style={{
+                    backgroundColor: "var(--color-surface)",
+                    borderColor: "var(--color-border)",
+                  }}
+                >
+                  <div className="flex items-start gap-3">
+                    {renderSectionDragHandle("details", "Details")}
+                    <div className="min-w-0 flex-1">
+                      <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                        Details
+                      </h4>
+                      {task.tags.length > 0 && (
+                        <div className="mt-3">
+                          <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                            Tags
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
+                              <Badge
+                                key={tag.id}
+                                style={
+                                  {
+                                    backgroundColor: `${tag.color}20`,
+                                    color: tag.color,
+                                  } as React.CSSProperties
+                                }
+                              >
+                                {tag.name}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {task.customFieldValues.length > 0 && (
+                        <div className="mt-4">
+                          <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
+                            Custom Fields
+                          </div>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            {task.customFieldValues.map((fieldValue) => (
+                              <div
+                                key={fieldValue.id}
+                                className="rounded-xl border p-3 text-sm"
+                                style={{
+                                  backgroundColor: "var(--color-bg-overlay)",
+                                  borderColor: "var(--color-border)",
+                                }}
+                              >
+                                <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                                  {fieldValue.customField.name}
+                                </div>
+                                <div className="mt-1" style={{ color: "var(--color-text)" }}>
+                                  {fieldValue.value == null ? "—" : String(fieldValue.value)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              ),
+            },
+          ]
+        : []),
+      {
+        id: "alert",
+        label: "Due-date alert",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-bg-overlay)",
+              borderColor: "var(--color-border)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("alert", "Due-date alert")}
+              <label className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-3 text-sm">
+                <span className="min-w-0">
+                  <span className="block font-medium" style={{ color: "var(--color-text)" }}>
+                    Due-date alert
+                  </span>
+                  <span className="mt-1 block text-xs" style={{ color: "var(--color-text-muted)" }}>
+                    {alertAcknowledged ? "Acknowledged for this task" : "Not acknowledged yet"}
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  className="rounded"
+                  checked={alertAcknowledged}
+                  onChange={(e) => {
+                    updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
+                  }}
+                />
+              </label>
+            </div>
+          </section>
+        ),
+      },
+      {
+        id: "dependencies",
+        label: "Dependencies",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("dependencies", "Dependencies")}
+              <div className="min-w-0 flex-1">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                    Dependencies
+                  </h4>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowLinkForm(!showLinkForm)}
+                  >
+                    {showLinkForm ? "Cancel" : "Add link"}
+                  </Button>
+                </div>
+
+                {showLinkForm && (
+                  <form
+                    onSubmit={handleAddLink}
+                    className="mb-3 space-y-2 rounded-2xl border p-3"
+                    style={{
+                      backgroundColor: "var(--color-bg-overlay)",
+                      borderColor: "var(--color-border)",
+                    }}
+                  >
+                    <Select name="linkType" defaultValue="blocks">
+                      <option value="blocks">blocks</option>
+                      <option value="relates">relates to</option>
+                      <option value="parent">is parent of</option>
+                      <option value="child">is child of</option>
+                    </Select>
+                    <TaskSearchInput
+                      tasks={otherTasks}
+                      value={linkTargetId}
+                      onChange={setLinkTargetId}
+                      placeholder="Search for a task..."
+                    />
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={addLink.isPending || !linkTargetId}
+                      className="w-full"
+                    >
+                      Create Link
+                    </Button>
+                  </form>
+                )}
+
+                <div className="space-y-2 text-sm">
+                  {task.sourceLinks.map(
+                    (link: {
+                      id: string;
+                      linkType: string;
+                      targetTask: {
+                        id: string;
+                        taskNumber: number;
+                        title: string;
+                        project: { key: string };
+                      };
+                    }) => (
+                      <div
+                        key={link.id}
+                        className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
+                        style={{
+                          backgroundColor: "var(--color-bg-overlay)",
+                          borderColor: "var(--color-border)",
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                              style={{
+                                backgroundColor: "var(--color-accent-muted)",
+                                color: "var(--color-accent)",
+                              }}
+                            >
+                              {link.linkType}
+                            </span>
+                            <span className="font-semibold" style={{ color: "var(--color-text)" }}>
+                              {link.targetTask.project.key}-{link.targetTask.taskNumber}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
+                            {link.targetTask.title}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeLink.mutate({ id: link.id })}
+                          className="text-xs opacity-50 hover:opacity-100"
+                          style={{ color: "var(--color-danger)" }}
+                          title="Remove link"
+                          aria-label={`Remove link to ${link.targetTask.project.key}-${link.targetTask.taskNumber}`}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )
+                  )}
+                  {task.targetLinks.map(
+                    (link: {
+                      id: string;
+                      linkType: string;
+                      sourceTask: {
+                        id: string;
+                        taskNumber: number;
+                        title: string;
+                        project: { key: string };
+                      };
+                    }) => (
+                      <div
+                        key={link.id}
+                        className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
+                        style={{
+                          backgroundColor: "var(--color-bg-overlay)",
+                          borderColor: "var(--color-border)",
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                              style={{
+                                backgroundColor: "var(--color-accent-muted)",
+                                color: "var(--color-accent)",
+                              }}
+                            >
+                              {link.linkType}
+                            </span>
+                            <span className="font-semibold" style={{ color: "var(--color-text)" }}>
+                              {link.sourceTask.project.key}-{link.sourceTask.taskNumber}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
+                            {link.sourceTask.title}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeLink.mutate({ id: link.id })}
+                          className="text-xs opacity-50 hover:opacity-100"
+                          style={{ color: "var(--color-danger)" }}
+                          title="Remove link"
+                          aria-label={`Remove link from ${link.sourceTask.project.key}-${link.sourceTask.taskNumber}`}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )
+                  )}
+                  {!hasLinks && (
+                    <p
+                      className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                      style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                    >
+                      No dependencies yet
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        ),
+      },
+      {
+        id: "activity",
+        label: "Activity",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("activity", "Activity")}
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => setShowActivity((current) => !current)}
+                  className="flex w-full items-center justify-between gap-3 text-left"
+                >
+                  <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                    Activity
+                  </h4>
+                  <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>{showActivity ? "Hide" : "Show"}</span>
+                </button>
+                {showActivity && (
+                  <div className="mt-3 space-y-2">
+                    {activityEvents.map((event) => (
+                      <div
+                        key={event.id}
+                        className="rounded-xl border p-3 text-sm"
+                        style={{
+                          backgroundColor: "var(--color-bg-overlay)",
+                          borderColor: "var(--color-border)",
+                        }}
+                      >
+                        <div
+                          className="flex justify-between gap-3 text-xs"
+                          style={{ color: "var(--color-text-muted)" }}
+                        >
+                          <span>
+                            {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
+                          </span>
+                          <span className="shrink-0">{new Date(event.createdAt).toLocaleString()}</span>
+                        </div>
+                      </div>
+                    ))}
+                    {activityEvents.length === 0 && (
+                      <p
+                        className="rounded-xl border px-3 py-4 text-center text-xs italic"
+                        style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
+                      >
+                        No activity recorded yet
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        ),
+      },
+      {
+        id: "record",
+        label: "Record",
+        content: (
+          <section
+            className="rounded-2xl border p-4 text-sm"
+            style={{
+              backgroundColor: "var(--color-bg-overlay)",
+              borderColor: "var(--color-border)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("record", "Record")}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                  Record
+                </h4>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <span className="font-medium">Created by:</span>{" "}
+                    <span className="inline-flex max-w-full items-center gap-2 align-middle">
+                      {creator ? (
+                        <>
+                          <Avatar
+                            name={creator.name}
+                            email={creator.email}
+                            image={creator.image}
+                            size="xs"
+                          />
+                          <span className="truncate">{creatorLabel}</span>
+                        </>
+                      ) : (
+                        <span>Unknown</span>
+                      )}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="font-medium">Created:</span>{" "}
+                    {new Date(task.createdAt).toLocaleString()}
+                  </div>
+                  <div>
+                    <span className="font-medium">Updated:</span>{" "}
+                    {new Date(task.updatedAt).toLocaleString()}
+                  </div>
+                  {closedAt && (
+                    <div>
+                      <span className="font-medium">Closed:</span>{" "}
+                      {new Date(closedAt).toLocaleString()}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        ),
+      },
+    ];
+
+    const sectionById = new Map(sections.map((section) => [section.id, section]));
+    return normalizeTaskDetailSectionOrder(sectionOrder)
+      .map((sectionId) => sectionById.get(sectionId))
+      .filter((section): section is TaskDetailSectionDescriptor => Boolean(section));
+  })();
 
   return (
     <div
@@ -697,680 +1722,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           </form>
         ) : (
           <div className="flex flex-col gap-5">
-            <TimeTrackingControls projectId={task.projectId} taskId={taskId} />
-            <RecurrenceControls taskId={taskId} dueDate={task.dueDate} rule={(task as { recurrenceRule?: { frequency: "daily" | "weekly" | "monthly" | "yearly"; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null }).recurrenceRule ?? null} />
-            {dependencyMessages.length > 0 && (
-              <div
-                className="rounded-2xl border p-4 text-sm"
-                style={{
-                  backgroundColor: "color-mix(in srgb, var(--color-danger) 8%, transparent)",
-                  borderColor: "color-mix(in srgb, var(--color-danger) 30%, var(--color-border))",
-                  color: "var(--color-text-secondary)",
-                }}
-              >
-                <div className="font-semibold" style={{ color: "var(--color-danger)" }}>
-                  Dependency warning
-                </div>
-                <div className="mt-2 space-y-1">
-                  {dependencyMessages.map((message) => (
-                    <div key={message}>{message}</div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="grid gap-3 text-sm sm:grid-cols-3">
-              <div
-                className="rounded-2xl border p-4"
-                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
-              >
-                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-                  Due
-                </div>
-                <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
-                  {new Date(task.dueDate).toLocaleDateString()}
-                </div>
-              </div>
-              <div
-                className="rounded-2xl border p-4"
-                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
-              >
-                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-                  Start
-                </div>
-                <div className="mt-1 font-semibold" style={{ color: "var(--color-text)" }}>
-                  {task.startDate ? new Date(task.startDate).toLocaleDateString() : "Not set"}
-                </div>
-              </div>
-              <div
-                className="rounded-2xl border p-4"
-                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
-              >
-                <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-                  Assignee
-                </div>
-                <div className="mt-2 flex min-w-0 items-center gap-2 font-semibold" style={{ color: "var(--color-text)" }}>
-                  {assignee && <Avatar name={assignee.name} email={assignee.email} image={assignee.image} size="xs" />}
-                  <span className="truncate">{assigneeLabel}</span>
-                </div>
-              </div>
-            </div>
-
-            {taskBody && (
-              <section
-                className="rounded-2xl border p-4"
-                style={{
-                  backgroundColor: "var(--color-bg-overlay)",
-                  borderColor: "var(--color-border)",
-                }}
-              >
-                <h4
-                  className="text-sm font-semibold"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Description
-                </h4>
-                <div
-                  className="mt-3 whitespace-pre-wrap text-sm leading-6"
-                  style={{
-                    color: "var(--color-text)",
-                  }}
-                >
-                  {taskBody}
-                </div>
-              </section>
-            )}
-
-            <section
-              className="rounded-2xl border p-4"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-              }}
-            >
-              <h4
-                className="text-sm font-semibold"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Comments
-              </h4>
-              <div className="mt-3 space-y-2">
-                {task.comments.map(
-                  (comment: {
-                    id: string;
-                    authorId: string;
-                    content: string;
-                    createdAt: string | Date;
-                    author: { id: string; name: string | null };
-                    attachments?: Array<{
-                      id: string;
-                      originalName: string;
-                      mimeType: string;
-                      sizeBytes: number;
-                    }>;
-                  }) => {
-                    const canEditComment = currentUser?.id === comment.authorId;
-                    const isEditingComment = editingCommentId === comment.id;
-                    const commentBody = getCommentBody(comment.content, comment.attachments);
-                    const canSaveComment = comment.attachments?.length
-                      ? true
-                      : Boolean(editingCommentContent.trim());
-
-                    return (
-                    <div
-                      key={comment.id}
-                      className="rounded-xl border p-3 text-sm"
-                      style={{
-                        backgroundColor: "var(--color-bg-overlay)",
-                        borderColor: "var(--color-border)",
-                      }}
-                    >
-                      <div
-                        className="flex items-start justify-between gap-3 text-xs"
-                        style={{ color: "var(--color-text-muted)" }}
-                      >
-                        <span>{comment.author.name ?? "User"}</span>
-                        <div className="flex items-center gap-2">
-                          <span>
-                            {new Date(comment.createdAt).toLocaleDateString()}
-                          </span>
-                          {canEditComment && !isEditingComment && (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-auto px-1 py-0 text-xs"
-                              aria-label="Edit comment"
-                              onClick={() => beginCommentEdit(comment)}
-                            >
-                              Edit
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                      {isEditingComment ? (
-                        <div className="mt-2 space-y-2">
-                          {editingCommentError && (
-                            <div
-                              className="rounded-lg border px-3 py-2 text-sm"
-                              style={{
-                                backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                                borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                                color: "var(--color-danger)",
-                              }}
-                            >
-                              {editingCommentError}
-                            </div>
-                          )}
-                          <textarea
-                            value={editingCommentContent}
-                            onChange={(event) => setEditingCommentContent(event.target.value)}
-                            rows={3}
-                            maxLength={5000}
-                            className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                            style={{
-                              backgroundColor: "var(--color-surface)",
-                              borderColor: "var(--color-border)",
-                              color: "var(--color-text)",
-                            }}
-                          />
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              aria-label="Cancel comment edit"
-                              onClick={cancelCommentEdit}
-                              disabled={isUpdatingComment}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              aria-label="Save comment"
-                              onClick={() => handleUpdateComment(comment.id)}
-                              disabled={isUpdatingComment || !canSaveComment}
-                            >
-                              {isUpdatingComment ? "Saving..." : "Save"}
-                            </Button>
-                          </div>
-                        </div>
-                      ) : commentBody ? (
-                        <p className="mt-1 whitespace-pre-wrap break-words">{commentBody}</p>
-                      ) : null}
-                      {(comment.attachments?.length ?? 0) > 0 && (
-                        <div className="mt-3 space-y-2">
-                          {comment.attachments!.map((attachment) => {
-                            const attachmentUrl = `/api/comment-attachments/${attachment.id}`;
-                            const isImage = attachment.mimeType.startsWith("image/");
-
-                            return (
-                              <div key={attachment.id} className="rounded-md border p-2" style={{ borderColor: "var(--color-border)" }}>
-                                {isImage && (
-                                  <a href={attachmentUrl} target="_blank" rel="noreferrer">
-                                    <Image
-                                      src={attachmentUrl}
-                                      alt={attachment.originalName}
-                                      width={720}
-                                      height={420}
-                                      unoptimized
-                                      className="mb-2 max-h-44 rounded object-contain"
-                                    />
-                                  </a>
-                                )}
-                                <a
-                                  href={attachmentUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-sm font-medium underline"
-                                  style={{ color: "var(--color-accent)" }}
-                                >
-                                  {attachment.originalName}
-                                </a>
-                                <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                                  {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );}
-                )}
-                {task.comments.length === 0 && (
-                  <p
-                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
-                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
-                  >
-                    No comments yet
-                  </p>
-                )}
-              </div>
-              <form onSubmit={handleAddComment} className="mt-3 space-y-2">
-                {commentError && (
-                  <div
-                    className="rounded-lg border px-3 py-2 text-sm"
-                    style={{
-                      backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                      borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                      color: "var(--color-danger)",
-                    }}
-                  >
-                    {commentError}
-                  </div>
-                )}
-                <textarea
-                  name="content"
-                  value={commentContent}
-                  onChange={(event) => setCommentContent(event.target.value)}
-                  placeholder="Add a comment..."
-                  maxLength={5000}
-                  rows={3}
-                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                  style={{
-                    backgroundColor: "var(--color-surface)",
-                    borderColor: "var(--color-border)",
-                    color: "var(--color-text)",
-                  }}
-                />
-                <div>
-                  <input
-                    type="file"
-                    multiple
-                    onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
-                    className="block w-full text-xs"
-                  />
-                  {commentFiles.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {commentFiles.map((file) => (
-                        <span
-                          key={`${file.name}-${file.size}`}
-                          className="rounded-full px-2 py-1 text-xs"
-                          style={{
-                            backgroundColor: "var(--color-bg-muted)",
-                            color: "var(--color-text-secondary)",
-                          }}
-                        >
-                          {file.name} · {formatBytes(file.size)}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="flex justify-end">
-                  <Button type="submit" size="sm" disabled={isSubmittingComment || (!commentContent.trim() && commentFiles.length === 0)}>
-                    {isSubmittingComment ? "Sending..." : "Send"}
-                  </Button>
-                </div>
-              </form>
-            </section>
-
-            {(task.tags.length > 0 || task.customFieldValues.length > 0) && (
-              <section
-                className="rounded-2xl border p-4"
-                style={{
-                  backgroundColor: "var(--color-surface)",
-                  borderColor: "var(--color-border)",
-                }}
-              >
-                <h4
-                  className="text-sm font-semibold"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Details
-                </h4>
-                {task.tags.length > 0 && (
-                  <div className="mt-3">
-                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-                      Tags
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
-                        <Badge
-                          key={tag.id}
-                          style={
-                            {
-                              backgroundColor: `${tag.color}20`,
-                              color: tag.color,
-                            } as React.CSSProperties
-                          }
-                        >
-                          {tag.name}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {task.customFieldValues.length > 0 && (
-                  <div className="mt-4">
-                    <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
-                      Custom Fields
-                    </div>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      {task.customFieldValues.map((fieldValue) => (
-                        <div
-                          key={fieldValue.id}
-                          className="rounded-xl border p-3 text-sm"
-                          style={{
-                            backgroundColor: "var(--color-bg-overlay)",
-                            borderColor: "var(--color-border)",
-                          }}
-                        >
-                          <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-                            {fieldValue.customField.name}
-                          </div>
-                          <div className="mt-1" style={{ color: "var(--color-text)" }}>
-                            {fieldValue.value == null ? "—" : String(fieldValue.value)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </section>
-            )}
-
-            <label
-              className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border p-4 text-sm"
-              style={{
-                backgroundColor: "var(--color-bg-overlay)",
-                borderColor: "var(--color-border)",
-                color: "var(--color-text-secondary)",
-              }}
-            >
-              <span className="min-w-0">
-                <span className="block font-medium" style={{ color: "var(--color-text)" }}>
-                  Due-date alert
-                </span>
-                <span className="mt-1 block text-xs" style={{ color: "var(--color-text-muted)" }}>
-                  {alertAcknowledged ? "Acknowledged for this task" : "Not acknowledged yet"}
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                className="rounded"
-                checked={alertAcknowledged}
-                onChange={(e) => {
-                  updateTask.mutate({ id: taskId, alertAcknowledged: e.target.checked });
-                }}
-              />
-            </label>
-
-            <section
-              className="rounded-2xl border p-4"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-              }}
-            >
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h4
-                  className="text-sm font-semibold"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Dependencies
-                </h4>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowLinkForm(!showLinkForm)}
-                >
-                  {showLinkForm ? "Cancel" : "Add link"}
-                </Button>
-              </div>
-
-              {showLinkForm && (
-                <form
-                  onSubmit={handleAddLink}
-                  className="mb-3 space-y-2 rounded-2xl border p-3"
-                  style={{
-                    backgroundColor: "var(--color-bg-overlay)",
-                    borderColor: "var(--color-border)",
-                  }}
-                >
-                  <Select name="linkType" defaultValue="blocks">
-                    <option value="blocks">blocks</option>
-                    <option value="relates">relates to</option>
-                    <option value="parent">is parent of</option>
-                    <option value="child">is child of</option>
-                  </Select>
-                  <TaskSearchInput
-                    tasks={otherTasks}
-                    value={linkTargetId}
-                    onChange={setLinkTargetId}
-                    placeholder="Search for a task..."
-                  />
-                  <Button
-                    type="submit"
-                    size="sm"
-                    disabled={addLink.isPending || !linkTargetId}
-                    className="w-full"
-                  >
-                    Create Link
-                  </Button>
-                </form>
-              )}
-
-              <div className="space-y-2 text-sm">
-                {task.sourceLinks.map(
-                  (link: {
-                    id: string;
-                    linkType: string;
-                    targetTask: {
-                      id: string;
-                      taskNumber: number;
-                      title: string;
-                      project: { key: string };
-                    };
-                  }) => (
-                    <div
-                      key={link.id}
-                      className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
-                      style={{
-                        backgroundColor: "var(--color-bg-overlay)",
-                        borderColor: "var(--color-border)",
-                      }}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                            style={{
-                              backgroundColor: "var(--color-accent-muted)",
-                              color: "var(--color-accent)",
-                            }}
-                          >
-                            {link.linkType}
-                          </span>
-                          <span className="font-semibold" style={{ color: "var(--color-text)" }}>
-                            {link.targetTask.project.key}-{link.targetTask.taskNumber}
-                          </span>
-                        </div>
-                        <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
-                          {link.targetTask.title}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeLink.mutate({ id: link.id })}
-                        className="text-xs opacity-50 hover:opacity-100"
-                        style={{ color: "var(--color-danger)" }}
-                        title="Remove link"
-                        aria-label={`Remove link to ${link.targetTask.project.key}-${link.targetTask.taskNumber}`}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  )
-                )}
-                {task.targetLinks.map(
-                  (link: {
-                    id: string;
-                    linkType: string;
-                    sourceTask: {
-                      id: string;
-                      taskNumber: number;
-                      title: string;
-                      project: { key: string };
-                    };
-                  }) => (
-                    <div
-                      key={link.id}
-                      className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
-                      style={{
-                        backgroundColor: "var(--color-bg-overlay)",
-                        borderColor: "var(--color-border)",
-                      }}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                            style={{
-                              backgroundColor: "var(--color-accent-muted)",
-                              color: "var(--color-accent)",
-                            }}
-                          >
-                            {link.linkType}
-                          </span>
-                          <span className="font-semibold" style={{ color: "var(--color-text)" }}>
-                            {link.sourceTask.project.key}-{link.sourceTask.taskNumber}
-                          </span>
-                        </div>
-                        <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
-                          {link.sourceTask.title}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeLink.mutate({ id: link.id })}
-                        className="text-xs opacity-50 hover:opacity-100"
-                        style={{ color: "var(--color-danger)" }}
-                        title="Remove link"
-                        aria-label={`Remove link from ${link.sourceTask.project.key}-${link.sourceTask.taskNumber}`}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  )
-                )}
-                {!hasLinks && (
-                  <p
-                    className="rounded-xl border px-3 py-4 text-center text-xs italic"
-                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
-                  >
-                    No dependencies yet
-                  </p>
-                )}
-              </div>
-            </section>
-
-            <section
-              className="rounded-2xl border p-4"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setShowActivity((current) => !current)}
-                className="flex w-full items-center justify-between gap-3 text-left"
-              >
-                <h4
-                  className="text-sm font-semibold"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Activity
-                </h4>
-                <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>{showActivity ? "Hide" : "Show"}</span>
-              </button>
-              {showActivity && (
-                <div className="mt-3 space-y-2">
-                  {activityEvents.map((event) => (
-                    <div
-                      key={event.id}
-                      className="rounded-xl border p-3 text-sm"
-                      style={{
-                        backgroundColor: "var(--color-bg-overlay)",
-                        borderColor: "var(--color-border)",
-                      }}
-                    >
-                      <div
-                        className="flex justify-between gap-3 text-xs"
-                        style={{ color: "var(--color-text-muted)" }}
-                      >
-                        <span>
-                          {(event.actor?.name?.trim() || event.actor?.email || "System")} {describeActivityEvent(event)}
-                        </span>
-                        <span className="shrink-0">{new Date(event.createdAt).toLocaleString()}</span>
-                      </div>
-                    </div>
-                  ))}
-                  {activityEvents.length === 0 && (
-                    <p
-                      className="rounded-xl border px-3 py-4 text-center text-xs italic"
-                      style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)" }}
-                    >
-                      No activity recorded yet
-                    </p>
-                  )}
-                </div>
-              )}
-            </section>
-
-            <section
-              className="rounded-2xl border p-4 text-sm"
-              style={{
-                backgroundColor: "var(--color-bg-overlay)",
-                borderColor: "var(--color-border)",
-                color: "var(--color-text-secondary)",
-              }}
-            >
-              <h4
-                className="text-sm font-semibold"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Record
-              </h4>
-              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <span className="font-medium">Created by:</span>{" "}
-                  <span className="inline-flex max-w-full items-center gap-2 align-middle">
-                    {creator ? (
-                      <>
-                        <Avatar
-                          name={creator.name}
-                          email={creator.email}
-                          image={creator.image}
-                          size="xs"
-                        />
-                        <span className="truncate">{creatorLabel}</span>
-                      </>
-                    ) : (
-                      <span>Unknown</span>
-                    )}
-                  </span>
-                </div>
-                <div>
-                  <span className="font-medium">Created:</span>{" "}
-                  {new Date(task.createdAt).toLocaleString()}
-                </div>
-                <div>
-                  <span className="font-medium">Updated:</span>{" "}
-                  {new Date(task.updatedAt).toLocaleString()}
-                </div>
-                {closedAt && (
-                  <div>
-                    <span className="font-medium">Closed:</span>{" "}
-                    {new Date(closedAt).toLocaleString()}
-                  </div>
-                )}
-              </div>
-            </section>
+            {visibleSections.map((section) => wrapSection(section))}
           </div>
         )}
       </div>

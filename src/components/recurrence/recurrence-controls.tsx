@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc-client";
@@ -15,7 +15,17 @@ function todayDateInputValue() {
   return new Date().toISOString().split("T")[0];
 }
 
-export function RecurrenceControls({ taskId, dueDate, rule }: { taskId: string; dueDate: string | Date; rule?: { frequency: Frequency; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null }) {
+export function RecurrenceControls({
+  taskId,
+  dueDate,
+  rule,
+  dragHandle,
+}: {
+  taskId: string;
+  dueDate: string | Date;
+  rule?: { frequency: Frequency; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null;
+  dragHandle?: ReactNode;
+}) {
   const utils = trpc.useUtils();
   const [frequency, setFrequency] = useState<Frequency>(rule?.frequency ?? "weekly");
   const [interval, setInterval] = useState(String(rule?.interval ?? 1));
@@ -47,11 +57,14 @@ export function RecurrenceControls({ taskId, dueDate, rule }: { taskId: string; 
   return (
     <section className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Recurring task</h3>
-          <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
-            {rule ? `Repeats ${rule.frequency} every ${rule.interval}` : "Create future task occurrences automatically from this task."}
-          </p>
+        <div className="flex min-w-0 items-start gap-3">
+          {dragHandle ? <div className="shrink-0">{dragHandle}</div> : null}
+          <div>
+            <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>Recurring task</h3>
+            <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+              {rule ? `Repeats ${rule.frequency} every ${rule.interval}` : "Create future task occurrences automatically from this task."}
+            </p>
+          </div>
         </div>
         {rule && <Button size="sm" variant="outline" disabled={removeRecurrence.isPending} onClick={() => removeRecurrence.mutate({ taskId })}>Stop repeating</Button>}
       </div>

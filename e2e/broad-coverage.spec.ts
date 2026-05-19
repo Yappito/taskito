@@ -4,6 +4,7 @@ import {
   closeTaskDetail,
   createSprint,
   createTask,
+  dragTaskDetailSection,
   goToDefaultProject,
   login,
   openBoardTaskDetail,
@@ -88,6 +89,35 @@ test.describe("Broader application coverage", () => {
     expect(viewport).not.toBeNull();
     expect(dialogBox!.width).toBeGreaterThanOrEqual(viewport!.width * 0.6);
     expect(dialogBox!.width).toBeLessThan(viewport!.width * 0.97);
+  });
+
+  test("task detail sections can be reordered from drag handles and persist after reopen", async ({ page }) => {
+    test.slow();
+    const title = uniqueName("Reorder Task Detail Sections");
+
+    await goToDefaultProject(page);
+    await createTask(page, { title, description: "Task detail reorder coverage", dueDate: todayPlus(5), status: "To Do" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await openBoardTaskDetail(page, title);
+
+    const detail = taskDetailPanel(page);
+    await expect(detail.locator('[data-task-detail-section="timeTracking"]')).toBeVisible();
+    await expect(detail.locator('[data-task-detail-section="overview"]')).toBeVisible();
+
+    await dragTaskDetailSection(page, "overview", "timeTracking");
+
+    const sectionIdsAfterReorder = await detail.locator("[data-task-detail-section]").evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-task-detail-section"))
+    );
+    expect(sectionIdsAfterReorder.indexOf("overview")).toBeLessThan(sectionIdsAfterReorder.indexOf("timeTracking"));
+
+    await closeTaskDetail(page);
+    await openBoardTaskDetail(page, title);
+
+    const sectionIdsAfterReopen = await taskDetailPanel(page).locator("[data-task-detail-section]").evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-task-detail-section"))
+    );
+    expect(sectionIdsAfterReopen.indexOf("overview")).toBeLessThan(sectionIdsAfterReopen.indexOf("timeTracking"));
   });
 
   test("task links can be created and removed from task detail", async ({ page }) => {
