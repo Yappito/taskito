@@ -30,6 +30,7 @@ model User {
   notificationActors Notification[] @relation("NotificationActor")
   createdTasks  Task[]    @relation("TaskCreator")
   assignedTasks Task[]    @relation("TaskAssignee")
+  participantTasks TaskParticipant[]
   sprintAssignments SprintMember[]
   projectMemberships ProjectMember[]
   ownedAiProviders AiProviderConnection[] @relation("OwnedAiProviders")
@@ -250,6 +251,7 @@ model Task {
   comments         Comment[]
   activityEvents   ActivityEvent[]
   watchers         TaskWatcher[]
+  participants     TaskParticipant[]
   notifications    Notification[]
   customFieldValues CustomFieldValue[]
   aiConversations  AiConversation[]
@@ -405,6 +407,18 @@ enum NotificationType {
 }
 
 model TaskWatcher {
+  taskId     String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+}
+
+model TaskParticipant {
   taskId     String
   userId     String
   createdAt  DateTime @default(now())

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { trpc } from "@/lib/trpc-client";
-import type { StatusCategory, TaskFilterTagOption } from "@/lib/types";
+import type { StatusCategory, TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
 interface SprintViewProps {
   projectId: string;
@@ -84,6 +84,7 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
     [projectId, selectedAssigneeIds, sprintId]
   );
   const { data: tasks } = trpc.task.list.useQuery(taskListInput, { enabled: !!sprintId });
+  const sprintTasks = useMemo(() => (tasks?.items ?? []) as unknown as TaskCardData[], [tasks?.items]);
   const createSprint = trpc.sprint.create.useMutation({
     onSuccess: async (createdSprint) => {
       setCreateError(null);
@@ -114,25 +115,27 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
 
       if (variables.statusId && previous) {
         const nextStatus = statuses.find((status) => status.id === variables.statusId);
+        const nextItems = (previous.items as unknown as TaskCardData[]).map((task) =>
+          task.id === variables.id
+            ? {
+                ...task,
+                statusId: variables.statusId ?? task.statusId,
+                status: nextStatus
+                  ? {
+                      ...task.status,
+                      id: nextStatus.id,
+                      name: nextStatus.name,
+                      color: nextStatus.color,
+                      ...(nextStatus.category ? { category: nextStatus.category as StatusCategory } : {}),
+                    }
+                  : task.status,
+              }
+            : task
+        );
+
         utils.task.list.setData(taskListInput, {
           ...previous,
-          items: previous.items.map((task) =>
-            task.id === variables.id
-              ? {
-                  ...task,
-                  statusId: variables.statusId ?? task.statusId,
-                  status: nextStatus
-                    ? {
-                        ...task.status,
-                        id: nextStatus.id,
-                        name: nextStatus.name,
-                        color: nextStatus.color,
-                        ...(nextStatus.category ? { category: nextStatus.category as StatusCategory } : {}),
-                      }
-                    : task.status,
-                }
-              : task
-          ),
+          items: nextItems as unknown as typeof previous.items,
         });
       }
 
@@ -148,14 +151,14 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
     },
   });
   const groupedTasks = useMemo(() => {
-    const groups = new Map(statuses.map((status) => [status.id, { status, tasks: [] as NonNullable<typeof tasks>["items"] }]));
-    for (const task of tasks?.items ?? []) {
+    const groups = new Map(statuses.map((status) => [status.id, { status, tasks: [] as TaskCardData[] }]));
+    for (const task of sprintTasks) {
       const group = groups.get(task.statusId);
       if (group) group.tasks.push(task);
     }
     return [...groups.values()];
-  }, [statuses, tasks?.items]);
-  const draggedTask = draggingTaskId ? (tasks?.items ?? []).find((task) => task.id === draggingTaskId) ?? null : null;
+  }, [sprintTasks, statuses]);
+  const draggedTask = draggingTaskId ? sprintTasks.find((task) => task.id === draggingTaskId) ?? null : null;
   const sprintAssigneeOptions = useMemo(() => {
     const sprintMemberIds = new Set(selectedSprint?.members.map((member) => member.userId) ?? []);
     const assignedPeople = new Map(people.map((person) => [person.id, person]));
@@ -164,7 +167,7 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
       sprintMemberIds.size === 0 || sprintMemberIds.has(person.id)
     );
 
-    for (const task of tasks?.items ?? []) {
+    for (const task of sprintTasks) {
       if (task.assigneeId && assignedPeople.has(task.assigneeId)) {
         const person = assignedPeople.get(task.assigneeId)!;
         if (!options.some((option) => option.id === person.id)) {
@@ -174,7 +177,7 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
     }
 
     return options;
-  }, [people, selectedSprint, tasks?.items]);
+  }, [people, selectedSprint, sprintTasks]);
   const isCompletedSprintCollapsed = selectedSprint
     ? (collapsedSprints[selectedSprint.id] ?? (selectedSprint.status === "completed"))
     : false;

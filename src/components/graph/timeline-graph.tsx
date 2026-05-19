@@ -176,7 +176,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
   });
 
   const tasks: GraphTaskData[] = useMemo(() => {
-    const items = taskData?.items;
+    const items = taskData?.items as unknown as GraphTaskData[] | undefined;
     if (!items) return [];
     return items.filter(isGraphTaskItem).map((item) => ({
       id: item.id,

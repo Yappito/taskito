@@ -85,6 +85,26 @@ async function validateAssigneeAccess(
   }
 }
 
+async function validateParticipantAccess(
+  ctx: { prisma: typeof import("@/lib/prisma").prisma },
+  projectId: string,
+  participantIds: string[] | undefined
+) {
+  if (!participantIds?.length) {
+    return [] as string[];
+  }
+
+  const normalizedParticipantIds = [...new Set(participantIds.filter(Boolean))];
+
+  await Promise.all(
+    normalizedParticipantIds.map((participantId) =>
+      validateAssigneeAccess(ctx, projectId, participantId)
+    )
+  );
+
+  return normalizedParticipantIds;
+}
+
 async function validateSprintAccess(
   ctx: { prisma: typeof import("@/lib/prisma").prisma },
   projectId: string,
@@ -339,6 +359,7 @@ export const taskRouter = createTRPCRouter({
         sprintId: z.string().cuid().nullable().optional(),
         includeArchived: z.boolean().optional(),
         archivedOnly: z.boolean().optional(),
+        participantIds: z.array(z.string().cuid()).optional(),
         cursor: z.string().optional(),
         limit: z.number().min(1).max(100).default(50),
       })
@@ -361,6 +382,7 @@ export const taskRouter = createTRPCRouter({
         sprintId,
         includeArchived,
         archivedOnly,
+        participantIds,
       } = input;
 
       const now = new Date();
@@ -394,6 +416,7 @@ export const taskRouter = createTRPCRouter({
           ? { tags: { some: { tagId: { in: tagIds } } } }
           : {}),
         ...(assigneeIds?.length ? { assigneeId: { in: assigneeIds } } : {}),
+        ...(participantIds?.length ? { participants: { some: { userId: { in: participantIds } } } } : {}),
         ...(sprintId !== undefined ? { sprintId } : {}),
         ...(search
           ? { title: { contains: search, mode: "insensitive" as const } }
@@ -407,6 +430,12 @@ export const taskRouter = createTRPCRouter({
           tags: { include: { tag: true } },
           creator: { select: { id: true, name: true, email: true, image: true } },
           assignee: { select: { id: true, name: true, email: true, image: true } },
+          participants: {
+            select: {
+              user: { select: { id: true, name: true, email: true, image: true } },
+            },
+            orderBy: { createdAt: "asc" },
+          },
           sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           timeLogs: { select: { duration: true, endedAt: true, startedAt: true, userId: true } },
           recurrenceRule: true,
@@ -467,6 +496,12 @@ export const taskRouter = createTRPCRouter({
           project: { select: { key: true } },
           creator: { select: { id: true, name: true, email: true, image: true } },
           assignee: { select: { id: true, name: true, email: true, image: true } },
+          participants: {
+            include: {
+              user: { select: { id: true, name: true, email: true, image: true } },
+            },
+            orderBy: { createdAt: "asc" },
+          },
           sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           timeLogs: { include: { user: { select: { id: true, name: true, email: true, image: true } } }, orderBy: { startedAt: "desc" } },
           recurrenceRule: true,
@@ -548,6 +583,7 @@ export const taskRouter = createTRPCRouter({
         description: z.unknown().optional(),
         body: z.string().max(20000).nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
+        participantIds: z.array(z.string().cuid()).optional(),
         statusId: z.string().cuid().optional(),
         sprintId: z.string().cuid().nullable().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).default("none"),
@@ -558,10 +594,11 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { tagIds, description, body, assigneeId, customFieldValues, sprintId, ...data } = input;
+      const { tagIds, description, body, assigneeId, participantIds, customFieldValues, sprintId, ...data } = input;
       const effectiveAssigneeId = assigneeId ?? ctx.session.user.id;
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId);
       await validateAssigneeAccess(ctx, data.projectId, effectiveAssigneeId);
+      const normalizedParticipantIds = await validateParticipantAccess(ctx, data.projectId, participantIds);
       const normalizedCustomFieldValues = await validateCustomFieldValues(ctx, data.projectId, customFieldValues);
 
       if (data.statusId) {
@@ -625,6 +662,9 @@ export const taskRouter = createTRPCRouter({
             sprintId: sprintId ?? null,
             closedAt: initialStatusIsFinal ? new Date() : null,
             archivedAt: initialArchivedAt,
+            ...(normalizedParticipantIds.length
+              ? { participants: { create: normalizedParticipantIds.map((userId) => ({ userId })) } }
+              : {}),
             description: (description ?? body ?? undefined) as Prisma.InputJsonValue | undefined,
             body,
             statusId: data.statusId!,
@@ -647,6 +687,12 @@ export const taskRouter = createTRPCRouter({
             tags: { include: { tag: true } },
             creator: { select: { id: true, name: true, email: true, image: true } },
             assignee: { select: { id: true, name: true, email: true, image: true } },
+            participants: {
+              include: {
+                user: { select: { id: true, name: true, email: true, image: true } },
+              },
+              orderBy: { createdAt: "asc" },
+            },
             project: { select: { key: true, slug: true } },
           },
         }));
@@ -692,6 +738,7 @@ export const taskRouter = createTRPCRouter({
         description: z.unknown().optional(),
         body: z.string().nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
+        participantIds: z.array(z.string().cuid()).optional(),
         statusId: z.string().cuid().optional(),
         sprintId: z.string().cuid().nullable().optional(),
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).optional(),
@@ -703,14 +750,22 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, title, description, body, assigneeId, statusId, sprintId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
+      const { id, title, description, body, assigneeId, participantIds, statusId, sprintId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
       const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
       const isStatusChange = statusId !== undefined && statusId !== currentTask.statusId;
       const currentTaskSnapshot = await ctx.prisma.task.findUniqueOrThrow({
         where: { id },
-        select: { assigneeId: true, closedAt: true, statusId: true, priority: true, sprintId: true },
+        select: {
+          assigneeId: true,
+          closedAt: true,
+          statusId: true,
+          priority: true,
+          sprintId: true,
+          participants: { select: { userId: true } },
+        },
       });
       await validateAssigneeAccess(ctx, currentTask.projectId, assigneeId);
+      const normalizedParticipantIds = await validateParticipantAccess(ctx, currentTask.projectId, participantIds);
       const normalizedCustomFieldValues = await validateCustomFieldValues(ctx, currentTask.projectId, customFieldValues);
 
       let targetStatus: Awaited<ReturnType<typeof requireWorkflowStatusAccess>> | null = null;
@@ -805,9 +860,9 @@ export const taskRouter = createTRPCRouter({
             }
           : {}),
         ...(body !== undefined && { body }),
-        ...(assigneeId !== undefined && { assigneeId }),
-        ...(statusId !== undefined && { statusId }),
-        ...(sprintId !== undefined && { sprintId }),
+            ...(assigneeId !== undefined && { assigneeId }),
+            ...(statusId !== undefined && { statusId }),
+            ...(sprintId !== undefined && { sprintId }),
         ...(priority !== undefined && { priority }),
         ...(dueDate !== undefined && { dueDate }),
         ...(startDate !== undefined && { startDate }),
@@ -817,6 +872,16 @@ export const taskRouter = createTRPCRouter({
       };
 
       const updated = await ctx.prisma.$transaction(async (tx) => {
+        if (participantIds !== undefined) {
+          await tx.taskParticipant.deleteMany({ where: { taskId: id } });
+
+          if (normalizedParticipantIds.length > 0) {
+            await tx.taskParticipant.createMany({
+              data: normalizedParticipantIds.map((userId) => ({ taskId: id, userId })),
+            });
+          }
+        }
+
         const task = await tx.task.update({
           where: { id },
           data: {
@@ -854,6 +919,12 @@ export const taskRouter = createTRPCRouter({
             tags: { include: { tag: true } },
             creator: { select: { id: true, name: true, email: true, image: true } },
             assignee: { select: { id: true, name: true, email: true, image: true } },
+            participants: {
+              include: {
+                user: { select: { id: true, name: true, email: true, image: true } },
+              },
+              orderBy: { createdAt: "asc" },
+            },
             project: { select: { key: true, slug: true } },
           },
         });
@@ -869,6 +940,7 @@ export const taskRouter = createTRPCRouter({
             ...(title !== undefined ? ["title"] : []),
             ...(description !== undefined || body !== undefined ? ["description"] : []),
             ...(assigneeId !== undefined ? ["assigneeId"] : []),
+            ...(participantIds !== undefined ? ["participants"] : []),
             ...(statusId !== undefined ? ["statusId"] : []),
             ...(sprintId !== undefined ? ["sprintId"] : []),
             ...(closedAt !== undefined ? ["closedAt"] : []),
@@ -903,6 +975,28 @@ export const taskRouter = createTRPCRouter({
             taskTitle: updated.title,
           },
         }).catch(() => {});
+      }
+
+      if (participantIds !== undefined) {
+        const previousParticipantIds = new Set(currentTaskSnapshot.participants.map((participant) => participant.userId));
+        const addedParticipantIds = normalizedParticipantIds.filter((participantId) => !previousParticipantIds.has(participantId));
+
+        addedParticipantIds.forEach((participantId) => {
+          if (participantId === ctx.session.user.id) {
+            return;
+          }
+
+          createNotification({
+            recipientId: participantId,
+            actorId: ctx.session.user.id,
+            taskId: updated.id,
+            type: "assigned",
+            payload: {
+              taskTitle: updated.title,
+              reason: "participantAdded",
+            },
+          }).catch(() => {});
+        });
       }
 
       if (!isAutomationExecutionActive()) {
@@ -1162,6 +1256,7 @@ export const taskRouter = createTRPCRouter({
                 autoArchiveDays: true,
               },
             },
+            participants: { select: { userId: true } },
             tags: { select: { tagId: true } },
           },
         });
@@ -1182,6 +1277,13 @@ export const taskRouter = createTRPCRouter({
             creatorId: ctx.session.user.id,
         assigneeId: currentTask.assigneeId,
             sprintId: currentTask.sprintId,
+            ...(currentTask.participants.length
+              ? {
+                  participants: {
+                    create: currentTask.participants.map(({ userId }) => ({ userId })),
+                  },
+                }
+              : {}),
             tags: currentTask.tags.length
               ? {
                   create: currentTask.tags.map(({ tagId }) => ({ tagId })),
@@ -1193,6 +1295,12 @@ export const taskRouter = createTRPCRouter({
             tags: { include: { tag: true } },
             creator: { select: { id: true, name: true, email: true, image: true } },
             assignee: { select: { id: true, name: true, email: true, image: true } },
+            participants: {
+              include: {
+                user: { select: { id: true, name: true, email: true, image: true } },
+              },
+              orderBy: { createdAt: "asc" },
+            },
             project: { select: { key: true, slug: true } },
           },
         }));

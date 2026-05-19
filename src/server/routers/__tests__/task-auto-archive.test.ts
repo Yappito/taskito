@@ -76,6 +76,10 @@ function createPrismaMock() {
       findMany: vi.fn(),
       update: vi.fn(),
     },
+    taskParticipant: {
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
     workflowTransition: {
       findFirst: vi.fn(),
     },
@@ -90,6 +94,22 @@ function createPrismaMock() {
   };
 
   return prisma;
+}
+
+function createTaskUpdateResult(participants: Array<{ user: { id: string; name: string | null; email: string; image: string | null } }> = []) {
+  return {
+    id: SOURCE_TASK_ID,
+    statusId: STATUS_ID,
+    assigneeId: USER_ID,
+    priority: "medium",
+    title: "Re-saved task",
+    project: { key: "TASK", slug: "taskito" },
+    status: { id: STATUS_ID },
+    tags: [],
+    creator: null,
+    assignee: null,
+    participants,
+  };
 }
 
 describe("task router auto-archive", () => {
@@ -160,6 +180,48 @@ describe("task router auto-archive", () => {
     );
   });
 
+  it("stores participants when creating a task", async () => {
+    const prisma = createPrismaMock();
+    const participantId = "cmab8yxxp0014i7p4k8n2v3qh";
+    prisma.user.findUnique
+      .mockResolvedValueOnce({ id: USER_ID, role: "admin", projectMemberships: [] })
+      .mockResolvedValueOnce({ id: participantId, role: "admin", projectMemberships: [] });
+    prisma.task.findFirst.mockResolvedValue({ taskNumber: 41 });
+    prisma.task.create.mockResolvedValue({
+      id: "cmab8yxxp0015i7p4k8n2v3qi",
+      projectId: PROJECT_ID,
+      title: "Ship auto-archive",
+      statusId: STATUS_ID,
+      assigneeId: USER_ID,
+      priority: "none",
+    });
+    prisma.taskWatcher.create.mockResolvedValue({ taskId: "cmab8yxxp0015i7p4k8n2v3qi", userId: USER_ID });
+
+    const caller = createCaller({
+      prisma: prisma as never,
+      session: { user: { id: USER_ID } } as never,
+    });
+
+    await caller.create({
+      projectId: PROJECT_ID,
+      title: "Ship auto-archive",
+      dueDate: new Date("2026-06-01T12:00:00.000Z"),
+      priority: "none",
+      statusId: STATUS_ID,
+      participantIds: [participantId],
+    });
+
+    expect(prisma.task.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          participants: {
+            create: [{ userId: participantId }],
+          },
+        }),
+      })
+    );
+  });
+
   it("leaves archivedAt null on create when the selected status does not auto-archive", async () => {
     const prisma = createPrismaMock();
     prisma.user.findUnique.mockResolvedValue({ id: USER_ID, role: "admin", projectMemberships: [] });
@@ -218,6 +280,7 @@ describe("task router auto-archive", () => {
         autoArchive: true,
         autoArchiveDays: 3,
       },
+      participants: [],
       closedAt: new Date("2026-05-10T09:00:00.000Z"),
       archivedAt: new Date("2026-05-11T09:00:00.000Z"),
       priority: "high",
@@ -281,6 +344,7 @@ describe("task router auto-archive", () => {
         autoArchive: false,
         autoArchiveDays: 0,
       },
+      participants: [],
       closedAt: null,
       archivedAt: new Date("2026-05-11T09:00:00.000Z"),
       priority: "medium",
@@ -318,31 +382,15 @@ describe("task router auto-archive", () => {
 
   it("does not reset archivedAt on update when the status stays the same", async () => {
     const prisma = createPrismaMock();
-    prisma.task.findUniqueOrThrow
-      .mockResolvedValueOnce({
-        assigneeId: USER_ID,
-        closedAt: null,
-        statusId: STATUS_ID,
-        priority: "medium",
-        sprintId: null,
-      })
-      .mockResolvedValueOnce({
-        id: SOURCE_TASK_ID,
-        sourceLinks: [],
-        targetLinks: [],
-      });
-    prisma.task.update.mockResolvedValue({
-      id: SOURCE_TASK_ID,
-      statusId: STATUS_ID,
+    prisma.task.findUniqueOrThrow.mockResolvedValue({
       assigneeId: USER_ID,
+      closedAt: null,
+      statusId: STATUS_ID,
       priority: "medium",
-      title: "Re-saved task",
-      project: { key: "TASK", slug: "taskito" },
-      status: { id: STATUS_ID },
-      tags: [],
-      creator: null,
-      assignee: null,
+      sprintId: null,
+      participants: [],
     });
+    prisma.task.update.mockResolvedValue(createTaskUpdateResult());
 
     const caller = createCaller({
       prisma: prisma as never,
@@ -363,6 +411,39 @@ describe("task router auto-archive", () => {
         }),
       })
     );
+  });
+
+  it("replaces task participants on update when participantIds are provided", async () => {
+    const prisma = createPrismaMock();
+    const previousParticipantId = "cmab8yxxp0016i7p4k8n2v3qj";
+    const nextParticipantId = "cmab8yxxp0017i7p4k8n2v3qk";
+    prisma.user.findUnique.mockResolvedValue({ id: nextParticipantId, role: "admin", projectMemberships: [] });
+    prisma.task.findUniqueOrThrow.mockResolvedValue({
+      assigneeId: USER_ID,
+      closedAt: null,
+      statusId: STATUS_ID,
+      priority: "medium",
+      sprintId: null,
+      participants: [{ userId: previousParticipantId }],
+    });
+    prisma.task.update.mockResolvedValue(
+      createTaskUpdateResult([{ user: { id: nextParticipantId, name: "Next Person", email: "next@example.com", image: null } }])
+    );
+
+    const caller = createCaller({
+      prisma: prisma as never,
+      session: { user: { id: USER_ID } } as never,
+    });
+
+    await caller.update({
+      id: SOURCE_TASK_ID,
+      participantIds: [nextParticipantId],
+    });
+
+    expect(prisma.taskParticipant.deleteMany).toHaveBeenCalledWith({ where: { taskId: SOURCE_TASK_ID } });
+    expect(prisma.taskParticipant.createMany).toHaveBeenCalledWith({
+      data: [{ taskId: SOURCE_TASK_ID, userId: nextParticipantId }],
+    });
   });
 
   it("only applies status-derived auto-archive to bulk-updated tasks whose status actually changes", async () => {

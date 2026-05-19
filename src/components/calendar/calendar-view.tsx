@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { TaskDetail } from "@/components/task/task-detail";
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc-client";
-import type { TaskFilterTagOption } from "@/lib/types";
+import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
 interface CalendarViewProps {
   projectId: string;
@@ -35,15 +35,16 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
   const gridStart = useMemo(() => addDays(monthStart, -monthStart.getDay()), [monthStart]);
   const gridEnd = useMemo(() => addDays(gridStart, 42), [gridStart]);
   const { data, isLoading } = trpc.task.list.useQuery({ projectId, dueDateFrom: addDays(gridStart, -1), dueDateTo: addDays(gridEnd, 1), includeArchived: true, limit: 100 });
+  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
   const tasksByDate = useMemo(() => {
-    const groups = new Map<string, NonNullable<typeof data>["items"]>();
-    for (const task of data?.items ?? []) {
+    const groups = new Map<string, TaskCardData[]>();
+    for (const task of tasks) {
       const key = dateKey(task.dueDate);
       if (new Date(task.dueDate) < gridStart || new Date(task.dueDate) > gridEnd) continue;
       groups.set(key, [...(groups.get(key) ?? []), task]);
     }
     return groups;
-  }, [data?.items, gridEnd, gridStart]);
+  }, [gridEnd, gridStart, tasks]);
   const days = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
 
   return (

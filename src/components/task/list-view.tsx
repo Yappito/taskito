@@ -12,7 +12,7 @@ import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
+import type { TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
 interface ListViewProps {
@@ -49,7 +49,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     placeholderData: (previousData) => previousData,
   });
 
-  const tasks = useMemo(() => data?.items ?? [], [data]);
+  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -273,6 +273,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                 Due Date{sortIcon("dueDate")}
               </th>
               <th className="px-4 py-3">Assignee</th>
+              <th className="px-4 py-3">Participants</th>
               <th className="px-4 py-3">Tags</th>
             </tr>
           </thead>
@@ -380,6 +381,26 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                       <span>Unassigned</span>
                     )}
                   </div>
+                </td>
+                <td className="px-4 py-3" style={{ color: "var(--color-text-secondary)" }}>
+                  {(task.participants?.length ?? 0) > 0 ? (
+                    <div className="flex items-center gap-1">
+                      {task.participants!.slice(0, 3).map(({ user }) => (
+                        <Avatar
+                          key={user.id}
+                          name={user.name}
+                          email={user.email}
+                          image={user.image}
+                          size="xs"
+                        />
+                      ))}
+                      {task.participants!.length > 3 && (
+                        <span className="text-xs">+{task.participants!.length - 3}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span>—</span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-1">

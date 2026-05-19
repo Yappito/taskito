@@ -3,6 +3,7 @@ export const TASK_DETAIL_SECTION_IDS = [
   "recurrence",
   "dependencyWarning",
   "overview",
+  "participants",
   "description",
   "comments",
   "details",

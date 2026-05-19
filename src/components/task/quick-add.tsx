@@ -17,6 +17,7 @@ interface ProjectTaskTemplate {
   priority?: "none" | "low" | "medium" | "high" | "urgent";
   tagIds?: string[];
   assigneeId?: string | null;
+  participantIds?: string[];
 }
 
 interface QuickAddProps {
@@ -35,6 +36,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const [selectedStatusId, setSelectedStatusId] = useState("");
   const [priority, setPriority] = useState<"none" | "low" | "medium" | "high" | "urgent">("none");
   const [selectedAssigneeId, setSelectedAssigneeId] = useState("");
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
   const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
@@ -55,6 +57,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     setSelectedStatusId(statuses[0]?.id ?? "");
     setPriority("none");
     setSelectedAssigneeId("");
+    setSelectedParticipantIds([]);
     setSelectedTagIds([]);
     setCustomFieldValues({});
     setSaveAsTemplate(false);
@@ -130,6 +133,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     setSelectedStatusId(template.statusId ?? statuses[0]?.id ?? "");
     setPriority(template.priority ?? "none");
     setSelectedAssigneeId(template.assigneeId ?? "");
+    setSelectedParticipantIds(template.participantIds ?? []);
     setSelectedTagIds(template.tagIds ?? []);
     setCustomFieldValues({});
   }, [selectedTemplateId, statuses, templates]);
@@ -137,6 +141,14 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   function toggleTag(tagId: string) {
     setSelectedTagIds((prev) =>
       prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
+    );
+  }
+
+  function toggleParticipant(participantId: string) {
+    setSelectedParticipantIds((prev) =>
+      prev.includes(participantId)
+        ? prev.filter((id) => id !== participantId)
+        : [...prev, participantId]
     );
   }
 
@@ -158,6 +170,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
         priority,
         tagIds: selectedTagIds,
         assigneeId,
+        participantIds: selectedParticipantIds,
       });
     }
 
@@ -166,6 +179,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       title: trimmedTitle,
       body: trimmedBody || null,
       assigneeId,
+      participantIds: selectedParticipantIds.length ? selectedParticipantIds : undefined,
       dueDate: new Date(dueDate),
       statusId: selectedStatusId || undefined,
       priority,
@@ -317,6 +331,37 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
               </Select>
             </div>
           </div>
+
+          {(people ?? []).length > 0 && (
+            <div>
+              <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                Participants
+              </label>
+              <div
+                className="flex max-h-40 flex-wrap gap-2 overflow-y-auto rounded-lg border p-3"
+                style={{
+                  backgroundColor: "var(--color-bg-overlay)",
+                  borderColor: "var(--color-border)",
+                }}
+              >
+                {(people ?? []).map((person) => (
+                  <label
+                    key={person.id}
+                    className="flex items-center gap-2 rounded-md px-2 py-1 text-xs"
+                    style={{ color: "var(--color-text-secondary)" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedParticipantIds.includes(person.id)}
+                      onChange={() => toggleParticipant(person.id)}
+                      className="rounded"
+                    />
+                    <span>{person.name?.trim() || person.email}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           {tags.length > 0 && (
             <div>

@@ -175,6 +175,10 @@ export interface TaskPersonSummary {
   image?: string | null;
 }
 
+export interface TaskParticipantSummary {
+  user: TaskPersonSummary;
+}
+
 /** Project fields commonly embedded on task payloads */
 export interface ProjectReference {
   key: string;
@@ -205,12 +209,15 @@ export interface TaskCardData {
   title: string;
   priority: Priority;
   dueDate: Date | string;
+  startDate?: Date | string | null;
   closedAt?: Date | string | null;
   statusId: string;
+  assigneeId?: string | null;
   status: TaskStatusSummary;
   tags: TaskTagSummary[];
   creator?: TaskPersonSummary | null;
   assignee?: TaskPersonSummary | null;
+  participants?: TaskParticipantSummary[];
   sprint?: {
     id: string;
     name: string;
@@ -272,6 +279,7 @@ export interface CreateTaskInput {
   startDate?: Date;
   tagIds?: string[];
   assigneeId?: string | null;
+  participantIds?: string[];
 }
 
 /** Input for updating a task */
@@ -284,6 +292,7 @@ export interface UpdateTaskInput {
   dueDate?: Date;
   startDate?: Date;
   assigneeId?: string | null;
+  participantIds?: string[];
 }
 
 /** Input for creating a task link */
@@ -381,6 +390,7 @@ export interface GraphTaskData {
   tags: Array<{ tag: { id: string; name: string; color: string } }>;
   creator?: TaskPersonSummary | null;
   assignee?: TaskPersonSummary | null;
+  participants?: TaskParticipantSummary[];
   alertAcknowledged?: boolean;
   dependencyState?: {
     blockingTaskCount: number;

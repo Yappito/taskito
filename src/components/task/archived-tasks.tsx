@@ -7,7 +7,7 @@ import { TaskCard } from "./task-card";
 import { TaskDetail } from "./task-detail";
 import { TaskViewFilters } from "./task-view-filters";
 import { Button } from "@/components/ui/button";
-import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
+import type { TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 
 interface ArchivedTasksProps {
   projectId: string;
@@ -71,7 +71,7 @@ export function ArchivedTasks({ projectId, statuses, tags }: ArchivedTasksProps)
     );
   }
 
-  const tasks = data?.items ?? [];
+  const tasks = (data?.items ?? []) as unknown as TaskCardData[];
 
   if (tasks.length === 0) {
     return (

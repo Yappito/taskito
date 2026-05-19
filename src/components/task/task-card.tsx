@@ -54,6 +54,10 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
     ? `${task.project.key}-${task.taskNumber}`
     : null;
   const assigneeLabel = task.assignee?.name?.trim() || task.assignee?.email || "Unassigned";
+  const participantPeople = (task.participants ?? []).map((participant) => participant.user);
+  const visibleParticipants = participantPeople.slice(0, 3);
+  const extraParticipantCount = Math.max(participantPeople.length - visibleParticipants.length, 0);
+  const participantTitle = participantPeople.map((person) => person.name?.trim() || person.email).join(", ");
   const dependencyMessages = getDependencyMessages(task);
 
   return (
@@ -153,22 +157,50 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
         >
           {isOverdue ? "Overdue" : "Due"} {dueDate.toLocaleDateString()}
         </span>
-        <div className="flex max-w-[8.75rem] items-center gap-1.5 text-right" title={assigneeLabel}>
-          {task.assignee && (
-            <Avatar
-              name={task.assignee.name}
-              email={task.assignee.email}
-              image={task.assignee.image}
-              size="xs"
-              className="ring-1 ring-black/5"
-            />
+        <div className="flex max-w-[11rem] items-center gap-2 text-right">
+          {participantPeople.length > 0 && (
+            <div className="flex items-center" title={participantTitle}>
+              {visibleParticipants.map((participant, index) => (
+                <Avatar
+                  key={participant.id}
+                  name={participant.name}
+                  email={participant.email}
+                  image={participant.image}
+                  size="xs"
+                  className="ring-1 ring-black/5"
+                  style={{ marginLeft: index === 0 ? 0 : -8 }}
+                />
+              ))}
+              {extraParticipantCount > 0 && (
+                <span
+                  className="ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                  style={{
+                    backgroundColor: "var(--color-bg-muted)",
+                    color: "var(--color-text-muted)",
+                  }}
+                >
+                  +{extraParticipantCount}
+                </span>
+              )}
+            </div>
           )}
-          <span
-            className="truncate text-[11px]"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            {assigneeLabel}
-          </span>
+          <div className="flex min-w-0 items-center gap-1.5" title={assigneeLabel}>
+            {task.assignee && (
+              <Avatar
+                name={task.assignee.name}
+                email={task.assignee.email}
+                image={task.assignee.image}
+                size="xs"
+                className="ring-1 ring-black/5"
+              />
+            )}
+            <span
+              className="truncate text-[11px]"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {assigneeLabel}
+            </span>
+          </div>
         </div>
       </div>
     </div>

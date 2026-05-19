@@ -77,7 +77,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     placeholderData: (previousData) => previousData,
   });
 
-  const tasks = useMemo(() => (data?.items ?? []) as TaskCardData[], [data]);
+  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -119,13 +119,14 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       // Optimistically update the status
       if (variables.statusId && prev) {
         const newStatus = statuses.find((s) => s.id === variables.statusId);
+        const nextItems = (prev.items as unknown as TaskCardData[]).map((t) =>
+          t.id === variables.id
+            ? { ...t, statusId: variables.statusId!, status: newStatus ? { ...t.status, id: newStatus.id, name: newStatus.name, color: newStatus.color } : t.status }
+            : t
+        );
         utils.task.list.setData(taskListInput, {
           ...prev,
-          items: prev.items.map((t) =>
-            t.id === variables.id
-              ? { ...t, statusId: variables.statusId!, status: newStatus ? { ...t.status, id: newStatus.id, name: newStatus.name, color: newStatus.color } : t.status }
-              : t
-          ),
+          items: nextItems as unknown as typeof prev.items,
         });
       }
       return { prev };

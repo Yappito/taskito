@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 
 import { TaskDetail } from "@/components/task/task-detail";
 import { trpc } from "@/lib/trpc-client";
-import type { TaskFilterTagOption } from "@/lib/types";
+import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
 interface GanttViewProps {
   projectId: string;
@@ -26,7 +26,7 @@ function daysBetween(start: Date, end: Date) {
 export function GanttView({ projectId, statuses }: GanttViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const { data, isLoading } = trpc.task.list.useQuery({ projectId, includeArchived: false, limit: 100 });
-  const tasks = useMemo(() => data?.items ?? [], [data?.items]);
+  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data?.items]);
   const range = useMemo(() => {
     const dates = tasks.flatMap((task) => [task.startDate ? new Date(task.startDate) : new Date(task.dueDate), new Date(task.dueDate)]);
     const minTime = dates.reduce((minimum, date) => Math.min(minimum, date.getTime()), Number.POSITIVE_INFINITY);

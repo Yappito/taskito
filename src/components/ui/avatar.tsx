@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
 import { getUserImageUrl, getUserInitials } from "@/lib/user-image";
@@ -8,6 +9,7 @@ interface AvatarProps {
   image?: string | null;
   size?: "xs" | "sm" | "md" | "lg" | "xl";
   className?: string;
+  style?: CSSProperties;
 }
 
 const sizeClasses = {
@@ -18,7 +20,7 @@ const sizeClasses = {
   xl: "h-24 w-24 text-xl",
 } as const;
 
-export function Avatar({ name, email, image, size = "md", className }: AvatarProps) {
+export function Avatar({ name, email, image, size = "md", className, style }: AvatarProps) {
   const imageUrl = getUserImageUrl(image);
   const initials = getUserInitials(name, email);
   const label = name?.trim() || email?.trim() || "User";
@@ -35,6 +37,7 @@ export function Avatar({ name, email, image, size = "md", className }: AvatarPro
         background:
           "radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--color-accent) 25%, white), color-mix(in srgb, var(--color-accent) 10%, var(--color-bg-muted)) 55%, color-mix(in srgb, var(--color-accent) 18%, var(--color-bg-overlay)))",
         color: "var(--color-accent)",
+        ...style,
       }}
       aria-label={label}
       title={label}

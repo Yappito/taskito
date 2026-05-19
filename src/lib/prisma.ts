@@ -10,6 +10,7 @@ const REQUIRED_DELEGATES = [
   "commentAttachment",
   "customField",
   "notification",
+  "taskParticipant",
   "taskWatcher",
 ] as const;
 

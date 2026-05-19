@@ -238,6 +238,7 @@ export const projectRouter = createTRPCRouter({
         priority: z.enum(["none", "low", "medium", "high", "urgent"]).default("none"),
         tagIds: z.array(z.string().cuid()).optional(),
         assigneeId: z.string().cuid().nullable().optional(),
+        participantIds: z.array(z.string().cuid()).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -288,6 +289,25 @@ export const projectRouter = createTRPCRouter({
         }
       }
 
+      if (input.participantIds?.length) {
+        const uniqueParticipantIds = [...new Set(input.participantIds)];
+        const participants = await ctx.prisma.user.findMany({
+          where: { id: { in: uniqueParticipantIds } },
+          select: {
+            id: true,
+            role: true,
+            projectMemberships: {
+              where: { projectId: input.projectId },
+              select: { userId: true },
+            },
+          },
+        });
+
+        if (participants.length !== uniqueParticipantIds.length || participants.some((participant) => participant.role !== "admin" && participant.projectMemberships.length === 0)) {
+          throw new Error("Template participants must be able to access the selected project");
+        }
+      }
+
       const project = await ctx.prisma.project.findUniqueOrThrow({
         where: { id: input.projectId },
         select: { settings: true },
@@ -304,6 +324,7 @@ export const projectRouter = createTRPCRouter({
         priority: input.priority,
         tagIds: input.tagIds ?? [],
         assigneeId: input.assigneeId ?? null,
+        participantIds: input.participantIds ?? [],
       };
 
       await ctx.prisma.project.update({

@@ -27,6 +27,117 @@ import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 import { TimeTrackingControls } from "@/components/time/time-tracking-controls";
 import { RecurrenceControls } from "@/components/recurrence/recurrence-controls";
 
+type ProjectPersonOption = {
+  id: string;
+  name: string | null;
+  email: string;
+  image: string | null;
+};
+
+type TaskDetailData = {
+  id: string;
+  projectId: string;
+  taskNumber?: number;
+  title: string;
+  body?: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  dueDate: Date | string;
+  startDate?: Date | string | null;
+  closedAt?: Date | string | null;
+  archivedAt?: Date | string | null;
+  alertAcknowledged?: boolean;
+  statusId: string;
+  priority: "none" | "low" | "medium" | "high" | "urgent";
+  status: {
+    id?: string;
+    name: string;
+    color: string;
+    category?: string | null;
+  };
+  project?: {
+    key: string;
+    slug?: string;
+  };
+  creator?: ProjectPersonOption | null;
+  assignee?: ProjectPersonOption | null;
+  participants?: Array<{ user: ProjectPersonOption }>;
+  sprintId?: string | null;
+  sprint?: {
+    id: string;
+    name: string;
+    status: string;
+    startDate: Date | string;
+    endDate: Date | string;
+  } | null;
+  recurrenceRule?: {
+    frequency: "daily" | "weekly" | "monthly" | "yearly";
+    interval: number;
+    nextDueDate: Date | string;
+    endDate?: Date | string | null;
+  } | null;
+  comments: Array<{
+    id: string;
+    authorId: string;
+    content: string;
+    createdAt: Date | string;
+    author: { id: string; name: string | null; image?: string | null };
+    attachments?: Array<{
+      id: string;
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      createdAt?: Date | string;
+    }>;
+  }>;
+  tags: Array<{ tag: { id: string; name: string; color: string } }>;
+  customFieldValues: Array<{
+    id?: string;
+    customFieldId: string;
+    value: unknown;
+    customField?: {
+      id: string;
+      name: string;
+      type: string;
+      required?: boolean;
+      options?: unknown;
+    };
+  }>;
+  activityEvents?: Array<{
+    id: string;
+    action: string;
+    details?: Record<string, unknown> | null;
+    createdAt: Date | string;
+    actor?: { name: string | null; email: string } | null;
+  }>;
+  sourceLinks: Array<{
+    id?: string;
+    linkType: string;
+    targetTask?: {
+      id: string;
+      taskNumber?: number;
+      title: string;
+      status?: { category?: string | null; name?: string | null } | null;
+      project?: { key: string } | null;
+    } | null;
+  }>;
+  targetLinks: Array<{
+    id?: string;
+    linkType: string;
+    sourceTask?: {
+      id: string;
+      taskNumber?: number;
+      title: string;
+      status?: { category?: string | null; name?: string | null } | null;
+      project?: { key: string } | null;
+    } | null;
+  }>;
+  dependencyState?: {
+    blockingTaskCount: number;
+    openChildCount: number;
+  };
+};
+
 interface TaskDetailProps {
   taskId: string;
   statuses: Array<{ id: string; name: string; color: string }>;
@@ -130,7 +241,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   } | null>(null);
   const utils = trpc.useUtils();
 
-  const { data: task, isLoading } = trpc.task.byId.useQuery({ id: taskId });
+  const { data: taskData, isLoading } = trpc.task.byId.useQuery({ id: taskId });
+  const task = taskData as TaskDetailData | undefined;
   const { data: currentUser } = trpc.user.me.useQuery();
 
   // Fetch sibling tasks for the link selector
@@ -164,15 +276,36 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     onMutate: async (variables) => {
       setFormError(null);
       await utils.task.byId.cancel({ id: taskId });
-      const prev = utils.task.byId.getData({ id: taskId });
+      const prev = utils.task.byId.getData({ id: taskId }) as TaskDetailData | undefined;
       if (prev) {
-        utils.task.byId.setData({ id: taskId }, { ...prev, ...variables } as typeof prev);
+        const previousParticipants = prev.participants;
+        const nextParticipants = variables.participantIds !== undefined && people
+          ? variables.participantIds
+            .map((participantId) => people?.find((person) => person.id === participantId))
+            .filter((person): person is ProjectPersonOption => Boolean(person))
+            .map((person) => ({ user: person }))
+          : previousParticipants;
+
+        utils.task.byId.setData(
+          { id: taskId },
+          (((current: TaskDetailData | undefined) => {
+            if (!current) {
+              return current;
+            }
+
+            return {
+              ...current,
+              ...variables,
+              ...(variables.participantIds !== undefined ? { participants: nextParticipants } : {}),
+            };
+          }) as never)
+        );
       }
       return { prev };
     },
     onError: (error, _variables, context) => {
       if (context?.prev) {
-        utils.task.byId.setData({ id: taskId }, context.prev);
+        utils.task.byId.setData({ id: taskId }, context.prev as never);
       }
       setFormError(getMutationErrorMessage(error));
     },
@@ -316,12 +449,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
   if (!task) return null;
 
-  const dependencyMessages = getDependencyMessages(task as {
-    dependencyState?: {
-      blockingTaskCount: number;
-      openChildCount: number;
-    };
-  });
+  const dependencyMessages = getDependencyMessages(task);
   const isTerminalTask = task.status.category === "done" || task.status.category === "cancelled";
   const isArchived = !!task.archivedAt && new Date(task.archivedAt) <= new Date();
   const canArchiveNow = isTerminalTask && !isArchived;
@@ -509,6 +637,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       title: form.get("title") as string,
       body: (form.get("body") as string) || null,
       assigneeId: ((form.get("assigneeId") as string) || null),
+      participantIds: form.getAll("participantIds") as string[],
       statusId: form.get("statusId") as string,
       priority: form.get("priority") as "none" | "low" | "medium" | "high" | "urgent",
       dueDate: new Date(form.get("dueDate") as string),
@@ -605,19 +734,21 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     setLinkTargetId("");
   }
 
-  const taskKey = (task as { taskNumber?: number }).taskNumber && (task as { project?: { key: string } }).project?.key
-    ? `${(task as { project?: { key: string } }).project!.key}-${(task as { taskNumber?: number }).taskNumber}`
+  const taskKey = task.taskNumber && task.project?.key
+    ? `${task.project.key}-${task.taskNumber}`
     : null;
-  const taskBody = (task as { body?: string | null }).body;
-  const creator = (task as { creator?: { name: string | null; email: string; image?: string | null } | null }).creator;
-  const assignee = (task as { assignee?: { name: string | null; email: string; image?: string | null } | null }).assignee;
+  const taskBody = task.body;
+  const creator = task.creator;
+  const assignee = task.assignee;
+  const participants = task.participants ?? [];
   const creatorLabel = creator?.name?.trim() || creator?.email || "Unknown";
   const assigneeLabel = assignee?.name?.trim() || assignee?.email || "Unassigned";
-  const closedAt = (task as { closedAt?: Date | string | null }).closedAt;
-  const activityEvents = (task as { activityEvents?: Array<{ id: string; action: string; details?: Record<string, unknown> | null; createdAt: string | Date; actor?: { name: string | null; email: string } | null }> }).activityEvents ?? [];
-  const alertAcknowledged = (task as { alertAcknowledged?: boolean }).alertAcknowledged ?? false;
+  const participantIds = participants.map((participant) => participant.user.id);
+  const closedAt = task.closedAt;
+  const activityEvents = task.activityEvents ?? [];
+  const alertAcknowledged = task.alertAcknowledged ?? false;
   const hasLinks = task.sourceLinks.length > 0 || task.targetLinks.length > 0;
-  const recurrenceRule = (task as { recurrenceRule?: { frequency: "daily" | "weekly" | "monthly" | "yearly"; interval: number; nextDueDate: string | Date; endDate?: string | Date | null } | null }).recurrenceRule ?? null;
+  const recurrenceRule = task.recurrenceRule ?? null;
 
   const visibleSections: TaskDetailSectionDescriptor[] = (() => {
     const sections: TaskDetailSectionDescriptor[] = [
@@ -734,6 +865,55 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           </section>
         ),
       },
+      {
+        id: "participants",
+        label: "Participants",
+        content: (
+          <section
+            className="rounded-2xl border p-4"
+            style={{
+              backgroundColor: "var(--color-surface)",
+              borderColor: "var(--color-border)",
+            }}
+          >
+            <div className="flex items-start gap-3">
+              {renderSectionDragHandle("participants", "Participants")}
+              <div className="min-w-0 flex-1">
+                <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
+                  Participants
+                </h4>
+                {participants.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {participants.map((participant) => (
+                      <div
+                        key={participant.user.id}
+                        className="flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs"
+                        style={{
+                          borderColor: "var(--color-border)",
+                          backgroundColor: "var(--color-bg-overlay)",
+                          color: "var(--color-text-secondary)",
+                        }}
+                      >
+                        <Avatar
+                          name={participant.user.name}
+                          email={participant.user.email}
+                          image={participant.user.image}
+                          size="xs"
+                        />
+                        <span>{participant.user.name?.trim() || participant.user.email}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm" style={{ color: "var(--color-text-muted)" }}>
+                    No participants added.
+                  </p>
+                )}
+              </div>
+            </div>
+          </section>
+        ),
+      },
       ...(taskBody
         ? [
             {
@@ -781,20 +961,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   Comments
                 </h4>
                 <div className="mt-3 space-y-2">
-                  {task.comments.map(
-                    (comment: {
-                      id: string;
-                      authorId: string;
-                      content: string;
-                      createdAt: string | Date;
-                      author: { id: string; name: string | null };
-                      attachments?: Array<{
-                        id: string;
-                        originalName: string;
-                        mimeType: string;
-                        sizeBytes: number;
-                      }>;
-                    }) => {
+                  {task.comments.map((comment) => {
                       const canEditComment = currentUser?.id === comment.authorId;
                       const isEditingComment = editingCommentId === comment.id;
                       const commentBody = getCommentBody(comment.content, comment.attachments);
@@ -924,8 +1091,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                           )}
                         </div>
                       );
-                    }
-                  )}
+                    })}
                   {task.comments.length === 0 && (
                     <p
                       className="rounded-xl border px-3 py-4 text-center text-xs italic"
@@ -1046,7 +1212,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                           <div className="mt-2 grid gap-2 sm:grid-cols-2">
                             {task.customFieldValues.map((fieldValue) => (
                               <div
-                                key={fieldValue.id}
+                                key={fieldValue.id ?? fieldValue.customFieldId}
                                 className="rounded-xl border p-3 text-sm"
                                 style={{
                                   backgroundColor: "var(--color-bg-overlay)",
@@ -1054,7 +1220,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                                 }}
                               >
                                 <div className="text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-                                  {fieldValue.customField.name}
+                                  {fieldValue.customField?.name ?? fieldValue.customFieldId}
                                 </div>
                                 <div className="mt-1" style={{ color: "var(--color-text)" }}>
                                   {fieldValue.value == null ? "—" : String(fieldValue.value)}
@@ -1168,19 +1334,9 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 )}
 
                 <div className="space-y-2 text-sm">
-                  {task.sourceLinks.map(
-                    (link: {
-                      id: string;
-                      linkType: string;
-                      targetTask: {
-                        id: string;
-                        taskNumber: number;
-                        title: string;
-                        project: { key: string };
-                      };
-                    }) => (
+                  {task.sourceLinks.map((link) => (
                       <div
-                        key={link.id}
+                        key={link.id ?? `${link.linkType}-${link.targetTask?.id ?? "unknown"}`}
                         className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
                         style={{
                           backgroundColor: "var(--color-bg-overlay)",
@@ -1199,39 +1355,28 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                               {link.linkType}
                             </span>
                             <span className="font-semibold" style={{ color: "var(--color-text)" }}>
-                              {link.targetTask.project.key}-{link.targetTask.taskNumber}
+                              {link.targetTask?.project?.key ?? "TASK"}-{link.targetTask?.taskNumber ?? "?"}
                             </span>
                           </div>
                           <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
-                            {link.targetTask.title}
+                            {link.targetTask?.title ?? "Linked task"}
                           </div>
                         </div>
                         <button
                           type="button"
-                          onClick={() => removeLink.mutate({ id: link.id })}
+                          onClick={() => link.id && removeLink.mutate({ id: link.id })}
                           className="text-xs opacity-50 hover:opacity-100"
                           style={{ color: "var(--color-danger)" }}
                           title="Remove link"
-                          aria-label={`Remove link to ${link.targetTask.project.key}-${link.targetTask.taskNumber}`}
+                          aria-label={`Remove link to ${link.targetTask?.project?.key ?? "TASK"}-${link.targetTask?.taskNumber ?? "?"}`}
                         >
                           ✕
                         </button>
                       </div>
-                    )
-                  )}
-                  {task.targetLinks.map(
-                    (link: {
-                      id: string;
-                      linkType: string;
-                      sourceTask: {
-                        id: string;
-                        taskNumber: number;
-                        title: string;
-                        project: { key: string };
-                      };
-                    }) => (
+                    ))}
+                  {task.targetLinks.map((link) => (
                       <div
-                        key={link.id}
+                        key={link.id ?? `${link.linkType}-${link.sourceTask?.id ?? "unknown"}`}
                         className="flex items-start justify-between gap-3 rounded-xl border px-3 py-2"
                         style={{
                           backgroundColor: "var(--color-bg-overlay)",
@@ -1250,26 +1395,25 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                               {link.linkType}
                             </span>
                             <span className="font-semibold" style={{ color: "var(--color-text)" }}>
-                              {link.sourceTask.project.key}-{link.sourceTask.taskNumber}
+                              {link.sourceTask?.project?.key ?? "TASK"}-{link.sourceTask?.taskNumber ?? "?"}
                             </span>
                           </div>
                           <div className="mt-1 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>
-                            {link.sourceTask.title}
+                            {link.sourceTask?.title ?? "Linked task"}
                           </div>
                         </div>
                         <button
                           type="button"
-                          onClick={() => removeLink.mutate({ id: link.id })}
+                          onClick={() => link.id && removeLink.mutate({ id: link.id })}
                           className="text-xs opacity-50 hover:opacity-100"
                           style={{ color: "var(--color-danger)" }}
                           title="Remove link"
-                          aria-label={`Remove link from ${link.sourceTask.project.key}-${link.sourceTask.taskNumber}`}
+                          aria-label={`Remove link from ${link.sourceTask?.project?.key ?? "TASK"}-${link.sourceTask?.taskNumber ?? "?"}`}
                         >
                           ✕
                         </button>
                       </div>
-                    )
-                  )}
+                    ))}
                   {!hasLinks && (
                     <p
                       className="rounded-xl border px-3 py-4 text-center text-xs italic"
@@ -1594,7 +1738,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               >
                 Sprint
               </label>
-              <Select name="sprintId" defaultValue={(task as { sprintId?: string | null }).sprintId ?? ""}>
+              <Select name="sprintId" defaultValue={task.sprintId ?? ""}>
                 <option value="">No sprint</option>
                 {sprints.map((sprint) => (
                   <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
@@ -1610,7 +1754,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               </label>
               <textarea
                 name="body"
-                defaultValue={(task as { body?: string | null }).body ?? ""}
+                  defaultValue={task.body ?? ""}
                 rows={5}
                 placeholder="Add task details..."
                 className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2"
@@ -1631,7 +1775,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               </label>
               <Select
                 name="assigneeId"
-                defaultValue={(task as { assignee?: { id: string } | null }).assignee?.id ?? ""}
+                defaultValue={task.assignee?.id ?? ""}
               >
                 <option value="">Unassigned</option>
                 {(people ?? []).map((person) => (
@@ -1640,6 +1784,48 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   </option>
                 ))}
               </Select>
+            </div>
+            <div>
+              <label
+                className="mb-1 block text-xs font-medium"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Participants
+              </label>
+              {(people ?? []).length > 0 ? (
+                <div
+                  className="flex max-h-40 flex-wrap gap-2 overflow-y-auto rounded-lg border p-3"
+                  style={{
+                    backgroundColor: "var(--color-bg-overlay)",
+                    borderColor: "var(--color-border)",
+                  }}
+                >
+                  {(people ?? []).map((person) => {
+                    const checked = participantIds.includes(person.id);
+
+                    return (
+                      <label
+                        key={person.id}
+                        className="flex items-center gap-2 rounded-md px-2 py-1 text-xs"
+                        style={{ color: "var(--color-text-secondary)" }}
+                      >
+                        <input
+                          type="checkbox"
+                          name="participantIds"
+                          value={person.id}
+                          defaultChecked={checked}
+                          className="rounded"
+                        />
+                        <span>{person.name?.trim() || person.email}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  No participants available for this project.
+                </p>
+              )}
             </div>
             <div>
               <label
