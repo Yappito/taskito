@@ -255,7 +255,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     { projectId: task?.projectId ?? "" },
     { enabled: !!task?.projectId }
   );
-  const { data: people } = trpc.project.people.useQuery(
+  const { data: people, status: peopleStatus } = trpc.project.people.useQuery(
     { projectId: task?.projectId ?? "" },
     { enabled: !!task?.projectId }
   );
@@ -636,8 +636,6 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       id: taskId,
       title: form.get("title") as string,
       body: (form.get("body") as string) || null,
-      assigneeId: ((form.get("assigneeId") as string) || null),
-      participantIds: form.getAll("participantIds") as string[],
       statusId: form.get("statusId") as string,
       priority: form.get("priority") as "none" | "low" | "medium" | "high" | "urgent",
       dueDate: new Date(form.get("dueDate") as string),
@@ -647,6 +645,12 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       sprintId: ((form.get("sprintId") as string) || null),
       tagIds: form.getAll("tags") as string[],
       customFieldValues: effectiveCustomFieldValues,
+      ...(canEditPeopleFields
+        ? {
+            assigneeId: ((form.get("assigneeId") as string) || null),
+            participantIds: form.getAll("participantIds") as string[],
+          }
+        : {}),
     });
   }
 
@@ -741,9 +745,16 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const creator = task.creator;
   const assignee = task.assignee;
   const participants = task.participants ?? [];
+  const peopleOptions = people ?? [];
   const creatorLabel = creator?.name?.trim() || creator?.email || "Unknown";
   const assigneeLabel = assignee?.name?.trim() || assignee?.email || "Unassigned";
   const participantIds = participants.map((participant) => participant.user.id);
+  const canEditPeopleFields = peopleStatus === "success" && peopleOptions.length > 0;
+  const peopleFieldMessage = peopleStatus === "pending"
+    ? "Loading project people. Saving now will keep the current values."
+    : peopleStatus === "success"
+      ? "No project people are available right now. Saving now will keep the current values."
+      : "Project people are unavailable right now. Saving now will keep the current values.";
   const closedAt = task.closedAt;
   const activityEvents = task.activityEvents ?? [];
   const alertAcknowledged = task.alertAcknowledged ?? false;
@@ -1774,16 +1785,28 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 Assignee
               </label>
               <Select
-                name="assigneeId"
+                name={canEditPeopleFields ? "assigneeId" : undefined}
                 defaultValue={task.assignee?.id ?? ""}
+                disabled={!canEditPeopleFields}
               >
-                <option value="">Unassigned</option>
-                {(people ?? []).map((person) => (
-                  <option key={person.id} value={person.id}>
-                    {person.name?.trim() || person.email}
-                  </option>
-                ))}
+                {canEditPeopleFields ? (
+                  <>
+                    <option value="">Unassigned</option>
+                    {peopleOptions.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.name?.trim() || person.email}
+                      </option>
+                    ))}
+                  </>
+                ) : (
+                  <option value={task.assignee?.id ?? ""}>{assigneeLabel}</option>
+                )}
               </Select>
+              {!canEditPeopleFields && (
+                <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {peopleFieldMessage}
+                </p>
+              )}
             </div>
             <div>
               <label
@@ -1792,7 +1815,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               >
                 Participants
               </label>
-              {(people ?? []).length > 0 ? (
+              {canEditPeopleFields ? (
                 <div
                   className="flex max-h-40 flex-wrap gap-2 overflow-y-auto rounded-lg border p-3"
                   style={{
@@ -1800,7 +1823,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                     borderColor: "var(--color-border)",
                   }}
                 >
-                  {(people ?? []).map((person) => {
+                  {peopleOptions.map((person) => {
                     const checked = participantIds.includes(person.id);
 
                     return (
@@ -1822,9 +1845,43 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   })}
                 </div>
               ) : (
-                <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                  No participants available for this project.
-                </p>
+                <div
+                  className="space-y-2 rounded-lg border p-3"
+                  style={{
+                    backgroundColor: "var(--color-bg-overlay)",
+                    borderColor: "var(--color-border)",
+                  }}
+                >
+                  {participants.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {participants.map((participant) => (
+                        <div
+                          key={participant.user.id}
+                          className="flex items-center gap-2 rounded-md px-2 py-1 text-xs"
+                          style={{
+                            backgroundColor: "var(--color-surface)",
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          <Avatar
+                            name={participant.user.name}
+                            email={participant.user.email}
+                            image={participant.user.image}
+                            size="xs"
+                          />
+                          <span>{participant.user.name?.trim() || participant.user.email}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                      No participants added.
+                    </p>
+                  )}
+                  <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                    {peopleFieldMessage}
+                  </p>
+                </div>
               )}
             </div>
             <div>
