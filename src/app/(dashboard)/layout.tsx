@@ -8,6 +8,7 @@ import { NotificationCenter } from "@/components/ui/notification-center";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { CurrentProjectHomeLink } from "@/components/ui/current-project-home-link";
 import { Avatar } from "@/components/ui/avatar";
+import { HeaderProjectSwitcher } from "@/components/ui/header-project-switcher";
 
 /** Dashboard layout — requires authentication */
 export default async function DashboardLayout({
@@ -50,6 +51,7 @@ export default async function DashboardLayout({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 md:justify-end">
+            <HeaderProjectSwitcher />
             <SearchModal />
             <NotificationCenter />
             <Link

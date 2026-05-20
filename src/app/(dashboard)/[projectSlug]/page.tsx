@@ -14,7 +14,6 @@ import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { SprintView } from "@/components/sprint/sprint-view";
 import { TaskDetail } from "@/components/task/task-detail";
 import { QuickAdd } from "@/components/task/quick-add";
-import { ProjectSwitcher } from "@/components/ui/project-switcher";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 import { cn } from "@/lib/utils";
 
@@ -153,28 +152,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
       >
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-3">
-              <ProjectSwitcher
-                currentProjectSlug={project.slug}
-                projects={(projects ?? []).map((item) => ({
-                  id: item.id,
-                  name: item.name,
-                  slug: item.slug,
-                  key: item.key,
-                }))}
-                disabled={projectsLoading || !projects?.length}
-              />
-              <span
-                className="rounded-full px-2.5 py-1 text-xs font-semibold"
-                style={{ backgroundColor: "var(--color-accent-muted)", color: "var(--color-accent)" }}
-              >
-                {project.key}
-              </span>
-              <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                /{project.slug}
-              </span>
-            </div>
-            <h1 className="mt-3 truncate text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>
+            <h1 className="truncate text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>
               {project.name}
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
