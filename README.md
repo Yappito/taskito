@@ -229,6 +229,16 @@ Useful commands from the repository root:
 | `POSTGRES_DB` | Yes | PostgreSQL database name |
 | `AUTH_URL` | Yes | Public base URL of the app |
 | `AUTH_SECRET` | Yes | Auth.js signing secret |
+| `OIDC_ISSUER` | No | Generic OIDC issuer URL for single-provider SSO |
+| `OIDC_CLIENT_ID` | No | OIDC client ID |
+| `OIDC_CLIENT_SECRET` | No | OIDC client secret |
+| `OIDC_PROVIDER_ID` | No | Stable provider id; defaults to `oidc` |
+| `OIDC_PROVIDER_NAME` | No | Login button label; defaults to `OIDC` |
+| `OIDC_GROUPS_CLAIM` | No | Claim path used to sync groups; defaults to `groups` |
+| `OIDC_ALLOW_SIGNUP` | No | Allow first-time OIDC users; defaults to `true` |
+| `OIDC_ALLOW_EMAIL_ACCOUNT_LINKING` | No | Link OIDC accounts to existing users by email; defaults to `false` |
+| `OIDC_ADMIN_EMAILS` | No | Comma-separated OIDC emails promoted to global admin |
+| `OIDC_PROVIDERS` | No | JSON array for multiple OIDC providers; supports `id`, `name`, `issuer`, `clientId`, `clientSecret` or `clientSecretEnv`, `scope`, `groupsClaim`, `defaultRole`, `allowSignup`, `allowEmailAccountLinking`, `requireEmailVerified`, and `adminEmails` |
 | `ALLOW_DEMO_SEED` | No | Leave `false` unless you intentionally want demo data |
 | `DEMO_ADMIN_PASSWORD` | No | Optional password for the seeded demo admin account |
 | `AUTO_TAGGER_URL` | No | Optional OpenAI-compatible tagging endpoint |
@@ -241,6 +251,7 @@ Useful commands from the repository root:
 
 - Attachment uploads are tied to task comments, not stored as standalone task files.
 - Attachment downloads go through authenticated project access checks.
+- Access is RBAC-based: global admins manage users and groups, project roles grant permissions, and OIDC group claims can populate managed groups automatically.
 - The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume.
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.

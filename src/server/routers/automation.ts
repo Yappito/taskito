@@ -55,7 +55,7 @@ export const automationRouter = createTRPCRouter({
   create: protectedProcedure
     .input(ruleInput)
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
       const validated = validateRulePayload(input);
       return ctx.prisma.automationRule.create({
         data: {
@@ -74,7 +74,7 @@ export const automationRouter = createTRPCRouter({
     .input(ruleInput.omit({ projectId: true }).partial().extend({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       const rule = await ctx.prisma.automationRule.findUniqueOrThrow({ where: { id: input.id }, select: { projectId: true } });
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { permission: "automation_manage" });
       if (input.action !== undefined && input.actionPayload === undefined) {
         throw new Error("Changing an automation action requires a matching actionPayload");
       }
@@ -97,7 +97,7 @@ export const automationRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       const rule = await ctx.prisma.automationRule.findUniqueOrThrow({ where: { id: input.id }, select: { projectId: true } });
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { permission: "automation_manage" });
       await ctx.prisma.automationRule.delete({ where: { id: input.id } });
       return { success: true };
     }),
@@ -105,7 +105,7 @@ export const automationRouter = createTRPCRouter({
   runs: protectedProcedure
     .input(z.object({ projectId: z.string().cuid(), ruleId: z.string().cuid().optional() }))
     .query(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
       return ctx.prisma.automationRun.findMany({
         where: { projectId: input.projectId, ...(input.ruleId ? { ruleId: input.ruleId } : {}) },
         include: { rule: { select: { id: true, name: true } }, task: { select: { id: true, taskNumber: true, title: true } } },
@@ -117,7 +117,7 @@ export const automationRouter = createTRPCRouter({
   processDueDates: protectedProcedure
     .input(z.object({ projectId: z.string().cuid(), limit: z.number().int().min(1).max(200).optional() }))
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
       return processDueDateAutomationRules(ctx.prisma, {
         projectId: input.projectId,
         actorId: ctx.session.user.id,

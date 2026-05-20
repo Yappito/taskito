@@ -20,9 +20,14 @@ model User {
   image         String?
   password      String?
   role          String    @default("member")
+  authSource    String    @default("local")
+  disabledAt    DateTime?
+  lastLoginAt   DateTime?
   settings      Json      @default("{}")
   accounts      Account[]
   sessions      Session[]
+  groupMemberships GroupMember[]
+  projectPermissionGrants UserProjectPermissionGrant[]
   comments      Comment[]
   activityEvents ActivityEvent[]
   watchingTasks TaskWatcher[]
@@ -100,6 +105,9 @@ model Project {
   tags        Tag[]
   customFields CustomField[]
   members     ProjectMember[]
+  groupMemberships ProjectGroup[]
+  userPermissionGrants UserProjectPermissionGrant[]
+  groupPermissionGrants GroupProjectPermissionGrant[]
   aiProviders AiProviderConnection[]
   aiPolicy    AiProjectPolicy?
   aiConversations AiConversation[]
@@ -149,8 +157,35 @@ model SprintMember {
 }
 
 enum ProjectMemberRole {
+  viewer
   owner
+  manager
   member
+}
+
+enum GroupMemberRole {
+  member
+  manager
+}
+
+enum ProjectPermission {
+  project_read
+  project_manage
+  project_delete
+  member_manage
+  task_read
+  task_create
+  task_update
+  task_delete
+  task_comment
+  task_archive
+  workflow_manage
+  tag_manage
+  custom_field_manage
+  sprint_manage
+  automation_manage
+  ai_manage
+  time_log
 }
 
 model ProjectMember {
@@ -165,6 +200,84 @@ model ProjectMember {
 
   @@id([projectId, userId])
   @@index([userId])
+}
+
+model Group {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  source      String   @default("local")
+  oidcProvider String?
+  externalId  String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members GroupMember[]
+  projectMemberships ProjectGroup[]
+  projectPermissionGrants GroupProjectPermissionGrant[]
+
+  @@unique([source, oidcProvider, externalId])
+  @@index([source, oidcProvider])
+}
+
+model GroupMember {
+  groupId   String
+  userId    String
+  role      GroupMemberRole @default(member)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+}
+
+model ProjectGroup {
+  projectId String
+  groupId   String
+  role      ProjectMemberRole @default(member)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  group   Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, groupId])
+  @@index([groupId])
+}
+
+model UserProjectPermissionGrant {
+  projectId  String
+  userId     String
+  permission ProjectPermission
+  allowed    Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId, permission])
+  @@index([userId])
+}
+
+model GroupProjectPermissionGrant {
+  projectId  String
+  groupId    String
+  permission ProjectPermission
+  allowed    Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  group   Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, groupId, permission])
+  @@index([groupId])
 }
 
 // ─── Workflow ────────────────────────────────────────────

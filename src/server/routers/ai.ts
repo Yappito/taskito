@@ -304,7 +304,7 @@ export const aiRouter = createTRPCRouter({
       const isProjectOwnerScope = actorScope === "manage" && Boolean(projectId);
 
       if (projectId && isProjectOwnerScope) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, projectId, { minimumRole: "owner" });
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, projectId, { permission: "ai_manage" });
       }
 
       const providerVisibilityClauses: Prisma.AiProviderConnectionWhereInput[] = [
@@ -405,7 +405,7 @@ export const aiRouter = createTRPCRouter({
   createProjectProvider: protectedProcedure
     .input(z.object({ projectId: z.string().cuid() }).merge(providerInputSchema))
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "ai_manage" });
 
       const normalizedBaseUrl = validateAiProviderBaseUrl(input.baseUrl);
       const normalizedHeaders = normalizeAiProviderHeaders(input.defaultHeaders);
@@ -459,7 +459,7 @@ export const aiRouter = createTRPCRouter({
       if (provider.scope === "shared") {
         await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
       } else if (provider.scope === "project" && provider.projectId) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
       }
 
       const baseUrl = input.baseUrl ? validateAiProviderBaseUrl(input.baseUrl) : undefined;
@@ -532,7 +532,7 @@ export const aiRouter = createTRPCRouter({
           data: { defaultProviderId: null },
         });
       } else if (provider.scope === "project" && provider.projectId) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
         await ctx.prisma.aiProjectPolicy.updateMany({
           where: { projectId: provider.projectId, defaultProviderId: provider.id },
           data: { defaultProviderId: null },
@@ -550,7 +550,7 @@ export const aiRouter = createTRPCRouter({
       if (provider.scope === "shared") {
         await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
       } else if (provider.scope === "project" && provider.projectId) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { minimumRole: "owner" });
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
       }
 
       return { secret: decryptAiSecret(provider.encryptedSecret) };
@@ -592,7 +592,7 @@ export const aiRouter = createTRPCRouter({
   updateProjectPolicy: protectedProcedure
     .input(z.object({ projectId: z.string().cuid(), policy: projectPolicySchema }))
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "ai_manage" });
       const maxPermissions = normalizeAiPermissions(input.policy.maxPermissions);
       const defaultPermissions = normalizeAiPermissions(input.policy.defaultPermissions)
         .filter((permission) => maxPermissions.includes(permission));

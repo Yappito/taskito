@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { createTRPCRouter, publicProcedure, protectedProcedure } from "../trpc";
-import { getAccessibleProjectIds, requireProjectAccess } from "../authz";
+import { canAccessProject, getAccessibleProjectIds, requireProjectAccess } from "../authz";
 
 const filterPresetSchema = z.object({
   id: z.string(),
@@ -72,48 +72,29 @@ export const projectRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
 
-      return ctx.prisma.projectMember.findMany({
-        where: { projectId: input.projectId },
-        select: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              image: true,
-            },
-          },
+      const users = await ctx.prisma.user.findMany({
+        where: {
+          disabledAt: null,
+          OR: [
+            { role: "admin" },
+            { projectMemberships: { some: { projectId: input.projectId } } },
+            { groupMemberships: { some: { group: { projectMemberships: { some: { projectId: input.projectId } } } } } },
+          ],
         },
-        orderBy: [
-          { user: { name: "asc" } },
-          { user: { email: "asc" } },
-        ],
-      }).then(async (memberships) => {
-        const users = memberships.map((membership) => membership.user);
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          image: true,
+        },
+      });
 
-        if (!users.some((user) => user.id === ctx.session.user.id)) {
-          const currentUser = await ctx.prisma.user.findUnique({
-            where: { id: ctx.session.user.id },
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              image: true,
-            },
-          });
-
-          if (currentUser) {
-            users.push(currentUser);
-          }
-        }
-
-        return users.sort((left, right) => {
-          if (left.id === ctx.session.user.id) return -1;
-          if (right.id === ctx.session.user.id) return 1;
-          const leftLabel = left.name?.trim() || left.email;
-          const rightLabel = right.name?.trim() || right.email;
-          return leftLabel.localeCompare(rightLabel);
-        });
+      return users.sort((left, right) => {
+        if (left.id === ctx.session.user.id) return -1;
+        if (right.id === ctx.session.user.id) return 1;
+        const leftLabel = left.name?.trim() || left.email;
+        const rightLabel = right.name?.trim() || right.email;
+        return leftLabel.localeCompare(rightLabel);
       });
     }),
 
@@ -243,7 +224,7 @@ export const projectRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "project_manage",
       });
 
       if (input.statusId) {
@@ -274,17 +255,10 @@ export const projectRouter = createTRPCRouter({
       if (input.assigneeId) {
         const assignee = await ctx.prisma.user.findUnique({
           where: { id: input.assigneeId },
-          select: {
-            id: true,
-            role: true,
-            projectMemberships: {
-              where: { projectId: input.projectId },
-              select: { userId: true },
-            },
-          },
+          select: { id: true },
         });
 
-        if (!assignee || (assignee.role !== "admin" && assignee.projectMemberships.length === 0)) {
+        if (!assignee || !(await canAccessProject(ctx.prisma, input.assigneeId, input.projectId))) {
           throw new Error("Template assignee must be able to access the selected project");
         }
       }
@@ -293,17 +267,11 @@ export const projectRouter = createTRPCRouter({
         const uniqueParticipantIds = [...new Set(input.participantIds)];
         const participants = await ctx.prisma.user.findMany({
           where: { id: { in: uniqueParticipantIds } },
-          select: {
-            id: true,
-            role: true,
-            projectMemberships: {
-              where: { projectId: input.projectId },
-              select: { userId: true },
-            },
-          },
+          select: { id: true },
         });
 
-        if (participants.length !== uniqueParticipantIds.length || participants.some((participant) => participant.role !== "admin" && participant.projectMemberships.length === 0)) {
+        const accessResults = await Promise.all(uniqueParticipantIds.map((participantId) => canAccessProject(ctx.prisma, participantId, input.projectId)));
+        if (participants.length !== uniqueParticipantIds.length || accessResults.some((hasAccess) => !hasAccess)) {
           throw new Error("Template participants must be able to access the selected project");
         }
       }
@@ -432,7 +400,7 @@ export const projectRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, id, {
-        minimumRole: "owner",
+        permission: "project_manage",
       });
 
       return ctx.prisma.project.update({
@@ -449,7 +417,7 @@ export const projectRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.id, {
-        minimumRole: "owner",
+        permission: "project_delete",
       });
       await ctx.prisma.project.delete({ where: { id: input.id } });
       return { success: true };

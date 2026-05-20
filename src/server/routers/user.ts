@@ -2,20 +2,10 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { AI_PERMISSION_VALUES } from "@/lib/ai-types";
+import { PROJECT_PERMISSIONS } from "@/server/authz";
 import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@/lib/password-policy";
-
-interface MembershipSyncClient {
-  project: {
-    findMany: typeof import("@/lib/prisma").prisma.project.findMany;
-  };
-  projectMember: {
-    deleteMany: typeof import("@/lib/prisma").prisma.projectMember.deleteMany;
-    findMany: typeof import("@/lib/prisma").prisma.projectMember.findMany;
-    createMany: typeof import("@/lib/prisma").prisma.projectMember.createMany;
-  };
-}
 
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
@@ -24,6 +14,12 @@ function normalizeEmail(email: string) {
 function uniqueProjectIds(projectIds: string[] | undefined) {
   return [...new Set(projectIds ?? [])];
 }
+
+const userPermissionGrantSchema = z.object({
+  projectId: z.string().cuid(),
+  permission: z.enum(PROJECT_PERMISSIONS),
+  allowed: z.boolean(),
+});
 
 function getAiPreferences(settings: unknown) {
   const root = (settings ?? {}) as Record<string, unknown>;
@@ -56,7 +52,7 @@ function getAiPreferences(settings: unknown) {
 }
 
 async function syncProjectMemberships(
-  prisma: MembershipSyncClient,
+  prisma: Prisma.TransactionClient,
   userId: string,
   projectIds: string[]
 ) {
@@ -111,6 +107,96 @@ async function syncProjectMemberships(
   }
 }
 
+async function syncLocalGroupMemberships(
+  prisma: Prisma.TransactionClient,
+  userId: string,
+  groupIds: string[]
+) {
+  const normalizedGroupIds = [...new Set(groupIds)];
+
+  if (normalizedGroupIds.length > 0) {
+    const existingGroups = await prisma.group.findMany({
+      where: { id: { in: normalizedGroupIds }, source: "local" },
+      select: { id: true },
+    });
+
+    if (existingGroups.length !== normalizedGroupIds.length) {
+      throw new Error("One or more selected groups do not exist or are managed externally");
+    }
+  }
+
+  await prisma.groupMember.deleteMany({
+    where: {
+      userId,
+      group: { source: "local" },
+      ...(normalizedGroupIds.length > 0
+        ? { groupId: { notIn: normalizedGroupIds } }
+        : {}),
+    },
+  });
+
+  if (normalizedGroupIds.length === 0) {
+    return;
+  }
+
+  const existingMemberships = await prisma.groupMember.findMany({
+    where: {
+      userId,
+      groupId: { in: normalizedGroupIds },
+    },
+    select: { groupId: true },
+  });
+
+  const existingGroupIds = new Set(existingMemberships.map((membership) => membership.groupId));
+  const membershipsToCreate = normalizedGroupIds
+    .filter((groupId) => !existingGroupIds.has(groupId))
+    .map((groupId) => ({ userId, groupId }));
+
+  if (membershipsToCreate.length > 0) {
+    await prisma.groupMember.createMany({
+      data: membershipsToCreate,
+      skipDuplicates: true,
+    });
+  }
+}
+
+async function syncUserPermissionGrants(
+  prisma: Prisma.TransactionClient,
+  userId: string,
+  permissionGrants: Array<z.infer<typeof userPermissionGrantSchema>> | undefined
+) {
+  if (permissionGrants === undefined) {
+    return;
+  }
+
+  const normalizedGrants = Object.values(
+    permissionGrants.reduce<Record<string, z.infer<typeof userPermissionGrantSchema>>>((acc, grant) => {
+      acc[`${grant.projectId}:${grant.permission}`] = grant;
+      return acc;
+    }, {})
+  );
+
+  if (normalizedGrants.length > 0) {
+    const existingProjects = await prisma.project.findMany({
+      where: { id: { in: [...new Set(normalizedGrants.map((grant) => grant.projectId))] } },
+      select: { id: true },
+    });
+
+    if (existingProjects.length !== new Set(normalizedGrants.map((grant) => grant.projectId)).size) {
+      throw new Error("One or more permission grant projects do not exist");
+    }
+  }
+
+  await prisma.userProjectPermissionGrant.deleteMany({ where: { userId } });
+
+  if (normalizedGrants.length > 0) {
+    await prisma.userProjectPermissionGrant.createMany({
+      data: normalizedGrants.map((grant) => ({ userId, ...grant })),
+      skipDuplicates: true,
+    });
+  }
+}
+
 /** User management router */
 export const userRouter = createTRPCRouter({
   /** Read the current user's profile */
@@ -123,6 +209,9 @@ export const userRouter = createTRPCRouter({
         email: true,
         image: true,
         role: true,
+        authSource: true,
+        disabledAt: true,
+        lastLoginAt: true,
         createdAt: true,
       },
     });
@@ -243,7 +332,36 @@ export const userRouter = createTRPCRouter({
         email: true,
         role: true,
         image: true,
+        authSource: true,
+        disabledAt: true,
+        lastLoginAt: true,
         createdAt: true,
+        groupMemberships: {
+          select: {
+            groupId: true,
+            role: true,
+            group: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+                source: true,
+              },
+            },
+          },
+          orderBy: {
+            group: {
+              name: "asc",
+            },
+          },
+        },
+        projectPermissionGrants: {
+          select: {
+            projectId: true,
+            permission: true,
+            allowed: true,
+          },
+        },
         projectMemberships: {
           select: {
             projectId: true,
@@ -277,6 +395,8 @@ export const userRouter = createTRPCRouter({
         password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
         role: z.enum(["admin", "member"]).default("member"),
         projectIds: z.array(z.string().cuid()).optional(),
+        groupIds: z.array(z.string().cuid()).optional(),
+        permissionGrants: z.array(userPermissionGrantSchema).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -292,6 +412,8 @@ export const userRouter = createTRPCRouter({
         });
 
         await syncProjectMemberships(tx, user.id, input.projectIds ?? []);
+        await syncLocalGroupMemberships(tx, user.id, input.groupIds ?? []);
+        await syncUserPermissionGrants(tx, user.id, input.permissionGrants ?? []);
 
         return tx.user.findUniqueOrThrow({
           where: { id: user.id },
@@ -300,7 +422,31 @@ export const userRouter = createTRPCRouter({
             name: true,
             email: true,
             role: true,
+            authSource: true,
+            disabledAt: true,
+            lastLoginAt: true,
             createdAt: true,
+            groupMemberships: {
+              select: {
+                groupId: true,
+                role: true,
+                group: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                    source: true,
+                  },
+                },
+              },
+            },
+            projectPermissionGrants: {
+              select: {
+                projectId: true,
+                permission: true,
+                allowed: true,
+              },
+            },
             projectMemberships: {
               select: {
                 projectId: true,
@@ -330,10 +476,16 @@ export const userRouter = createTRPCRouter({
         role: z.enum(["admin", "member"]).optional(),
         password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH).optional(),
         projectIds: z.array(z.string().cuid()).optional(),
+        groupIds: z.array(z.string().cuid()).optional(),
+        permissionGrants: z.array(userPermissionGrantSchema).optional(),
+        disabled: z.boolean().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, password, projectIds, ...data } = input;
+      const { id, password, projectIds, groupIds, permissionGrants, disabled, ...data } = input;
+      if (id === ctx.session.user.id && disabled === true) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot disable your own account" });
+      }
       const updateData: Record<string, unknown> = { ...data };
       if (typeof updateData.name === "string") {
         updateData.name = updateData.name.trim();
@@ -343,6 +495,10 @@ export const userRouter = createTRPCRouter({
       }
       if (password) {
         updateData.password = await hashPassword(password);
+        updateData.authSource = "local";
+      }
+      if (disabled !== undefined) {
+        updateData.disabledAt = disabled ? new Date() : null;
       }
       return ctx.prisma.$transaction(async (tx) => {
         await tx.user.update({
@@ -354,6 +510,12 @@ export const userRouter = createTRPCRouter({
           await syncProjectMemberships(tx, id, projectIds);
         }
 
+        if (groupIds !== undefined) {
+          await syncLocalGroupMemberships(tx, id, groupIds);
+        }
+
+        await syncUserPermissionGrants(tx, id, permissionGrants);
+
         return tx.user.findUniqueOrThrow({
           where: { id },
           select: {
@@ -361,7 +523,31 @@ export const userRouter = createTRPCRouter({
             name: true,
             email: true,
             role: true,
+            authSource: true,
+            disabledAt: true,
+            lastLoginAt: true,
             createdAt: true,
+            groupMemberships: {
+              select: {
+                groupId: true,
+                role: true,
+                group: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                    source: true,
+                  },
+                },
+              },
+            },
+            projectPermissionGrants: {
+              select: {
+                projectId: true,
+                permission: true,
+                allowed: true,
+              },
+            },
             projectMemberships: {
               select: {
                 projectId: true,

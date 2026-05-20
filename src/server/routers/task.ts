@@ -7,6 +7,7 @@ import { createNotification, notifyTaskWatchers } from "../services/notification
 import { createTaskComment } from "../services/comment-service";
 import { evaluateAutomationRules, isAutomationExecutionActive } from "../services/automation-evaluator";
 import {
+  canAccessProject,
   requireProjectAccess,
   requireTagAccess,
   requireTaskAccess,
@@ -66,21 +67,14 @@ async function validateAssigneeAccess(
 
   const user = await ctx.prisma.user.findUnique({
     where: { id: assigneeId },
-    select: {
-      id: true,
-      role: true,
-      projectMemberships: {
-        where: { projectId },
-        select: { userId: true },
-      },
-    },
+    select: { id: true },
   });
 
   if (!user) {
     throw new Error("Assignee does not exist");
   }
 
-  if (user.role !== "admin" && user.projectMemberships.length === 0) {
+  if (!(await canAccessProject(ctx.prisma, assigneeId, projectId))) {
     throw new Error("Assignee must be a member of the selected project");
   }
 }
@@ -596,13 +590,13 @@ export const taskRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { tagIds, description, body, assigneeId, participantIds, customFieldValues, sprintId, ...data } = input;
       const effectiveAssigneeId = assigneeId ?? ctx.session.user.id;
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId);
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId, { permission: "task_create" });
       await validateAssigneeAccess(ctx, data.projectId, effectiveAssigneeId);
       const normalizedParticipantIds = await validateParticipantAccess(ctx, data.projectId, participantIds);
       const normalizedCustomFieldValues = await validateCustomFieldValues(ctx, data.projectId, customFieldValues);
 
       if (data.statusId) {
-        const status = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId);
+        const status = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId, { permission: "task_create" });
         if (status.projectId !== data.projectId) {
           throw new Error("Status does not belong to the specified project");
         }
@@ -645,7 +639,7 @@ export const taskRouter = createTRPCRouter({
       let initialStatusIsFinal = false;
       let initialArchivedAt: Date | null = null;
       if (data.statusId) {
-        const initialStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId);
+        const initialStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, data.statusId, { permission: "task_create" });
         if (initialStatus.projectId !== data.projectId) {
           throw new Error("Status does not belong to the specified project");
         }
@@ -751,7 +745,7 @@ export const taskRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       const { id, title, description, body, assigneeId, participantIds, statusId, sprintId, priority, dueDate, startDate, alertAcknowledged, tagIds, customFieldValues } = input;
-      const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id);
+      const currentTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, id, { permission: "task_update" });
       const isStatusChange = statusId !== undefined && statusId !== currentTask.statusId;
       const currentTaskSnapshot = await ctx.prisma.task.findUniqueOrThrow({
         where: { id },
@@ -788,7 +782,7 @@ export const taskRouter = createTRPCRouter({
 
       // Validate status transition if statusId is being changed
       if (statusId) {
-        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, statusId);
+        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, statusId, { permission: "task_update" });
         if (targetStatus.projectId !== currentTask.projectId) {
           throw new Error("Status does not belong to the same project as the task");
         }
@@ -1049,7 +1043,9 @@ export const taskRouter = createTRPCRouter({
       )
     )
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+        permissions: input.archive !== undefined ? ["task_update", "task_archive"] : ["task_update"],
+      });
 
       const tasks = await ctx.prisma.task.findMany({
         where: {
@@ -1101,7 +1097,7 @@ export const taskRouter = createTRPCRouter({
       }
 
       if (input.statusId) {
-        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.statusId);
+        targetStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.statusId, { permission: "task_update" });
         if (targetStatus.projectId !== input.projectId) {
           throw new Error("Status does not belong to the selected project");
         }
@@ -1245,7 +1241,8 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
+      const sourceTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, sourceTask.projectId, { permission: "task_create" });
 
       const currentTask = await ctx.prisma.task.findUniqueOrThrow({
           where: { id: input.id },
@@ -1317,7 +1314,7 @@ export const taskRouter = createTRPCRouter({
   delete: protectedProcedure
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id, { permission: "task_delete" });
       await ctx.prisma.task.delete({ where: { id: input.id } });
       return { success: true };
     }),
@@ -1348,7 +1345,7 @@ export const taskRouter = createTRPCRouter({
         throw new Error("A task cannot link to itself");
       }
 
-      const sourceTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.sourceTaskId);
+      const sourceTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.sourceTaskId, { permission: "task_update" });
       const targetTask = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.targetTaskId);
 
       if (sourceTask.projectId !== targetTask.projectId) {
@@ -1363,7 +1360,7 @@ export const taskRouter = createTRPCRouter({
   removeLink: protectedProcedure
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskLinkAccess(ctx.prisma, ctx.session.user.id, input.id);
+      await requireTaskLinkAccess(ctx.prisma, ctx.session.user.id, input.id, { permission: "task_update" });
       await ctx.prisma.taskLink.delete({ where: { id: input.id } });
       return { success: true };
     }),
@@ -1377,7 +1374,7 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const task = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      const task = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "task_update" });
       const matchingTags = await ctx.prisma.tag.findMany({
         where: {
           projectId: task.projectId,
@@ -1409,7 +1406,7 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const task = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      const task = await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "task_update" });
       const tag = await requireTagAccess(ctx.prisma, ctx.session.user.id, input.tagId);
       if (task.projectId !== tag.projectId) {
         throw new Error("Tag does not belong to the same project as the task");
@@ -1492,7 +1489,7 @@ export const taskRouter = createTRPCRouter({
   archive: protectedProcedure
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id, { permission: "task_archive" });
       const task = await ctx.prisma.task.update({
         where: { id: input.id },
         data: { archivedAt: new Date() },
@@ -1511,7 +1508,7 @@ export const taskRouter = createTRPCRouter({
   unarchive: protectedProcedure
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id, { permission: "task_archive" });
       const task = await ctx.prisma.task.update({
         where: { id: input.id },
         data: { archivedAt: null },

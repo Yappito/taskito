@@ -5,6 +5,7 @@ import { tagRouter } from "./tag";
 import { workflowRouter } from "./workflow";
 import { searchRouter } from "./search";
 import { userRouter } from "./user";
+import { groupRouter } from "./group";
 import { customFieldRouter } from "./custom-field";
 import { notificationRouter } from "./notification";
 import { aiRouter } from "./ai";
@@ -24,6 +25,7 @@ export const appRouter = createTRPCRouter({
   notification: notificationRouter,
   search: searchRouter,
   user: userRouter,
+  group: groupRouter,
   ai: aiRouter,
   analytics: analyticsRouter,
   sprint: sprintRouter,

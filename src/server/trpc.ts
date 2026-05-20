@@ -3,7 +3,7 @@ import superjson from "superjson";
 import { ZodError } from "zod";
 import type { Session } from "next-auth";
 import { prisma } from "@/lib/prisma";
-import { requireGlobalAdmin } from "@/server/authz";
+import { getCurrentActor, requireGlobalAdmin } from "@/server/authz";
 
 /** Context available to all tRPC procedures */
 export interface TRPCContext {
@@ -46,10 +46,11 @@ export const createCallerFactory = t.createCallerFactory;
 export const publicProcedure = t.procedure;
 
 /** Protected (authenticated) procedure — requires valid session */
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
+export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
   if (!ctx.session?.user) {
     throw new TRPCError({ code: "UNAUTHORIZED" });
   }
+  await getCurrentActor(ctx.prisma, ctx.session.user.id);
   return next({
     ctx: {
       session: { ...ctx.session, user: ctx.session.user },

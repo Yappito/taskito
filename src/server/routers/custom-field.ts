@@ -47,7 +47,7 @@ export const customFieldRouter = createTRPCRouter({
         }
 
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, existingField.projectId, {
-          minimumRole: "owner",
+          permission: "custom_field_manage",
         });
 
         if (existingField.projectId !== input.projectId) {
@@ -55,7 +55,7 @@ export const customFieldRouter = createTRPCRouter({
         }
       } else {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-          minimumRole: "owner",
+          permission: "custom_field_manage",
         });
       }
 
@@ -107,7 +107,7 @@ export const customFieldRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "custom_field_manage",
       });
 
       const fields = await ctx.prisma.customField.findMany({
@@ -143,7 +143,7 @@ export const customFieldRouter = createTRPCRouter({
       });
 
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, field.projectId, {
-        minimumRole: "owner",
+        permission: "custom_field_manage",
       });
 
       await ctx.prisma.customField.delete({ where: { id: input.id } });

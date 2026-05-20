@@ -78,16 +78,19 @@ export async function notifyTaskWatchers(input: {
 }
 
 export async function resolveMentionedUserIds(projectId: string, content: string) {
-  const people = await prisma.projectMember.findMany({
-    where: { projectId },
+  const people = await prisma.user.findMany({
+    where: {
+      disabledAt: null,
+      OR: [
+        { role: "admin" },
+        { projectMemberships: { some: { projectId } } },
+        { groupMemberships: { some: { group: { projectMemberships: { some: { projectId } } } } } },
+      ],
+    },
     select: {
-      user: {
-        select: {
-          id: true,
-          email: true,
-          name: true,
-        },
-      },
+      id: true,
+      email: true,
+      name: true,
     },
   });
 
@@ -96,7 +99,6 @@ export async function resolveMentionedUserIds(projectId: string, content: string
   );
 
   return people
-    .map((membership) => membership.user)
     .filter((user) => {
       const emailToken = user.email.split("@")[0]?.toLowerCase();
       const nameToken = user.name?.trim().toLowerCase().replace(/\s+/g, "-");

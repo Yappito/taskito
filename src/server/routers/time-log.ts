@@ -13,7 +13,7 @@ export const timeLogRouter = createTRPCRouter({
   listForTask: protectedProcedure
     .input(z.object({ taskId: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "time_log" });
       return ctx.prisma.timeLog.findMany({
         where: { taskId: input.taskId },
         include: { user: { select: { id: true, name: true, email: true, image: true } } },
@@ -25,7 +25,7 @@ export const timeLogRouter = createTRPCRouter({
   summary: protectedProcedure
     .input(z.object({ projectId: z.string().cuid(), taskId: z.string().cuid().optional() }))
     .query(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "time_log" });
       const where = { task: { projectId: input.projectId }, ...(input.taskId ? { taskId: input.taskId } : {}) };
       const [total, mine, running] = await Promise.all([
         ctx.prisma.timeLog.aggregate({ where, _sum: { duration: true } }),
@@ -46,7 +46,7 @@ export const timeLogRouter = createTRPCRouter({
   startTimer: protectedProcedure
     .input(z.object({ taskId: z.string().cuid(), description: z.string().trim().max(500).optional() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "time_log" });
       const existing = await ctx.prisma.timeLog.findFirst({ where: { userId: ctx.session.user.id, endedAt: null } });
       if (existing) {
         throw new Error("Stop your running timer before starting a new one");
@@ -66,7 +66,7 @@ export const timeLogRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       const entry = await ctx.prisma.timeLog.findUniqueOrThrow({ where: { id: input.id }, include: { task: { select: { projectId: true } } } });
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, entry.task.projectId);
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, entry.task.projectId, { permission: "time_log" });
       if (entry.userId !== ctx.session.user.id) {
         throw new Error("You can only stop your own timer");
       }
@@ -87,7 +87,7 @@ export const timeLogRouter = createTRPCRouter({
       description: z.string().trim().max(500).optional(),
     }).refine((value) => value.duration !== undefined || value.endedAt !== undefined, { message: "Manual time logs require a duration or end time" }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "time_log" });
       const endedAt = input.endedAt;
       const duration = input.duration ?? (endedAt ? durationFromDates(input.startedAt, endedAt) : 0);
       if (duration <= 0 || duration > MAX_LOG_SECONDS) {

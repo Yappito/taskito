@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { toStoredProfileImageValue } from "@/lib/user-image";
+import { getCurrentActor } from "@/server/authz";
 import { readStoredProfileImage } from "@/server/services/profile-images";
 
 export async function GET(
@@ -12,6 +13,11 @@ export async function GET(
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  try {
+    await getCurrentActor(prisma, session.user.id);
+  } catch {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const { imageKey } = await context.params;

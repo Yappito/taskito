@@ -16,7 +16,7 @@ export async function createTaskComment(
     attachments?: StoredCommentAttachmentInput[];
   }
 ) {
-  const task = await requireTaskAccess(prisma, input.authorId, input.taskId);
+  const task = await requireTaskAccess(prisma, input.authorId, input.taskId, { permission: "task_comment" });
   const attachments = input.attachments ?? [];
   const finalContent = normalizeCommentContent(input.content);
 
@@ -103,7 +103,7 @@ export async function updateTaskComment(
     content: string;
   }
 ) {
-  const task = await requireTaskAccess(prisma, input.actorId, input.taskId);
+  const task = await requireTaskAccess(prisma, input.actorId, input.taskId, { permission: "task_comment" });
   const existingComment = await prisma.comment.findUnique({
     where: { id: input.commentId },
     select: {

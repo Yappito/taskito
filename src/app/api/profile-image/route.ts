@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getStoredProfileImageKey, toStoredProfileImageValue } from "@/lib/user-image";
+import { getCurrentActor } from "@/server/authz";
 import {
   getProfileImageLimits,
   removeStoredProfileImage,
@@ -13,6 +14,11 @@ export async function POST(request: Request) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  try {
+    await getCurrentActor(prisma, session.user.id);
+  } catch {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const formData = await request.formData();
@@ -64,6 +70,11 @@ export async function DELETE() {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  try {
+    await getCurrentActor(prisma, session.user.id);
+  } catch {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const currentUser = await prisma.user.findUnique({

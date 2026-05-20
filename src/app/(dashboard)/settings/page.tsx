@@ -14,7 +14,7 @@ import { AiProviderList } from "@/components/ai/ai-provider-list";
 /** Settings page — project and user management */
 export default function SettingsPage() {
   const { data: currentUser, isLoading } = trpc.user.me.useQuery();
-  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users">("profile");
+  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users" | "groups">("profile");
 
   useEffect(() => {
     if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "ai") {
@@ -35,7 +35,7 @@ export default function SettingsPage() {
   }
 
   const tabs = currentUser.role === "admin"
-    ? (["profile", "ai", "projects", "users"] as const)
+    ? (["profile", "ai", "projects", "users", "groups"] as const)
     : (["profile", "ai"] as const);
 
   return (
@@ -76,6 +76,7 @@ export default function SettingsPage() {
       {tab === "ai" && <PersonalAiSettings currentUserRole={currentUser.role} />}
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}
       {tab === "users" && currentUser.role === "admin" && <UserManagement currentUserId={currentUser.id} />}
+      {tab === "groups" && currentUser.role === "admin" && <GroupManagement />}
     </div>
   );
 }
@@ -955,17 +956,20 @@ interface UserFormData {
   password: string;
   role: "admin" | "member";
   projectIds: string[];
+  groupIds: string[];
 }
 
-const emptyUser: UserFormData = { name: "", email: "", password: "", role: "member", projectIds: [] };
+const emptyUser: UserFormData = { name: "", email: "", password: "", role: "member", projectIds: [], groupIds: [] };
 
 function UserManagement({ currentUserId }: { currentUserId: string }) {
   const utils = trpc.useUtils();
   const { data: users, isLoading } = trpc.user.list.useQuery();
   const { data: projects } = trpc.project.list.useQuery();
+  const { data: groups } = trpc.group.list.useQuery();
   const createMutation = trpc.user.create.useMutation({
     onSuccess: () => {
       utils.user.list.invalidate();
+      utils.group.list.invalidate();
       setCreateOpen(false);
       setForm(emptyUser);
     },
@@ -973,29 +977,41 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
   const updateMutation = trpc.user.update.useMutation({
     onSuccess: () => {
       utils.user.list.invalidate();
+      utils.group.list.invalidate();
       setEditOpen(false);
       setEditingUser(null);
     },
   });
   const deleteMutation = trpc.user.delete.useMutation({
-    onSuccess: () => utils.user.list.invalidate(),
+    onSuccess: () => {
+      utils.user.list.invalidate();
+      utils.group.list.invalidate();
+    },
   });
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [form, setForm] = useState<UserFormData>(emptyUser);
+  const localGroups = groups?.filter((group) => group.source === "local") ?? [];
   const [editingUser, setEditingUser] = useState<{
     id: string;
     name: string | null;
     email: string | null;
     role: string;
+    authSource?: string;
+    disabledAt?: Date | string | null;
+    groupMemberships: Array<{
+      groupId: string;
+      role: string;
+      group: { id: string; name: string; slug: string; source: string };
+    }>;
     projectMemberships: Array<{
       projectId: string;
       role: string;
       project: { id: string; name: string; key: string; slug: string };
     }>;
   } | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", email: "", role: "member" as "admin" | "member", password: "", projectIds: [] as string[] });
+  const [editForm, setEditForm] = useState({ name: "", email: "", role: "member" as "admin" | "member", password: "", projectIds: [] as string[], groupIds: [] as string[], disabled: false });
 
   function toggleSelectedProject(currentIds: string[], projectId: string) {
     return currentIds.includes(projectId)
@@ -1008,6 +1024,12 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
     name: string | null;
     email: string | null;
     role: string;
+    disabledAt?: Date | string | null;
+    groupMemberships: Array<{
+      groupId: string;
+      role: string;
+      group: { id: string; name: string; slug: string; source: string };
+    }>;
     projectMemberships: Array<{
       projectId: string;
       role: string;
@@ -1021,6 +1043,8 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
       role: user.role as "admin" | "member",
       password: "",
       projectIds: user.projectMemberships.map((membership) => membership.projectId),
+      groupIds: user.groupMemberships.map((membership) => membership.groupId),
+      disabled: Boolean(user.disabledAt),
     });
     setEditOpen(true);
   }
@@ -1069,14 +1093,24 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
                   >
                     {user.role}
                   </span>
+                  {user.disabledAt && (
+                    <span className="rounded px-1.5 py-0.5 text-xs" style={{ backgroundColor: "var(--color-danger-muted, var(--color-bg-muted))", color: "var(--color-danger)" }}>
+                      disabled
+                    </span>
+                  )}
                 </div>
                 <p className="text-sm truncate" style={{ color: "var(--color-text-secondary)" }}>
-                  {user.email}
+                  {user.email} · {user.authSource ?? "local"}
                 </p>
                 <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
                   {user.projectMemberships.length > 0
                     ? user.projectMemberships.map((membership) => `${membership.project.key} ${membership.project.name}`).join(" • ")
                     : "No project access"}
+                </p>
+                <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {user.groupMemberships.length > 0
+                    ? user.groupMemberships.map((membership) => membership.group.name).join(" • ")
+                    : "No groups"}
                 </p>
               </div>
             </div>
@@ -1209,6 +1243,38 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
                 </p>
               )}
             </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+                Groups
+              </label>
+              {localGroups.length > 0 ? (
+                <div
+                  className="max-h-40 space-y-2 overflow-y-auto rounded-lg border p-3"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                >
+                  {localGroups.map((group) => (
+                    <label key={group.id} className="flex items-center gap-3 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.groupIds.includes(group.id)}
+                        onChange={() =>
+                          setForm((current) => ({
+                            ...current,
+                            groupIds: toggleSelectedProject(current.groupIds, group.id),
+                          }))
+                        }
+                        className="accent-[var(--color-accent)]"
+                      />
+                      <span style={{ color: "var(--color-text)" }}>{group.name}</span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                  Create a local group before assigning group membership.
+                </p>
+              )}
+            </div>
             {createMutation.error && (
               <p className="text-sm" style={{ color: "var(--color-danger)" }}>
                 {createMutation.error.message}
@@ -1243,6 +1309,8 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
                 role: editForm.role,
                 password: editForm.password || undefined,
                 projectIds: editForm.projectIds,
+                groupIds: editForm.groupIds,
+                disabled: editForm.disabled,
               });
             }}
             className="space-y-4"
@@ -1302,6 +1370,16 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
                 ))}
               </div>
             </div>
+            <label className="flex items-center gap-3 rounded-lg border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text)", backgroundColor: "var(--color-bg-overlay)" }}>
+              <input
+                type="checkbox"
+                checked={editForm.disabled}
+                disabled={editingUser?.id === currentUserId}
+                onChange={(event) => setEditForm((current) => ({ ...current, disabled: event.target.checked }))}
+                className="accent-[var(--color-accent)]"
+              />
+              Disable account
+            </label>
             <div>
               <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
                 Project Access
@@ -1334,6 +1412,38 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
                 </p>
               )}
             </div>
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+                Groups
+              </label>
+              {localGroups.length > 0 ? (
+                <div
+                  className="max-h-40 space-y-2 overflow-y-auto rounded-lg border p-3"
+                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}
+                >
+                  {localGroups.map((group) => (
+                    <label key={group.id} className="flex items-center gap-3 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editForm.groupIds.includes(group.id)}
+                        onChange={() =>
+                          setEditForm((current) => ({
+                            ...current,
+                            groupIds: toggleSelectedProject(current.groupIds, group.id),
+                          }))
+                        }
+                        className="accent-[var(--color-accent)]"
+                      />
+                      <span style={{ color: "var(--color-text)" }}>{group.name}</span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                  Create a local group before assigning group membership.
+                </p>
+              )}
+            </div>
             {updateMutation.error && (
               <p className="text-sm" style={{ color: "var(--color-danger)" }}>
                 {updateMutation.error.message}
@@ -1348,6 +1458,332 @@ function UserManagement({ currentUserId }: { currentUserId: string }) {
               </Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ------- Group Management -------
+
+type ProjectAccessRole = "viewer" | "member" | "manager" | "owner";
+
+interface GroupFormData {
+  name: string;
+  description: string;
+  memberIds: string[];
+  projectAccess: Array<{ projectId: string; role: ProjectAccessRole }>;
+}
+
+const projectRoleOptions = ["viewer", "member", "manager", "owner"] as const;
+const emptyGroup: GroupFormData = { name: "", description: "", memberIds: [], projectAccess: [] };
+
+function GroupManagement() {
+  const utils = trpc.useUtils();
+  const { data: groups, isLoading } = trpc.group.list.useQuery();
+  const { data: users } = trpc.user.list.useQuery();
+  const { data: projects } = trpc.project.list.useQuery();
+  const createMutation = trpc.group.create.useMutation({
+    onSuccess: () => {
+      utils.group.list.invalidate();
+      utils.user.list.invalidate();
+      setCreateOpen(false);
+      setForm(emptyGroup);
+    },
+  });
+  const updateMutation = trpc.group.update.useMutation({
+    onSuccess: () => {
+      utils.group.list.invalidate();
+      utils.user.list.invalidate();
+      setEditOpen(false);
+      setEditingGroup(null);
+    },
+  });
+  const deleteMutation = trpc.group.delete.useMutation({
+    onSuccess: () => {
+      utils.group.list.invalidate();
+      utils.user.list.invalidate();
+    },
+  });
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [form, setForm] = useState<GroupFormData>(emptyGroup);
+  const [editForm, setEditForm] = useState<GroupFormData>(emptyGroup);
+  const [editingGroup, setEditingGroup] = useState<{
+    id: string;
+    name: string;
+    description: string | null;
+    source: string;
+    isSystem: boolean;
+    members: Array<{ user: { id: string; name: string | null; email: string } }>;
+    projectMemberships: Array<{ projectId: string; role: string; project: { key: string; name: string } }>;
+  } | null>(null);
+
+  function toggleSelectedUser(currentIds: string[], userId: string) {
+    return currentIds.includes(userId)
+      ? currentIds.filter((id) => id !== userId)
+      : [...currentIds, userId];
+  }
+
+  function setProjectAccessRole(
+    access: Array<{ projectId: string; role: ProjectAccessRole }>,
+    projectId: string,
+    role: ProjectAccessRole | "none"
+  ) {
+    if (role === "none") {
+      return access.filter((entry) => entry.projectId !== projectId);
+    }
+    const existing = access.find((entry) => entry.projectId === projectId);
+    if (existing) {
+      return access.map((entry) => entry.projectId === projectId ? { ...entry, role } : entry);
+    }
+    return [...access, { projectId, role }];
+  }
+
+  function projectRoleFor(access: Array<{ projectId: string; role: ProjectAccessRole }>, projectId: string) {
+    return access.find((entry) => entry.projectId === projectId)?.role ?? "none";
+  }
+
+  function openEdit(group: NonNullable<typeof groups>[number]) {
+    setEditingGroup(group);
+    setEditForm({
+      name: group.name,
+      description: group.description ?? "",
+      memberIds: group.members.map((membership) => membership.user.id),
+      projectAccess: group.projectMemberships.map((membership) => ({
+        projectId: membership.projectId,
+        role: membership.role as ProjectAccessRole,
+      })),
+    });
+    setEditOpen(true);
+  }
+
+  function renderGroupForm(options: {
+    value: GroupFormData;
+    managedExternally?: boolean;
+    onChange: (value: GroupFormData) => void;
+    onSubmit: () => void;
+    submitLabel: string;
+    isPending: boolean;
+    error?: string | null;
+  }) {
+    const localUsers = users ?? [];
+    const projectList = projects ?? [];
+
+    return (
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          options.onSubmit();
+        }}
+      >
+        <div>
+          <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+            Name
+          </label>
+          <Input
+            value={options.value.name}
+            onChange={(event) => options.onChange({ ...options.value, name: event.target.value })}
+            disabled={options.managedExternally}
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+            Description
+          </label>
+          <Input
+            value={options.value.description}
+            onChange={(event) => options.onChange({ ...options.value, description: event.target.value })}
+            placeholder="Optional description"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+            Members
+          </label>
+          {options.managedExternally ? (
+            <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+              Membership is synced from the OIDC provider.
+            </p>
+          ) : localUsers.length > 0 ? (
+            <div className="max-h-44 space-y-2 overflow-y-auto rounded-lg border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+              {localUsers.map((user) => (
+                <label key={user.id} className="flex items-center gap-3 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={options.value.memberIds.includes(user.id)}
+                    onChange={() => options.onChange({ ...options.value, memberIds: toggleSelectedUser(options.value.memberIds, user.id) })}
+                    className="accent-[var(--color-accent)]"
+                  />
+                  <span style={{ color: "var(--color-text)" }}>{user.name ?? user.email}</span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>No users available.</p>
+          )}
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-2" style={{ color: "var(--color-text-secondary)" }}>
+            Project Roles
+          </label>
+          {projectList.length > 0 ? (
+            <div className="space-y-2 rounded-lg border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+              {projectList.map((project) => (
+                <div key={project.id} className="flex items-center justify-between gap-3 text-sm">
+                  <span style={{ color: "var(--color-text)" }}>{project.key} - {project.name}</span>
+                  <select
+                    value={projectRoleFor(options.value.projectAccess, project.id)}
+                    onChange={(event) => options.onChange({
+                      ...options.value,
+                      projectAccess: setProjectAccessRole(options.value.projectAccess, project.id, event.target.value as ProjectAccessRole | "none"),
+                    })}
+                    className="rounded-md border px-2 py-1 text-sm"
+                    style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
+                  >
+                    <option value="none">No access</option>
+                    {projectRoleOptions.map((role) => (
+                      <option key={role} value={role}>{role}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>Create a project before assigning group access.</p>
+          )}
+        </div>
+        {options.error && (
+          <p className="text-sm" style={{ color: "var(--color-danger)" }}>
+            {options.error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => {
+            setCreateOpen(false);
+            setEditOpen(false);
+          }}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={options.isPending}>
+            {options.isPending ? "Saving..." : options.submitLabel}
+          </Button>
+        </div>
+      </form>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="animate-pulse py-12 text-center" style={{ color: "var(--color-text-muted)" }}>
+        Loading groups...
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>
+            Groups
+          </h2>
+          <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            Group roles grant project permissions. OIDC groups are created automatically when users sign in.
+          </p>
+        </div>
+        <Button onClick={() => setCreateOpen(true)}>New Group</Button>
+      </div>
+
+      <div className="space-y-2">
+        {groups?.map((group) => (
+          <div key={group.id} className="rounded-lg border px-4 py-3" style={{ backgroundColor: "var(--color-surface)", borderColor: "var(--color-border)" }}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium" style={{ color: "var(--color-text)" }}>{group.name}</span>
+                  <span className="rounded px-1.5 py-0.5 text-xs" style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-muted)" }}>
+                    {group.source}
+                  </span>
+                </div>
+                {group.description && (
+                  <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>{group.description}</p>
+                )}
+                <p className="mt-2 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  {group.members.length} member{group.members.length === 1 ? "" : "s"}
+                  {group.projectMemberships.length > 0
+                    ? ` · ${group.projectMemberships.map((membership) => `${membership.project.key}:${membership.role}`).join(" · ")}`
+                    : " · no project roles"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => openEdit(group)}>Edit</Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={group.source !== "local" || group.isSystem}
+                  onClick={() => {
+                    if (confirm("Delete this group? Group project access will be removed.")) {
+                      deleteMutation.mutate({ id: group.id });
+                    }
+                  }}
+                >
+                  Delete
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {groups?.length === 0 && (
+          <div className="py-12 text-center text-sm" style={{ color: "var(--color-text-muted)" }}>
+            No groups yet.
+          </div>
+        )}
+      </div>
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create Group</DialogTitle>
+          </DialogHeader>
+          {renderGroupForm({
+            value: form,
+            onChange: setForm,
+            submitLabel: "Create",
+            isPending: createMutation.isPending,
+            error: createMutation.error?.message ?? null,
+            onSubmit: () => createMutation.mutate({
+              name: form.name,
+              description: form.description || null,
+              memberIds: form.memberIds,
+              projectAccess: form.projectAccess,
+            }),
+          })}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Group</DialogTitle>
+          </DialogHeader>
+          {editingGroup && renderGroupForm({
+            value: editForm,
+            managedExternally: editingGroup.source !== "local",
+            onChange: setEditForm,
+            submitLabel: "Save",
+            isPending: updateMutation.isPending,
+            error: updateMutation.error?.message ?? null,
+            onSubmit: () => updateMutation.mutate({
+              id: editingGroup.id,
+              ...(editingGroup.source === "local" ? { name: editForm.name, memberIds: editForm.memberIds } : {}),
+              description: editForm.description || null,
+              projectAccess: editForm.projectAccess,
+            }),
+          })}
         </DialogContent>
       </Dialog>
     </div>

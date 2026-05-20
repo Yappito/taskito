@@ -94,12 +94,12 @@ export const workflowRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
 
       if (input.id) {
         const existing = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.id, {
-          minimumRole: "owner",
+          permission: "workflow_manage",
         });
         if (existing.projectId !== input.projectId) {
           throw new Error("Status does not belong to the specified project");
@@ -168,7 +168,7 @@ export const workflowRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       const status = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.id, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
 
       await ctx.prisma.$transaction(async (tx) => {
@@ -190,13 +190,13 @@ export const workflowRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
       const fromStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.fromStatusId, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
       const toStatus = await requireWorkflowStatusAccess(ctx.prisma, ctx.session.user.id, input.toStatusId, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
 
       if (fromStatus.projectId !== input.projectId || toStatus.projectId !== input.projectId) {
@@ -211,7 +211,7 @@ export const workflowRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       await requireWorkflowTransitionAccess(ctx.prisma, ctx.session.user.id, input.id, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
       await ctx.prisma.workflowTransition.delete({ where: { id: input.id } });
       return { success: true };
@@ -227,7 +227,7 @@ export const workflowRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "workflow_manage",
       });
       const matchingStatuses = await ctx.prisma.workflowStatus.findMany({
         where: {

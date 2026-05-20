@@ -36,7 +36,7 @@ export const recurrenceRouter = createTRPCRouter({
       }
     }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "task_update" });
       return ctx.prisma.recurrenceRule.upsert({
         where: { taskId: input.taskId },
         create: {
@@ -62,7 +62,7 @@ export const recurrenceRouter = createTRPCRouter({
   remove: protectedProcedure
     .input(z.object({ taskId: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId, { permission: "task_update" });
       await ctx.prisma.recurrenceRule.deleteMany({ where: { taskId: input.taskId } });
       return { success: true };
     }),
@@ -70,7 +70,7 @@ export const recurrenceRouter = createTRPCRouter({
   processDue: protectedProcedure
     .input(z.object({ projectId: z.string().cuid(), limit: z.number().int().min(1).max(100).optional() }))
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { minimumRole: "owner" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
       return processDueRecurrences(ctx.prisma, { projectId: input.projectId, limit: input.limit });
     }),
 });

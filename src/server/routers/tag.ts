@@ -28,7 +28,7 @@ export const tagRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
-        minimumRole: "owner",
+        permission: "tag_manage",
       });
       return ctx.prisma.tag.create({ data: input });
     }),
@@ -45,7 +45,7 @@ export const tagRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
       await requireTagAccess(ctx.prisma, ctx.session.user.id, id, {
-        minimumRole: "owner",
+        permission: "tag_manage",
       });
       return ctx.prisma.tag.update({ where: { id }, data });
     }),
@@ -55,7 +55,7 @@ export const tagRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       await requireTagAccess(ctx.prisma, ctx.session.user.id, input.id, {
-        minimumRole: "owner",
+        permission: "tag_manage",
       });
       await ctx.prisma.tag.delete({ where: { id: input.id } });
       return { success: true };
@@ -72,10 +72,10 @@ export const tagRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const { sourceTagId, targetTagId } = input;
       const sourceTag = await requireTagAccess(ctx.prisma, ctx.session.user.id, sourceTagId, {
-        minimumRole: "owner",
+        permission: "tag_manage",
       });
       const targetTag = await requireTagAccess(ctx.prisma, ctx.session.user.id, targetTagId, {
-        minimumRole: "owner",
+        permission: "tag_manage",
       });
 
       if (sourceTag.projectId !== targetTag.projectId) {

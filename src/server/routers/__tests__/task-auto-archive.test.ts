@@ -6,6 +6,8 @@ const {
   requireTaskAccess,
   requireTaskLinkAccess,
   requireWorkflowStatusAccess,
+  canAccessProject,
+  getCurrentActor,
   autoTagTask,
   createTaskActivity,
   evaluateAutomationRules,
@@ -16,6 +18,8 @@ const {
   requireTaskAccess: vi.fn(),
   requireTaskLinkAccess: vi.fn(),
   requireWorkflowStatusAccess: vi.fn(),
+  canAccessProject: vi.fn(),
+  getCurrentActor: vi.fn(),
   autoTagTask: vi.fn(),
   createTaskActivity: vi.fn(),
   evaluateAutomationRules: vi.fn(),
@@ -28,6 +32,8 @@ vi.mock("@/server/authz", () => ({
   requireTaskAccess,
   requireTaskLinkAccess,
   requireWorkflowStatusAccess,
+  canAccessProject,
+  getCurrentActor,
 }));
 
 vi.mock("@/server/services/auto-tagger", () => ({
@@ -119,7 +125,9 @@ describe("task router auto-archive", () => {
     vi.clearAllMocks();
 
     requireProjectAccess.mockResolvedValue({ actor: { id: USER_ID, role: "owner" }, membershipRole: "owner" });
+    getCurrentActor.mockResolvedValue({ id: USER_ID, role: "admin" });
     requireTaskAccess.mockResolvedValue({ id: SOURCE_TASK_ID, projectId: PROJECT_ID, statusId: STATUS_ID });
+    canAccessProject.mockResolvedValue(true);
     requireWorkflowStatusAccess.mockResolvedValue({
       id: STATUS_ID,
       projectId: PROJECT_ID,

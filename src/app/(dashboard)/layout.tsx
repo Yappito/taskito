@@ -1,6 +1,8 @@
 import { auth, signOut } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { prisma } from "@/lib/prisma";
+import { getCurrentActor } from "@/server/authz";
 import { SearchModal } from "@/components/ui/search-modal";
 import { NotificationCenter } from "@/components/ui/notification-center";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -15,6 +17,11 @@ export default async function DashboardLayout({
 }) {
   const session = await auth();
   if (!session) redirect("/login");
+  try {
+    await getCurrentActor(prisma, session.user.id);
+  } catch {
+    redirect("/login");
+  }
   const userLabel = session.user?.name ?? session.user?.email ?? "User";
 
   return (

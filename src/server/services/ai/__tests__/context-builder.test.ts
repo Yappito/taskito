@@ -50,8 +50,8 @@ function createPrismaMock() {
     customField: {
       findMany: vi.fn().mockResolvedValue([]),
     },
-    projectMember: {
-      findMany: vi.fn().mockResolvedValue([{ user: { id: "user-1", name: "Pat", email: "pat@example.com", image: null } }]),
+    user: {
+      findMany: vi.fn().mockResolvedValue([{ id: "user-1", name: "Pat", email: "pat@example.com", image: null }]),
     },
     task: {
       findUnique: vi.fn().mockResolvedValue(detailedTask),

@@ -179,15 +179,23 @@ export async function buildAiConversationContext(
       orderBy: { order: "asc" },
       select: { id: true, name: true, type: true, required: true, options: true },
     }),
-    prisma.projectMember.findMany({
-      where: { projectId: input.projectId },
-      orderBy: [{ user: { name: "asc" } }, { user: { email: "asc" } }],
-      select: {
-        user: {
-          select: { id: true, name: true, email: true, image: true },
-        },
+    prisma.user.findMany({
+      where: {
+        disabledAt: null,
+        OR: [
+          { role: "admin" },
+          { projectMemberships: { some: { projectId: input.projectId } } },
+          { groupMemberships: { some: { group: { projectMemberships: { some: { projectId: input.projectId } } } } } },
+        ],
       },
-    }).then((memberships) => memberships.map((membership) => membership.user)),
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        image: true,
+      },
+    }),
     input.taskId
       ? prisma.task.findUnique({
           where: { id: input.taskId },

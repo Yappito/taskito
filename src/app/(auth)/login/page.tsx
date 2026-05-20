@@ -1,4 +1,5 @@
 import { LoginForm } from "@/components/auth/login-form";
+import { getOidcLoginProviders } from "@/lib/auth";
 import { getSafeRedirectPath } from "@/lib/safe-redirect";
 
 /** Login page with stable server-rendered callback handling. */
@@ -9,5 +10,5 @@ export default async function LoginPage({
 }) {
   const resolvedSearchParams = await searchParams;
 
-  return <LoginForm callbackUrl={getSafeRedirectPath(resolvedSearchParams.callbackUrl)} />;
+  return <LoginForm callbackUrl={getSafeRedirectPath(resolvedSearchParams.callbackUrl)} oidcProviders={getOidcLoginProviders()} />;
 }
