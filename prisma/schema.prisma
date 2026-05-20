@@ -41,6 +41,10 @@ model User {
   participantTasks TaskParticipant[]
   sprintAssignments SprintMember[]
   projectMemberships ProjectMember[]
+  ownedDashboards Dashboard[] @relation("OwnedDashboards")
+  dashboardShares DashboardUserShare[]
+  ownedSavedFilters SavedFilter[] @relation("OwnedSavedFilters")
+  savedFilterShares SavedFilterUserShare[]
   ownedAiProviders AiProviderConnection[] @relation("OwnedAiProviders")
   aiConversations AiConversation[] @relation("CreatedAiConversations")
   requestedAiActionExecutions AiActionExecution[] @relation("RequestedAiActions")
@@ -156,6 +160,8 @@ model Project {
   aiPolicy    AiProjectPolicy?
   aiConversations AiConversation[]
   aiActionExecutions AiActionExecution[]
+  dashboards  Dashboard[]
+  savedFilters SavedFilter[]
   sprints     Sprint[]
   automationRules AutomationRule[]
   automationRuns AutomationRun[]
@@ -720,6 +726,120 @@ model CustomFieldValue {
   customField CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
 
   @@unique([taskId, customFieldId])
+}
+
+// ─── Custom Dashboards ───────────────────────────────────
+
+enum DashboardVisibility {
+  public
+  restricted
+}
+
+enum DashboardWidgetType {
+  metric
+  pie
+  bar
+  table
+}
+
+enum DashboardWidgetGroupBy {
+  status
+  priority
+  assignee
+  tag
+  sprint
+  dueMonth
+}
+
+enum DashboardMetric {
+  count
+  overdue
+  completed
+  unassigned
+}
+
+model SavedFilter {
+  id          String              @id @default(cuid())
+  projectId   String
+  ownerId     String
+  name        String
+  description String?
+  query       String              @db.Text
+  visibility  DashboardVisibility @default(public)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner   User    @relation("OwnedSavedFilters", fields: [ownerId], references: [id], onDelete: Cascade)
+  shares  SavedFilterUserShare[]
+  widgets DashboardWidget[]
+
+  @@index([projectId, visibility])
+  @@index([ownerId, updatedAt])
+}
+
+model SavedFilterUserShare {
+  filterId  String
+  userId    String
+  createdAt DateTime @default(now())
+
+  filter SavedFilter @relation(fields: [filterId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([filterId, userId])
+  @@index([userId])
+}
+
+model Dashboard {
+  id          String              @id @default(cuid())
+  projectId   String
+  ownerId     String
+  name        String
+  description String?
+  visibility  DashboardVisibility @default(public)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner   User    @relation("OwnedDashboards", fields: [ownerId], references: [id], onDelete: Cascade)
+  shares  DashboardUserShare[]
+  widgets DashboardWidget[]
+
+  @@index([projectId, visibility])
+  @@index([ownerId, updatedAt])
+}
+
+model DashboardUserShare {
+  dashboardId String
+  userId      String
+  createdAt   DateTime @default(now())
+
+  dashboard Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([dashboardId, userId])
+  @@index([userId])
+}
+
+model DashboardWidget {
+  id            String                  @id @default(cuid())
+  dashboardId   String
+  savedFilterId String?
+  title         String
+  type          DashboardWidgetType
+  groupBy       DashboardWidgetGroupBy?
+  metric        DashboardMetric         @default(count)
+  query         String?                 @db.Text
+  order         Int                     @default(0)
+  width         Int                     @default(1)
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  dashboard   Dashboard    @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+  savedFilter SavedFilter? @relation(fields: [savedFilterId], references: [id], onDelete: SetNull)
+
+  @@index([dashboardId, order])
+  @@index([savedFilterId])
 }
 
 enum AiProviderScope {

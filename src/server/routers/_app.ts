@@ -11,6 +11,7 @@ import { customFieldRouter } from "./custom-field";
 import { notificationRouter } from "./notification";
 import { aiRouter } from "./ai";
 import { analyticsRouter } from "./analytics";
+import { dashboardRouter } from "./dashboard";
 import { sprintRouter } from "./sprint";
 import { timeLogRouter } from "./time-log";
 import { automationRouter } from "./automation";
@@ -31,6 +32,7 @@ export const appRouter = createTRPCRouter({
   oidc: oidcRouter,
   ai: aiRouter,
   analytics: analyticsRouter,
+  dashboard: dashboardRouter,
   sprint: sprintRouter,
   timeLog: timeLogRouter,
   automation: automationRouter,
