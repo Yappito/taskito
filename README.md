@@ -196,12 +196,18 @@ docker compose logs -f app
 
 ## Persistence
 
-The compose stack persists two things:
+The compose stack persists two things by default:
 
 - PostgreSQL data in the `pgdata` volume
-- Comment attachments in the `uploads` volume mounted at `/app/uploads`
+- Comment attachments and profile images in the `uploads` volume mounted at `/app/uploads`
 
 That means uploaded files survive container rebuilds and restarts as long as the Docker volume remains intact.
+
+### Optional S3-compatible storage
+
+Uploads can also be stored in S3-compatible object storage instead of the local Docker volume. Set `STORAGE_PROVIDER=s3` and the `STORAGE_S3_*` variables in compose, or configure the same values as an admin in `Settings -> Storage`. UI-saved storage settings override environment variables; clear the UI override to return to compose/env settings.
+
+Task comment attachments and profile images are still served through authenticated Taskito routes. Each stored file records its storage backend, bucket, and object key in the database, so restoring the database and reconnecting the same S3 bucket restores access to S3-backed files.
 
 ## Operations
 
@@ -246,14 +252,24 @@ Useful commands from the repository root:
 | `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt stored AI provider secrets |
 | `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated host allowlist for AI provider endpoints |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
+| `STORAGE_PROVIDER` | No | `local` or `s3`; defaults to `local` |
+| `STORAGE_S3_BUCKET` | Required for S3 | Bucket used for attachments and profile images |
+| `STORAGE_S3_REGION` | No | S3 region; defaults to `us-east-1` |
+| `STORAGE_S3_ENDPOINT` | No | Optional S3-compatible endpoint for MinIO, R2, etc. |
+| `STORAGE_S3_ACCESS_KEY_ID` | No | S3 access key ID; leave unset to use default AWS credentials/IAM role |
+| `STORAGE_S3_SECRET_ACCESS_KEY` | No | S3 secret access key; required when `STORAGE_S3_ACCESS_KEY_ID` is set |
+| `STORAGE_S3_SESSION_TOKEN` | No | Optional temporary credentials session token |
+| `STORAGE_S3_FORCE_PATH_STYLE` | No | Set `true` for S3-compatible services that need path-style URLs |
+| `STORAGE_S3_PREFIX` | No | Optional object key prefix, e.g. `taskito/prod` |
 
 ## Notes
 
 - Attachment uploads are tied to task comments, not stored as standalone task files.
 - Attachment downloads go through authenticated project access checks.
+- Profile images also go through authenticated routes and use the same local/S3 storage backend as attachments.
 - Access is RBAC-based: global admins manage users and groups, project roles grant permissions, and OIDC group claims can populate managed groups automatically.
 - OIDC providers can be managed in `Settings -> Auth`. Client secrets entered there are encrypted at rest and write-only: they are never returned by the settings API after saving. Environment-configured OIDC providers remain supported and appear read-only in that screen.
-- The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume.
+- The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume for local storage.
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 - The documented `docker compose up -d --pull always` command refreshes the published app image before startup.

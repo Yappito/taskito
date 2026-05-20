@@ -24,6 +24,9 @@ export async function GET(
       originalName: true,
       mimeType: true,
       storagePath: true,
+      storageProvider: true,
+      storageBucket: true,
+      storageKey: true,
       comment: {
         select: {
           task: {
@@ -42,7 +45,7 @@ export async function GET(
 
   await requireProjectAccess(prisma, session.user.id, attachment.comment.task.projectId);
 
-  const file = await readStoredCommentAttachment(attachment.storagePath).catch(() => null);
+  const file = await readStoredCommentAttachment(attachment).catch(() => null);
   if (!file) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }

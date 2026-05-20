@@ -15,6 +15,7 @@ import { sprintRouter } from "./sprint";
 import { timeLogRouter } from "./time-log";
 import { automationRouter } from "./automation";
 import { recurrenceRouter } from "./recurrence";
+import { storageRouter } from "./storage";
 
 /** Root tRPC router — all sub-routers mounted here */
 export const appRouter = createTRPCRouter({
@@ -34,6 +35,7 @@ export const appRouter = createTRPCRouter({
   timeLog: timeLogRouter,
   automation: automationRouter,
   recurrence: recurrenceRouter,
+  storage: storageRouter,
 });
 
 /** Type export for the client */

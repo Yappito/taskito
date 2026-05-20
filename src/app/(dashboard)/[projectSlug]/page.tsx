@@ -148,12 +148,11 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
           borderColor: "var(--color-border)",
         }}
       >
-        <div className="flex justify-end">
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <div
-              className="flex flex-wrap rounded-2xl p-1"
-              style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
-            >
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div
+            className="flex w-fit flex-wrap rounded-2xl p-1"
+            style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
+          >
               {projectViews.map((v) => (
                 <button
                   key={v}
@@ -175,7 +174,8 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
                   {v === "gantt" ? "Gantt" : v}
                 </button>
               ))}
-            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
             <QuickAdd
               projectId={project.id}
               statuses={statuses}

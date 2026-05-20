@@ -27,6 +27,9 @@ export async function GET(
     },
     select: {
       image: true,
+      profileImageStorageProvider: true,
+      profileImageStorageBucket: true,
+      profileImageStorageKey: true,
     },
   });
 
@@ -34,7 +37,7 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const file = await readStoredProfileImage(imageKey).catch(() => null);
+  const file = await readStoredProfileImage(imageKey, user).catch(() => null);
   if (!file) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getStoredProfileImageKey, toStoredProfileImageValue } from "@/lib/user-image";
+import { toStoredProfileImageValue } from "@/lib/user-image";
 import { getCurrentActor } from "@/server/authz";
 import {
   getProfileImageLimits,
@@ -32,10 +32,11 @@ export async function POST(request: Request) {
     where: { id: session.user.id },
     select: {
       image: true,
+      profileImageStorageProvider: true,
+      profileImageStorageBucket: true,
+      profileImageStorageKey: true,
     },
   });
-
-  const previousImageKey = getStoredProfileImageKey(currentUser?.image);
 
   try {
     const stored = await storeProfileImage(file);
@@ -44,6 +45,9 @@ export async function POST(request: Request) {
       where: { id: session.user.id },
       data: {
         image: toStoredProfileImageValue(stored.imageKey),
+        profileImageStorageProvider: stored.storageProvider,
+        profileImageStorageBucket: stored.storageBucket,
+        profileImageStorageKey: stored.storageKey,
       },
       select: {
         id: true,
@@ -55,7 +59,7 @@ export async function POST(request: Request) {
       },
     });
 
-    await removeStoredProfileImage(previousImageKey).catch(() => undefined);
+    await removeStoredProfileImage(currentUser?.image, currentUser).catch(() => undefined);
 
     return NextResponse.json({ user: updatedUser });
   } catch (error) {
@@ -81,18 +85,22 @@ export async function DELETE() {
     where: { id: session.user.id },
     select: {
       image: true,
+      profileImageStorageProvider: true,
+      profileImageStorageBucket: true,
+      profileImageStorageKey: true,
     },
   });
-
-  const currentImageKey = getStoredProfileImageKey(currentUser?.image);
 
   await prisma.user.update({
     where: { id: session.user.id },
     data: {
       image: null,
+      profileImageStorageProvider: "local",
+      profileImageStorageBucket: null,
+      profileImageStorageKey: null,
     },
   });
-  await removeStoredProfileImage(currentImageKey).catch(() => undefined);
+  await removeStoredProfileImage(currentUser?.image, currentUser).catch(() => undefined);
 
   return NextResponse.json({ success: true, limits: getProfileImageLimits() });
 }

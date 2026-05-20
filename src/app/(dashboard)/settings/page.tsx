@@ -14,7 +14,7 @@ import { AiProviderList } from "@/components/ai/ai-provider-list";
 /** Settings page — project and user management */
 export default function SettingsPage() {
   const { data: currentUser, isLoading } = trpc.user.me.useQuery();
-  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users" | "groups" | "auth">("profile");
+  const [tab, setTab] = useState<"profile" | "ai" | "storage" | "projects" | "users" | "groups" | "auth">("profile");
 
   useEffect(() => {
     if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "ai") {
@@ -35,7 +35,7 @@ export default function SettingsPage() {
   }
 
   const tabs = currentUser.role === "admin"
-    ? (["profile", "ai", "projects", "users", "groups", "auth"] as const)
+    ? (["profile", "ai", "storage", "projects", "users", "groups", "auth"] as const)
     : (["profile", "ai"] as const);
 
   return (
@@ -74,6 +74,7 @@ export default function SettingsPage() {
 
       {tab === "profile" && <ProfileSettings currentUser={currentUser} />}
       {tab === "ai" && <PersonalAiSettings currentUserRole={currentUser.role} />}
+      {tab === "storage" && currentUser.role === "admin" && <StorageSettings />}
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}
       {tab === "users" && currentUser.role === "admin" && <UserManagement currentUserId={currentUser.id} />}
       {tab === "groups" && currentUser.role === "admin" && <GroupManagement />}
@@ -668,6 +669,232 @@ function PersonalAiSettings({ currentUserRole }: { currentUserRole: string }) {
           </Dialog>
         </>
       )}
+    </div>
+  );
+}
+
+// ------- Storage Settings -------
+
+type StorageProvider = "local" | "s3";
+type StorageConfigSummary = {
+  provider: StorageProvider;
+  source: "default" | "environment" | "database";
+  s3Bucket: string | null;
+  s3Region: string | null;
+  s3Endpoint: string | null;
+  s3AccessKeyId: string | null;
+  s3ForcePathStyle: boolean;
+  s3Prefix: string | null;
+  hasS3SecretAccessKey: boolean;
+  hasS3SessionToken: boolean;
+};
+
+interface StorageSettingsFormData {
+  provider: StorageProvider;
+  s3Bucket: string;
+  s3Region: string;
+  s3Endpoint: string;
+  s3AccessKeyId: string;
+  s3SecretAccessKey: string;
+  s3SessionToken: string;
+  s3ForcePathStyle: boolean;
+  s3Prefix: string;
+  clearS3SessionToken: boolean;
+}
+
+const emptyStorageSettingsForm: StorageSettingsFormData = {
+  provider: "local",
+  s3Bucket: "",
+  s3Region: "us-east-1",
+  s3Endpoint: "",
+  s3AccessKeyId: "",
+  s3SecretAccessKey: "",
+  s3SessionToken: "",
+  s3ForcePathStyle: false,
+  s3Prefix: "",
+  clearS3SessionToken: false,
+};
+
+function storageConfigToForm(config: StorageConfigSummary | null): StorageSettingsFormData {
+  if (!config) return emptyStorageSettingsForm;
+
+  return {
+    provider: config.provider,
+    s3Bucket: config.s3Bucket ?? "",
+    s3Region: config.s3Region ?? "us-east-1",
+    s3Endpoint: config.s3Endpoint ?? "",
+    s3AccessKeyId: config.s3AccessKeyId ?? "",
+    s3SecretAccessKey: "",
+    s3SessionToken: "",
+    s3ForcePathStyle: config.s3ForcePathStyle,
+    s3Prefix: config.s3Prefix ?? "",
+    clearS3SessionToken: false,
+  };
+}
+
+function describeStorageConfig(config: StorageConfigSummary | null) {
+  if (!config) return "No environment storage override configured.";
+  if (config.provider === "local") return `Local uploads (${config.source})`;
+  return `S3 bucket ${config.s3Bucket}${config.s3Prefix ? ` / ${config.s3Prefix}` : ""} (${config.source})`;
+}
+
+function StorageSettings() {
+  const utils = trpc.useUtils();
+  const { data, isLoading } = trpc.storage.get.useQuery();
+  const [form, setForm] = useState<StorageSettingsFormData>(emptyStorageSettingsForm);
+  const activeFormSource = data?.database ?? data?.effective ?? null;
+
+  useEffect(() => {
+    setForm(storageConfigToForm(activeFormSource));
+  }, [activeFormSource]);
+
+  const saveMutation = trpc.storage.save.useMutation({
+    onSuccess: async () => {
+      await utils.storage.get.invalidate();
+      setForm((current) => ({ ...current, s3SecretAccessKey: "", s3SessionToken: "", clearS3SessionToken: false }));
+    },
+  });
+
+  const clearMutation = trpc.storage.clearOverride.useMutation({
+    onSuccess: async () => {
+      await utils.storage.get.invalidate();
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="animate-pulse py-12 text-center" style={{ color: "var(--color-text-muted)" }}>
+        Loading storage settings...
+      </div>
+    );
+  }
+
+  const effective = data?.effective ?? null;
+  const database = data?.database ?? null;
+  const environment = data?.environment ?? null;
+  const hasRetainedSecret = database?.hasS3SecretAccessKey || (!database && effective?.hasS3SecretAccessKey);
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+          File storage
+        </p>
+        <h2 className="mt-2 text-xl font-semibold" style={{ color: "var(--color-text)" }}>
+          Attachments and Images
+        </h2>
+        <p className="mt-2 text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+          Store uploads locally or in an S3-compatible bucket. Downloads still pass through authenticated Taskito routes.
+        </p>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+          <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--color-text-muted)" }}>Active</div>
+          <div className="mt-2 font-medium" style={{ color: "var(--color-text)" }}>{describeStorageConfig(effective)}</div>
+        </div>
+        <div className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+          <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--color-text-muted)" }}>UI Override</div>
+          <div className="mt-2 font-medium" style={{ color: "var(--color-text)" }}>{database ? describeStorageConfig(database) : "None"}</div>
+        </div>
+        <div className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+          <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--color-text-muted)" }}>Environment</div>
+          <div className="mt-2 font-medium" style={{ color: "var(--color-text)" }}>{describeStorageConfig(environment)}</div>
+        </div>
+      </section>
+
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <form
+          className="space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveMutation.mutate(form);
+          }}
+        >
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Storage Backend
+            </label>
+            <select
+              value={form.provider}
+              onChange={(event) => setForm((current) => ({ ...current, provider: event.target.value as StorageProvider }))}
+              className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+              style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}
+            >
+              <option value="local">Local uploads volume</option>
+              <option value="s3">S3 bucket</option>
+            </select>
+          </div>
+
+          {form.provider === "s3" && (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Bucket</label>
+                <Input value={form.s3Bucket} onChange={(event) => setForm((current) => ({ ...current, s3Bucket: event.target.value }))} required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Region</label>
+                <Input value={form.s3Region} onChange={(event) => setForm((current) => ({ ...current, s3Region: event.target.value }))} placeholder="us-east-1" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Endpoint</label>
+                <Input value={form.s3Endpoint} onChange={(event) => setForm((current) => ({ ...current, s3Endpoint: event.target.value }))} placeholder="https://s3.amazonaws.com or MinIO URL" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Object Key Prefix</label>
+                <Input value={form.s3Prefix} onChange={(event) => setForm((current) => ({ ...current, s3Prefix: event.target.value }))} placeholder="taskito/prod" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Access Key ID</label>
+                <Input value={form.s3AccessKeyId} onChange={(event) => setForm((current) => ({ ...current, s3AccessKeyId: event.target.value }))} placeholder="Optional when using IAM role/default credentials" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Secret Access Key</label>
+                <Input type="password" value={form.s3SecretAccessKey} onChange={(event) => setForm((current) => ({ ...current, s3SecretAccessKey: event.target.value }))} placeholder={hasRetainedSecret ? "Leave blank to keep saved secret" : "Write-only secret"} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>Session Token</label>
+                <Input type="password" value={form.s3SessionToken} onChange={(event) => setForm((current) => ({ ...current, s3SessionToken: event.target.value }))} placeholder={database?.hasS3SessionToken ? "Leave blank to keep saved token" : "Optional write-only token"} />
+              </div>
+              <label className="flex items-center gap-3 rounded-lg border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text)", backgroundColor: "var(--color-bg-overlay)" }}>
+                <input
+                  type="checkbox"
+                  checked={form.s3ForcePathStyle}
+                  onChange={(event) => setForm((current) => ({ ...current, s3ForcePathStyle: event.target.checked }))}
+                  className="accent-[var(--color-accent)]"
+                />
+                Force path-style URLs for S3-compatible services
+              </label>
+              {database?.hasS3SessionToken && (
+                <label className="flex items-center gap-3 rounded-lg border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text)", backgroundColor: "var(--color-bg-overlay)" }}>
+                  <input
+                    type="checkbox"
+                    checked={form.clearS3SessionToken}
+                    onChange={(event) => setForm((current) => ({ ...current, clearS3SessionToken: event.target.checked }))}
+                    className="accent-[var(--color-accent)]"
+                  />
+                  Clear saved session token
+                </label>
+              )}
+            </div>
+          )}
+
+          {saveMutation.error && <p className="text-sm" style={{ color: "var(--color-danger)" }}>{saveMutation.error.message}</p>}
+          {clearMutation.error && <p className="text-sm" style={{ color: "var(--color-danger)" }}>{clearMutation.error.message}</p>}
+          {saveMutation.isSuccess && <p className="text-sm" style={{ color: "var(--color-accent)" }}>Storage settings saved.</p>}
+
+          <div className="flex flex-wrap justify-end gap-2">
+            {database && (
+              <Button type="button" variant="outline" disabled={clearMutation.isPending} onClick={() => clearMutation.mutate()}>
+                {clearMutation.isPending ? "Clearing..." : "Clear UI Override"}
+              </Button>
+            )}
+            <Button type="submit" disabled={saveMutation.isPending}>
+              {saveMutation.isPending ? "Saving..." : "Save Storage Settings"}
+            </Button>
+          </div>
+        </form>
+      </section>
     </div>
   );
 }

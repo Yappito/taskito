@@ -41,6 +41,9 @@ export async function createTaskComment(
                 mimeType: attachment.mimeType,
                 sizeBytes: attachment.sizeBytes,
                 storagePath: attachment.storagePath,
+                storageProvider: attachment.storageProvider,
+                storageBucket: attachment.storageBucket,
+                storageKey: attachment.storageKey,
               })),
             },
           }

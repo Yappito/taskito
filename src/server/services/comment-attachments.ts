@@ -1,8 +1,7 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { readStoredFile, removeStoredFile, storeFile, type StoredFileLocation } from "./file-storage";
 
-const COMMENT_UPLOAD_DIR = path.join(process.cwd(), process.env.UPLOAD_DIR ?? "uploads", "comment-attachments");
 const MAX_COMMENT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_COMMENT_ATTACHMENTS = 5;
 const DOWNLOAD_MIME_TYPE = "application/octet-stream";
@@ -21,6 +20,9 @@ export interface StoredCommentAttachmentInput {
   mimeType: string;
   sizeBytes: number;
   storagePath: string;
+  storageProvider: "local" | "s3";
+  storageBucket: string | null;
+  storageKey: string;
 }
 
 function sanitizeFilename(value: string) {
@@ -111,30 +113,34 @@ export async function storeCommentAttachment(file: File): Promise<StoredCommentA
     throw new Error(`Files must be ${Math.floor(MAX_COMMENT_ATTACHMENT_BYTES / (1024 * 1024))}MB or smaller`);
   }
 
-  await mkdir(COMMENT_UPLOAD_DIR, { recursive: true });
-
   const safeOriginalName = sanitizeFilename(file.name);
   const buffer = Buffer.from(await file.arrayBuffer());
   const inlineImageType = detectInlineImageType(buffer);
   const extension = inlineImageType ? `.${INLINE_IMAGE_TYPES[inlineImageType]}` : path.extname(safeOriginalName).slice(0, 16);
   const storageFilename = `${randomUUID()}${extension}`;
-  const storagePath = path.join(COMMENT_UPLOAD_DIR, storageFilename);
-  await writeFile(storagePath, buffer);
+  const storedFile = await storeFile("comment-attachments", storageFilename, buffer, inlineImageType ?? DOWNLOAD_MIME_TYPE);
 
   return {
     originalName: safeOriginalName,
     mimeType: inlineImageType ?? DOWNLOAD_MIME_TYPE,
     sizeBytes: file.size,
-    storagePath,
+    storagePath: storedFile.storagePath,
+    storageProvider: storedFile.storageProvider,
+    storageBucket: storedFile.storageBucket,
+    storageKey: storedFile.storageKey,
   };
 }
 
-export async function removeStoredCommentAttachments(attachments: StoredCommentAttachmentInput[]) {
+export async function removeStoredCommentAttachments(attachments: StoredFileLocation[]) {
   await Promise.all(
-    attachments.map((attachment) => rm(attachment.storagePath, { force: true }))
+    attachments.map((attachment) => removeStoredFile(attachment))
   );
 }
 
-export async function readStoredCommentAttachment(storagePath: string) {
-  return readFile(storagePath);
+export async function readStoredCommentAttachment(storagePathOrLocation: string | StoredFileLocation) {
+  return readStoredFile(
+    typeof storagePathOrLocation === "string"
+      ? { storagePath: storagePathOrLocation }
+      : storagePathOrLocation
+  );
 }

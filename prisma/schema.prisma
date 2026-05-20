@@ -18,6 +18,9 @@ model User {
   email         String    @unique
   emailVerified DateTime?
   image         String?
+  profileImageStorageProvider StorageProvider @default(local)
+  profileImageStorageBucket   String?
+  profileImageStorageKey      String?
   password      String?
   role          String    @default("member")
   authSource    String    @default("local")
@@ -106,6 +109,26 @@ model OidcProviderConnection {
   updatedAt                  DateTime @updatedAt
 
   @@index([isEnabled])
+}
+
+enum StorageProvider {
+  local
+  s3
+}
+
+model StorageSettings {
+  id                         String          @id
+  provider                   StorageProvider @default(local)
+  s3Bucket                   String?
+  s3Region                   String?
+  s3Endpoint                 String?
+  s3AccessKeyId              String?
+  encryptedS3SecretAccessKey String?
+  encryptedS3SessionToken    String?
+  s3ForcePathStyle           Boolean         @default(false)
+  s3Prefix                   String?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
 }
 
 // ─── Project ─────────────────────────────────────────────
@@ -651,11 +674,15 @@ model CommentAttachment {
   mimeType     String
   sizeBytes    Int
   storagePath  String
+  storageProvider StorageProvider @default(local)
+  storageBucket   String?
+  storageKey      String?
   createdAt    DateTime @default(now())
 
   comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
   @@index([commentId, createdAt])
+  @@index([storageProvider])
 }
 
 // ─── Custom Fields ───────────────────────────────────────
