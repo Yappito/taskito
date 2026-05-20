@@ -36,18 +36,15 @@ export default async function DashboardLayout({
         }}
       >
         <div className="flex min-h-16 flex-col gap-3 px-4 py-3 md:flex-row md:items-center md:justify-between lg:px-6">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <div
               className="grid h-9 w-9 place-items-center rounded-xl text-xs font-bold text-white"
               style={{ background: "linear-gradient(135deg, var(--color-accent), var(--color-info))" }}
             >
               T
             </div>
-            <div className="flex flex-col">
+            <div className="min-w-0 flex flex-col">
               <CurrentProjectHomeLink />
-              <span className="hidden text-xs md:block" style={{ color: "var(--color-text-muted)" }}>
-                Plan, deliver, inspect, and recover work from one workspace.
-              </span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 md:justify-end">
