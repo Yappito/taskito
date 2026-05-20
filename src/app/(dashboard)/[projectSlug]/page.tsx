@@ -129,16 +129,6 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
   const statuses = project.statuses ?? [];
   const projectSettings = (project as { settings?: Record<string, unknown> | null }).settings ?? null;
-  const viewDescriptions: Record<typeof view, string> = {
-    dashboard: "Monitor project health, velocity, risk, and logged time.",
-    list: "Scan, sort, and bulk edit tasks.",
-    board: "Move work through delivery stages.",
-    calendar: "Plan due dates on a calendar grid.",
-    gantt: "See schedules as task bars across time.",
-    sprint: "Plan and inspect time-boxed cycles.",
-    graph: "Inspect schedule and dependency risk.",
-    archive: "Review completed and archived work.",
-  };
 
   return (
     <div className="min-h-[calc(100vh-4rem)]">
@@ -150,29 +140,8 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
           borderColor: "var(--color-border)",
         }}
       >
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-          <div className="min-w-0">
-            <h1 className="truncate text-3xl font-semibold tracking-tight" style={{ color: "var(--color-text)" }}>
-              {project.name}
-            </h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
-              {project.description || viewDescriptions[view]}
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {statuses.slice(0, 6).map((status) => (
-                <span
-                  key={status.id}
-                  className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs"
-                  style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text-secondary)" }}
-                >
-                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />
-                  {status.name}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-3 md:flex-row md:items-center xl:justify-end">
+        <div className="flex justify-end">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center">
             <div
               className="flex flex-wrap rounded-2xl p-1"
               style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
