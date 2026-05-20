@@ -1,26 +1,11 @@
 import NextAuth from "next-auth";
+import type { NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, resetRateLimit } from "@/lib/rate-limit";
 import { getClientIpFromHeaders } from "@/lib/request-ip";
-
-interface OidcProviderConfig {
-  id: string;
-  name: string;
-  issuer: string;
-  clientId: string;
-  clientSecret: string;
-  scope: string;
-  groupsClaim: string;
-  defaultRole: "admin" | "member";
-  allowSignup: boolean;
-  allowEmailAccountLinking: boolean;
-  requireEmailVerified: boolean;
-  adminEmails: Set<string>;
-}
-
-type OidcProfile = Record<string, unknown>;
+import { getOidcProviderConfigs, type OidcProfile, type OidcProviderConfig } from "@/server/services/oidc-provider-settings";
 
 const productionSecret = process.env.AUTH_SECRET;
 const invalidSecrets = new Set([
@@ -35,84 +20,6 @@ if (isProductionRuntime) {
     throw new Error("AUTH_SECRET must be set to a cryptographically strong value of at least 32 characters in production");
   }
 }
-
-function parseBoolean(value: string | undefined, defaultValue: boolean) {
-  if (value === undefined) return defaultValue;
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
-}
-
-function parseCsv(value: string | undefined) {
-  return (value ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function normalizeProviderId(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "oidc";
-}
-
-function normalizeRole(value: unknown): "admin" | "member" {
-  return value === "admin" ? "admin" : "member";
-}
-
-function readOidcProviderConfigs(): OidcProviderConfig[] {
-  const rawProviders = process.env.OIDC_PROVIDERS;
-  if (rawProviders) {
-    const parsed = JSON.parse(rawProviders) as Array<Record<string, unknown>>;
-    return parsed.map((provider, index) => {
-      const id = normalizeProviderId(String(provider.id ?? `oidc-${index + 1}`));
-      const clientSecret = typeof provider.clientSecretEnv === "string"
-        ? process.env[provider.clientSecretEnv]
-        : provider.clientSecret;
-
-      if (!provider.issuer || !provider.clientId || !clientSecret) {
-        throw new Error(`OIDC provider ${id} requires issuer, clientId, and clientSecret`);
-      }
-
-      return {
-        id,
-        name: String(provider.name ?? "OIDC"),
-        issuer: String(provider.issuer),
-        clientId: String(provider.clientId),
-        clientSecret: String(clientSecret),
-        scope: String(provider.scope ?? "openid email profile"),
-        groupsClaim: String(provider.groupsClaim ?? "groups"),
-        defaultRole: normalizeRole(provider.defaultRole),
-        allowSignup: provider.allowSignup === undefined ? true : provider.allowSignup === true,
-        allowEmailAccountLinking: provider.allowEmailAccountLinking === true,
-        requireEmailVerified: provider.requireEmailVerified === undefined ? false : provider.requireEmailVerified === true,
-        adminEmails: new Set(
-          Array.isArray(provider.adminEmails)
-            ? provider.adminEmails.map((email) => String(email).toLowerCase())
-            : []
-        ),
-      };
-    });
-  }
-
-  if (!process.env.OIDC_ISSUER || !process.env.OIDC_CLIENT_ID || !process.env.OIDC_CLIENT_SECRET) {
-    return [];
-  }
-
-  return [{
-    id: normalizeProviderId(process.env.OIDC_PROVIDER_ID ?? "oidc"),
-    name: process.env.OIDC_PROVIDER_NAME ?? "OIDC",
-    issuer: process.env.OIDC_ISSUER,
-    clientId: process.env.OIDC_CLIENT_ID,
-    clientSecret: process.env.OIDC_CLIENT_SECRET,
-    scope: process.env.OIDC_SCOPE ?? "openid email profile",
-    groupsClaim: process.env.OIDC_GROUPS_CLAIM ?? "groups",
-    defaultRole: normalizeRole(process.env.OIDC_DEFAULT_ROLE),
-    allowSignup: parseBoolean(process.env.OIDC_ALLOW_SIGNUP, true),
-    allowEmailAccountLinking: parseBoolean(process.env.OIDC_ALLOW_EMAIL_ACCOUNT_LINKING, false),
-    requireEmailVerified: parseBoolean(process.env.OIDC_REQUIRE_EMAIL_VERIFIED, false),
-    adminEmails: new Set(parseCsv(process.env.OIDC_ADMIN_EMAILS).map((email) => email.toLowerCase())),
-  }];
-}
-
-const oidcProviderConfigs = readOidcProviderConfigs();
-const oidcProviderConfigById = new Map(oidcProviderConfigs.map((provider) => [provider.id, provider]));
 
 function readProfileString(profile: OidcProfile, keys: string[]) {
   for (const key of keys) {
@@ -228,7 +135,7 @@ async function syncOidcGroups(userId: string, config: OidcProviderConfig, profil
   });
 }
 
-function buildOidcProviders() {
+function buildOidcProviders(oidcProviderConfigs: OidcProviderConfig[]) {
   return oidcProviderConfigs.map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -259,166 +166,169 @@ function buildOidcProviders() {
   }));
 }
 
-export function getOidcLoginProviders() {
-  return oidcProviderConfigs.map((provider) => ({ id: provider.id, name: provider.name }));
-}
+async function buildAuthConfig(): Promise<NextAuthConfig> {
+  const oidcProviderConfigs = await getOidcProviderConfigs();
+  const oidcProviderConfigById = new Map(oidcProviderConfigs.map((provider) => [provider.id, provider]));
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
-  adapter: PrismaAdapter(prisma),
-  session: { strategy: "jwt", maxAge: 60 * 60 * 12 },
-  trustHost: process.env.AUTH_TRUST_HOST === "true",
-  pages: {
-    signIn: "/login",
-  },
-  providers: [
-    Credentials({
-      name: "credentials",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-      async authorize(credentials, request) {
-        if (!credentials?.email || !credentials?.password) return null;
+  return {
+    adapter: PrismaAdapter(prisma),
+    session: { strategy: "jwt", maxAge: 60 * 60 * 12 },
+    trustHost: process.env.AUTH_TRUST_HOST === "true",
+    pages: {
+      signIn: "/login",
+    },
+    providers: [
+      Credentials({
+        name: "credentials",
+        credentials: {
+          email: { label: "Email", type: "email" },
+          password: { label: "Password", type: "password" },
+        },
+        async authorize(credentials, request) {
+          if (!credentials?.email || !credentials?.password) return null;
 
-        const email = String(credentials.email).toLowerCase();
-        const ip = getClientIpFromHeaders(request.headers);
-        const ipAttempt = consumeRateLimit("login:ip", ip, {
-          maxAttempts: 10,
-          windowMs: 15 * 60 * 1000,
+          const email = String(credentials.email).toLowerCase();
+          const ip = getClientIpFromHeaders(request.headers);
+          const ipAttempt = consumeRateLimit("login:ip", ip, {
+            maxAttempts: 10,
+            windowMs: 15 * 60 * 1000,
+          });
+          const accountAttempt = consumeRateLimit("login:account", `${email}:${ip}`, {
+            maxAttempts: 5,
+            windowMs: 15 * 60 * 1000,
+          });
+
+          if (!ipAttempt.allowed || !accountAttempt.allowed) {
+            return null;
+          }
+
+          const user = await prisma.user.findUnique({
+            where: { email },
+          });
+          if (!user?.password || user.disabledAt) return null;
+
+          const password = String(credentials.password);
+          const { hashPassword, verifyPassword } = await import("@/lib/password");
+          const verification = await verifyPassword(password, user.password);
+          if (!verification.valid) return null;
+
+          if (verification.needsRehash) {
+            try {
+              await prisma.user.update({
+                where: { id: user.id },
+                data: {
+                  password: await hashPassword(password),
+                },
+              });
+            } catch {
+              // Avoid failing a valid login if the background rehash update cannot be persisted.
+            }
+          }
+
+          resetRateLimit("login:account", `${email}:${ip}`);
+          resetRateLimit("login:ip", ip);
+
+          return {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            image: user.image,
+            role: user.role === "admin" ? "admin" : "member",
+          };
+        },
+      }),
+      ...buildOidcProviders(oidcProviderConfigs),
+    ],
+    callbacks: {
+      async signIn({ user, account }) {
+        const email = user.email?.toLowerCase();
+        if (!email) return false;
+
+        const existingUser = await prisma.user.findUnique({
+          where: { email },
+          select: { id: true, disabledAt: true },
         });
-        const accountAttempt = consumeRateLimit("login:account", `${email}:${ip}`, {
-          maxAttempts: 5,
-          windowMs: 15 * 60 * 1000,
-        });
 
-        if (!ipAttempt.allowed || !accountAttempt.allowed) {
-          return null;
+        if (existingUser?.disabledAt) {
+          return false;
         }
 
-        const user = await prisma.user.findUnique({
-          where: { email },
-        });
-        if (!user?.password || user.disabledAt) return null;
+        const oidcConfig = account?.provider ? oidcProviderConfigById.get(account.provider) : null;
+        if (oidcConfig && !oidcConfig.allowSignup && !existingUser) {
+          return false;
+        }
 
-        const password = String(credentials.password);
-        const { hashPassword, verifyPassword } = await import("@/lib/password");
-        const verification = await verifyPassword(password, user.password);
-        if (!verification.valid) return null;
+        return true;
+      },
+      async jwt({ token, user }) {
+        if (user) {
+          token.id = user.id;
+          token.role = user.role;
+          token.name = user.name;
+          token.email = user.email;
+          token.picture = user.image;
+        }
 
-        if (verification.needsRehash) {
-          try {
-            await prisma.user.update({
-              where: { id: user.id },
-              data: {
-                password: await hashPassword(password),
-              },
-            });
-          } catch {
-            // Avoid failing a valid login if the background rehash update cannot be persisted.
+        if (token.id) {
+          const currentUser = await prisma.user.findUnique({
+            where: { id: String(token.id) },
+            select: {
+              name: true,
+              email: true,
+              image: true,
+              role: true,
+              disabledAt: true,
+            },
+          });
+
+          if (currentUser && !currentUser.disabledAt) {
+            token.name = currentUser.name;
+            token.email = currentUser.email;
+            token.picture = currentUser.image;
+            token.role = currentUser.role === "admin" ? "admin" : "member";
           }
         }
 
-        resetRateLimit("login:account", `${email}:${ip}`);
-        resetRateLimit("login:ip", ip);
-
-        return {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          image: user.image,
-          role: user.role === "admin" ? "admin" : "member",
-        };
+        return token;
       },
-    }),
-    ...buildOidcProviders(),
-  ],
-  callbacks: {
-    async signIn({ user, account }) {
-      const email = user.email?.toLowerCase();
-      if (!email) return false;
-
-      const existingUser = await prisma.user.findUnique({
-        where: { email },
-        select: { id: true, disabledAt: true },
-      });
-
-      if (existingUser?.disabledAt) {
-        return false;
-      }
-
-      const oidcConfig = account?.provider ? oidcProviderConfigById.get(account.provider) : null;
-      if (oidcConfig && !oidcConfig.allowSignup && !existingUser) {
-        return false;
-      }
-
-      return true;
+      session({ session, token }) {
+        if (session.user && token.id) {
+          session.user.id = token.id as string;
+          session.user.role = token.role === "admin" ? "admin" : "member";
+          session.user.name = typeof token.name === "string" ? token.name : null;
+          session.user.email = typeof token.email === "string" ? token.email : "";
+          session.user.image = typeof token.picture === "string" ? token.picture : null;
+        }
+        return session;
+      },
     },
-    async jwt({ token, user }) {
-      if (user) {
-        token.id = user.id;
-        token.role = user.role;
-        token.name = user.name;
-        token.email = user.email;
-        token.picture = user.image;
-      }
+    events: {
+      async signIn({ user, account, profile, isNewUser }) {
+        if (!user.id) return;
 
-      if (token.id) {
-        const currentUser = await prisma.user.findUnique({
-          where: { id: String(token.id) },
-          select: {
-            name: true,
-            email: true,
-            image: true,
-            role: true,
-            disabledAt: true,
+        const oidcConfig = account?.provider ? oidcProviderConfigById.get(account.provider) : null;
+        const email = user.email?.toLowerCase() ?? "";
+        const role = oidcConfig?.adminEmails.has(email)
+          ? "admin"
+          : isNewUser && oidcConfig
+            ? oidcConfig.defaultRole
+            : undefined;
+
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            lastLoginAt: new Date(),
+            ...(oidcConfig ? { authSource: oidcConfig.id, emailVerified: new Date() } : {}),
+            ...(role ? { role } : {}),
           },
         });
 
-        if (currentUser && !currentUser.disabledAt) {
-          token.name = currentUser.name;
-          token.email = currentUser.email;
-          token.picture = currentUser.image;
-          token.role = currentUser.role === "admin" ? "admin" : "member";
+        if (oidcConfig) {
+          await syncOidcGroups(user.id, oidcConfig, profile as OidcProfile | undefined);
         }
-      }
-
-      return token;
+      },
     },
-    session({ session, token }) {
-      if (session.user && token.id) {
-        session.user.id = token.id as string;
-        session.user.role = token.role === "admin" ? "admin" : "member";
-        session.user.name = typeof token.name === "string" ? token.name : null;
-        session.user.email = typeof token.email === "string" ? token.email : "";
-        session.user.image = typeof token.picture === "string" ? token.picture : null;
-      }
-      return session;
-    },
-  },
-  events: {
-    async signIn({ user, account, profile, isNewUser }) {
-      if (!user.id) return;
+  };
+}
 
-      const oidcConfig = account?.provider ? oidcProviderConfigById.get(account.provider) : null;
-      const email = user.email?.toLowerCase() ?? "";
-      const role = oidcConfig?.adminEmails.has(email)
-        ? "admin"
-        : isNewUser && oidcConfig
-          ? oidcConfig.defaultRole
-          : undefined;
-
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          lastLoginAt: new Date(),
-          ...(oidcConfig ? { authSource: oidcConfig.id, emailVerified: new Date() } : {}),
-          ...(role ? { role } : {}),
-        },
-      });
-
-      if (oidcConfig) {
-        await syncOidcGroups(user.id, oidcConfig, profile as OidcProfile | undefined);
-      }
-    },
-  },
-});
+export const { handlers, auth, signIn, signOut } = NextAuth(buildAuthConfig);

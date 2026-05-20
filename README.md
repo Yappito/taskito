@@ -252,6 +252,7 @@ Useful commands from the repository root:
 - Attachment uploads are tied to task comments, not stored as standalone task files.
 - Attachment downloads go through authenticated project access checks.
 - Access is RBAC-based: global admins manage users and groups, project roles grant permissions, and OIDC group claims can populate managed groups automatically.
+- OIDC providers can be managed in `Settings -> Auth`. Client secrets entered there are encrypted at rest and write-only: they are never returned by the settings API after saving. Environment-configured OIDC providers remain supported and appear read-only in that screen.
 - The app image creates `/app/uploads` automatically and the compose stack mounts it to a persistent Docker volume.
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.

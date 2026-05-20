@@ -14,7 +14,7 @@ import { AiProviderList } from "@/components/ai/ai-provider-list";
 /** Settings page — project and user management */
 export default function SettingsPage() {
   const { data: currentUser, isLoading } = trpc.user.me.useQuery();
-  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users" | "groups">("profile");
+  const [tab, setTab] = useState<"profile" | "ai" | "projects" | "users" | "groups" | "auth">("profile");
 
   useEffect(() => {
     if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "ai") {
@@ -35,7 +35,7 @@ export default function SettingsPage() {
   }
 
   const tabs = currentUser.role === "admin"
-    ? (["profile", "ai", "projects", "users", "groups"] as const)
+    ? (["profile", "ai", "projects", "users", "groups", "auth"] as const)
     : (["profile", "ai"] as const);
 
   return (
@@ -77,6 +77,7 @@ export default function SettingsPage() {
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}
       {tab === "users" && currentUser.role === "admin" && <UserManagement currentUserId={currentUser.id} />}
       {tab === "groups" && currentUser.role === "admin" && <GroupManagement />}
+      {tab === "auth" && currentUser.role === "admin" && <AuthProviderSettings />}
     </div>
   );
 }
@@ -667,6 +668,395 @@ function PersonalAiSettings({ currentUserRole }: { currentUserRole: string }) {
           </Dialog>
         </>
       )}
+    </div>
+  );
+}
+
+// ------- Auth Provider Settings -------
+
+interface OidcProviderFormData {
+  providerId: string;
+  name: string;
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  scope: string;
+  groupsClaim: string;
+  defaultRole: "admin" | "member";
+  allowSignup: boolean;
+  allowEmailAccountLinking: boolean;
+  requireEmailVerified: boolean;
+  adminEmails: string;
+  isEnabled: boolean;
+}
+
+const emptyOidcProvider: OidcProviderFormData = {
+  providerId: "",
+  name: "",
+  issuer: "",
+  clientId: "",
+  clientSecret: "",
+  scope: "openid email profile",
+  groupsClaim: "groups",
+  defaultRole: "member",
+  allowSignup: true,
+  allowEmailAccountLinking: false,
+  requireEmailVerified: false,
+  adminEmails: "",
+  isEnabled: true,
+};
+
+function parseAdminEmailText(value: string) {
+  return [...new Set(value.split(/[\n,]/).map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+}
+
+function AuthProviderSettings() {
+  const utils = trpc.useUtils();
+  const { data, isLoading } = trpc.oidc.list.useQuery();
+  const [origin, setOrigin] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [form, setForm] = useState<OidcProviderFormData>(emptyOidcProvider);
+  const [editForm, setEditForm] = useState<OidcProviderFormData>(emptyOidcProvider);
+  const [editingProvider, setEditingProvider] = useState<NonNullable<typeof data>["providers"][number] | null>(null);
+
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
+
+  const createMutation = trpc.oidc.create.useMutation({
+    onSuccess: async () => {
+      await utils.oidc.list.invalidate();
+      setCreateOpen(false);
+      setForm(emptyOidcProvider);
+    },
+  });
+  const updateMutation = trpc.oidc.update.useMutation({
+    onSuccess: async () => {
+      await utils.oidc.list.invalidate();
+      setEditOpen(false);
+      setEditingProvider(null);
+      setEditForm(emptyOidcProvider);
+    },
+  });
+  const deleteMutation = trpc.oidc.delete.useMutation({
+    onSuccess: async () => {
+      await utils.oidc.list.invalidate();
+    },
+  });
+
+  function toMutationInput(values: OidcProviderFormData) {
+    return {
+      providerId: values.providerId,
+      name: values.name,
+      issuer: values.issuer,
+      clientId: values.clientId,
+      clientSecret: values.clientSecret,
+      scope: values.scope,
+      groupsClaim: values.groupsClaim,
+      defaultRole: values.defaultRole,
+      allowSignup: values.allowSignup,
+      allowEmailAccountLinking: values.allowEmailAccountLinking,
+      requireEmailVerified: values.requireEmailVerified,
+      adminEmails: parseAdminEmailText(values.adminEmails),
+      isEnabled: values.isEnabled,
+    };
+  }
+
+  function openEdit(provider: NonNullable<typeof data>["providers"][number]) {
+    setEditingProvider(provider);
+    setEditForm({
+      providerId: provider.providerId,
+      name: provider.name,
+      issuer: provider.issuer,
+      clientId: provider.clientId,
+      clientSecret: "",
+      scope: provider.scope,
+      groupsClaim: provider.groupsClaim,
+      defaultRole: provider.defaultRole,
+      allowSignup: provider.allowSignup,
+      allowEmailAccountLinking: provider.allowEmailAccountLinking,
+      requireEmailVerified: provider.requireEmailVerified,
+      adminEmails: provider.adminEmails.join("\n"),
+      isEnabled: provider.isEnabled,
+    });
+    setEditOpen(true);
+  }
+
+  function callbackUrl(providerId: string) {
+    return `${origin || "<app-url>"}/api/auth/callback/${providerId || "<provider-id>"}`;
+  }
+
+  function renderOidcForm(options: {
+    value: OidcProviderFormData;
+    onChange: (value: OidcProviderFormData) => void;
+    isEdit?: boolean;
+    onSubmit: () => void;
+    isPending: boolean;
+    error?: string | null;
+  }) {
+    const values = options.value;
+    const setValues = options.onChange;
+
+    return (
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          options.onSubmit();
+        }}
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Provider ID
+            </label>
+            <Input value={values.providerId} onChange={(event) => setValues({ ...values, providerId: event.target.value })} placeholder="company-sso" required />
+            <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+              Callback: {callbackUrl(values.providerId)}
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Display Name
+            </label>
+            <Input value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} placeholder="Company SSO" required />
+          </div>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+            Issuer URL
+          </label>
+          <Input value={values.issuer} onChange={(event) => setValues({ ...values, issuer: event.target.value })} placeholder="https://idp.example.com/realms/taskito" required />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Client ID
+            </label>
+            <Input value={values.clientId} onChange={(event) => setValues({ ...values, clientId: event.target.value })} required />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Client Secret
+            </label>
+            <Input
+              type="password"
+              value={values.clientSecret}
+              onChange={(event) => setValues({ ...values, clientSecret: event.target.value })}
+              placeholder={options.isEdit ? "Leave blank to keep current secret" : "Enter client secret"}
+              required={!options.isEdit}
+            />
+            <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+              Secrets are write-only. Saved secrets are encrypted and never returned to this page.
+            </p>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Scope
+            </label>
+            <Input value={values.scope} onChange={(event) => setValues({ ...values, scope: event.target.value })} required />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Groups Claim
+            </label>
+            <Input value={values.groupsClaim} onChange={(event) => setValues({ ...values, groupsClaim: event.target.value })} placeholder="groups or realm_access.roles" required />
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Default Role
+            </label>
+            <select
+              value={values.defaultRole}
+              onChange={(event) => setValues({ ...values, defaultRole: event.target.value as "admin" | "member" })}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}
+            >
+              <option value="member">member</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: "var(--color-text-secondary)" }}>
+              Admin Emails
+            </label>
+            <textarea
+              value={values.adminEmails}
+              onChange={(event) => setValues({ ...values, adminEmails: event.target.value })}
+              rows={3}
+              className="w-full rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--color-accent)]"
+              style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}
+              placeholder="admin@example.com"
+            />
+          </div>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            ["isEnabled", "Enabled"],
+            ["allowSignup", "Allow first-time OIDC signups"],
+            ["allowEmailAccountLinking", "Allow email account linking"],
+            ["requireEmailVerified", "Require verified email claim"],
+          ].map(([key, label]) => (
+            <label key={key} className="flex items-center gap-3 rounded-lg border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text)", backgroundColor: "var(--color-bg-overlay)" }}>
+              <input
+                type="checkbox"
+                checked={Boolean(values[key as keyof OidcProviderFormData])}
+                onChange={(event) => setValues({ ...values, [key]: event.target.checked })}
+                className="accent-[var(--color-accent)]"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+        {options.error && (
+          <p className="text-sm" style={{ color: "var(--color-danger)" }}>
+            {options.error}
+          </p>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" onClick={() => {
+            setCreateOpen(false);
+            setEditOpen(false);
+          }}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={options.isPending}>
+            {options.isPending ? "Saving..." : options.isEdit ? "Save Provider" : "Create Provider"}
+          </Button>
+        </div>
+      </form>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="animate-pulse py-12 text-center" style={{ color: "var(--color-text-muted)" }}>
+        Loading auth providers...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+              Authentication
+            </p>
+            <h2 className="mt-2 text-xl font-semibold" style={{ color: "var(--color-text)" }}>
+              OIDC Providers
+            </h2>
+            <p className="mt-2 text-sm leading-6" style={{ color: "var(--color-text-secondary)" }}>
+              Configure OIDC sign-in and group claim syncing. Client secrets are write-only and cannot be retrieved from the UI or browser console after saving.
+            </p>
+          </div>
+          <Button onClick={() => setCreateOpen(true)}>Add OIDC Provider</Button>
+        </div>
+      </section>
+
+      {data?.envProviders.length ? (
+        <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+          <h3 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>Environment Providers</h3>
+          <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            These providers are still loaded from environment variables and are read-only here.
+          </p>
+          <div className="mt-4 space-y-2">
+            {data.envProviders.map((provider) => (
+              <div key={provider.providerId} className="rounded-xl border p-4 text-sm" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+                <div className="font-medium" style={{ color: "var(--color-text)" }}>{provider.name}</div>
+                <div className="mt-1" style={{ color: "var(--color-text-secondary)" }}>{provider.providerId} · {provider.issuer}</div>
+                <div className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>Callback: {callbackUrl(provider.providerId)}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <h3 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>Saved Providers</h3>
+        <div className="mt-4 space-y-2">
+          {data?.providers.map((provider) => (
+            <div key={provider.id} className="flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium" style={{ color: "var(--color-text)" }}>{provider.name}</span>
+                  <span className="rounded px-1.5 py-0.5 text-xs" style={{ backgroundColor: provider.isEnabled ? "var(--color-accent-muted)" : "var(--color-bg-muted)", color: provider.isEnabled ? "var(--color-accent)" : "var(--color-text-muted)" }}>
+                    {provider.isEnabled ? "enabled" : "disabled"}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>{provider.providerId} · {provider.issuer}</p>
+                <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  groups: {provider.groupsClaim} · callback: {callbackUrl(provider.providerId)} · secret saved: {provider.hasClientSecret ? "yes" : "no"}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => openEdit(provider)}>Edit</Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => {
+                    if (confirm("Delete this OIDC provider? Existing linked accounts are not deleted.")) {
+                      deleteMutation.mutate({ id: provider.id });
+                    }
+                  }}
+                >
+                  Delete
+                </Button>
+              </div>
+            </div>
+          ))}
+          {data?.providers.length === 0 && (
+            <div className="py-10 text-center text-sm" style={{ color: "var(--color-text-muted)" }}>
+              No UI-managed OIDC providers yet.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Add OIDC Provider</DialogTitle></DialogHeader>
+          {renderOidcForm({
+            value: form,
+            onChange: setForm,
+            isPending: createMutation.isPending,
+            error: createMutation.error?.message ?? null,
+            onSubmit: () => {
+              const input = toMutationInput(form);
+              setForm((current) => ({ ...current, clientSecret: "" }));
+              createMutation.mutate(input);
+            },
+          })}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Edit OIDC Provider</DialogTitle></DialogHeader>
+          {editingProvider && renderOidcForm({
+            value: editForm,
+            onChange: setEditForm,
+            isEdit: true,
+            isPending: updateMutation.isPending,
+            error: updateMutation.error?.message ?? null,
+            onSubmit: () => {
+              const input = toMutationInput(editForm);
+              setEditForm((current) => ({ ...current, clientSecret: "" }));
+              updateMutation.mutate({
+                id: editingProvider.id,
+                ...input,
+                clientSecret: editForm.clientSecret.trim() || undefined,
+              });
+            },
+          })}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

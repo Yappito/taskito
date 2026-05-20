@@ -87,6 +87,27 @@ model VerificationToken {
   @@id([identifier, token])
 }
 
+model OidcProviderConnection {
+  id                         String   @id @default(cuid())
+  providerId                 String   @unique
+  name                       String
+  issuer                     String
+  clientId                   String
+  encryptedClientSecret      String
+  scope                      String   @default("openid email profile")
+  groupsClaim                String   @default("groups")
+  defaultRole                String   @default("member")
+  allowSignup                Boolean  @default(true)
+  allowEmailAccountLinking   Boolean  @default(false)
+  requireEmailVerified       Boolean  @default(false)
+  adminEmails                Json     @default("[]")
+  isEnabled                  Boolean  @default(true)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  @@index([isEnabled])
+}
+
 // ─── Project ─────────────────────────────────────────────
 
 model Project {
