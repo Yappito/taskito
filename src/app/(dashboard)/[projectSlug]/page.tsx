@@ -3,6 +3,7 @@
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
+import { Bot } from "lucide-react";
 import { trpc } from "@/lib/trpc-client";
 import { ListView } from "@/components/task/list-view";
 import { BoardView } from "@/components/task/board-view";
@@ -129,6 +130,13 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
 
   const statuses = project.statuses ?? [];
   const projectSettings = (project as { settings?: Record<string, unknown> | null }).settings ?? null;
+  const projectSettingsLinks = [
+    { href: `/${projectSlug}/settings/workflow`, label: "Workflow" },
+    { href: `/${projectSlug}/settings/tags`, label: "Tags" },
+    { href: `/${projectSlug}/settings/custom-fields`, label: "Custom Fields" },
+    { href: `/${projectSlug}/settings/ai`, label: "AI" },
+    { href: `/${projectSlug}/settings/automation`, label: "Automation" },
+  ];
 
   return (
     <div className="min-h-[calc(100vh-4rem)]">
@@ -141,7 +149,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
         }}
       >
         <div className="flex justify-end">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <div
               className="flex flex-wrap rounded-2xl p-1"
               style={{ backgroundColor: "var(--color-bg-muted)", border: "1px solid var(--color-border)" }}
@@ -177,46 +185,29 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
               projectId={project.id}
               title={`AI workspace for ${project.name}`}
               buttonLabel="Project AI"
+              buttonIcon={<Bot />}
+              buttonVariant="default"
+              buttonClassName="border-0 text-white hover:opacity-90"
+              buttonStyle={{
+                background: "linear-gradient(135deg, #22d3ee 0%, #8b5cf6 48%, #f472b6 100%)",
+                boxShadow: "0 0 0 1px rgba(255,255,255,0.1) inset, 0 0 22px rgba(34,211,238,0.35), 0 0 34px rgba(244,114,182,0.22)",
+              }}
             />
+            {projectSettingsLinks.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className="inline-flex h-8 items-center rounded-md border px-3 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
+                style={{
+                  borderColor: "var(--color-border)",
+                  color: "var(--color-text-secondary)",
+                  backgroundColor: "var(--color-surface)",
+                }}
+              >
+                {item.label}
+              </Link>
+            ))}
           </div>
-        </div>
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Link
-            href={`/${projectSlug}/settings/workflow`}
-            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
-          >
-            Workflow
-          </Link>
-          <Link
-            href={`/${projectSlug}/settings/tags`}
-            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
-          >
-            Tags
-          </Link>
-          <Link
-            href={`/${projectSlug}/settings/custom-fields`}
-            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
-          >
-            Custom Fields
-          </Link>
-          <Link
-            href={`/${projectSlug}/settings/ai`}
-            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
-          >
-            AI
-          </Link>
-          <Link
-            href={`/${projectSlug}/settings/automation`}
-            className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-surface-hover)]"
-            style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)", backgroundColor: "var(--color-surface)" }}
-          >
-            Automation
-          </Link>
         </div>
       </div>
 
