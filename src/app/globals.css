@@ -54,6 +54,11 @@
   --color-minimap-viewport: rgba(99, 102, 241, 0.15);
   --color-minimap-viewport-border: #6366f1;
 
+  --gradient-app: radial-gradient(circle at top left, rgba(99, 102, 241, 0.12) 0%, transparent 38%), radial-gradient(circle at top right, rgba(14, 165, 233, 0.1) 0%, transparent 42%);
+  --gradient-header: linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%);
+  --gradient-accent: linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%);
+  --gradient-spotlight: linear-gradient(145deg, #eef2ff 0%, #ffffff 56%, #f0f9ff 100%);
+
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -127,6 +132,11 @@
   --color-minimap-viewport: rgba(129, 140, 248, 0.12);
   --color-minimap-viewport-border: #818cf8;
 
+  --gradient-app: radial-gradient(circle at top left, rgba(129, 140, 248, 0.16) 0%, transparent 40%), radial-gradient(circle at top right, rgba(56, 189, 248, 0.12) 0%, transparent 44%);
+  --gradient-header: linear-gradient(135deg, #818cf8 0%, #38bdf8 100%);
+  --gradient-accent: linear-gradient(135deg, #818cf8 0%, #38bdf8 100%);
+  --gradient-spotlight: linear-gradient(145deg, #222946 0%, #1a1e2e 56%, #131827 100%);
+
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2), 0 1px 3px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.25), 0 4px 16px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.3), 0 8px 32px rgba(0, 0, 0, 0.2);
@@ -146,6 +156,8 @@ html {
 
 body {
   background-color: var(--color-bg);
+  background-image: var(--gradient-app);
+  background-attachment: fixed;
   color: var(--color-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

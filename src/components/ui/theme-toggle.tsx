@@ -5,7 +5,7 @@ import { useTheme } from "./theme-provider";
 
 /** Compact theme toggle cycling light → dark → system */
 export function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, activeTheme } = useTheme();
 
   function cycle() {
     const order = ["light", "dark", "system"] as const;
@@ -17,6 +17,7 @@ export function ThemeToggle() {
     <button
       onClick={cycle}
       aria-label={`Theme: ${theme}`}
+      title={`${activeTheme.name} (${theme})`}
       className="rounded-md p-1.5 transition-colors"
       style={{
         color: "var(--color-text-muted)",

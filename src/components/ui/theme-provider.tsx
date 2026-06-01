@@ -1,77 +1,118 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
-
-type Theme = "light" | "dark" | "system";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import type { AppearanceSettings, CustomThemeDefinition } from "@/lib/types";
+import {
+  buildThemeCssVariables,
+  DEFAULT_APPEARANCE_SETTINGS,
+  getThemeCollectionByMode,
+  resolveThemeDefinition,
+  type ThemeDefinition,
+  type ThemeMode,
+  type ThemePreference,
+} from "@/lib/themes";
 
 interface ThemeContextValue {
-  theme: Theme;
-  resolved: "light" | "dark";
-  setTheme: (theme: Theme) => void;
+  appearance: AppearanceSettings;
+  theme: ThemePreference;
+  resolved: ThemeMode;
+  activeTheme: ThemeDefinition;
+  themesByMode: ReturnType<typeof getThemeCollectionByMode>;
+  setAppearance: (appearance: AppearanceSettings) => void;
+  setTheme: (theme: ThemePreference) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  theme: "system",
+  appearance: DEFAULT_APPEARANCE_SETTINGS,
+  theme: DEFAULT_APPEARANCE_SETTINGS.scheme,
   resolved: "light",
+  activeTheme: resolveThemeDefinition(DEFAULT_APPEARANCE_SETTINGS, "light"),
+  themesByMode: getThemeCollectionByMode(),
+  setAppearance: () => {},
   setTheme: () => {},
 });
 
-/** Read the system preference for dark mode */
-function getSystemTheme(): "light" | "dark" {
+function getSystemTheme(): ThemeMode {
   if (typeof window === "undefined") return "light";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-/** Resolve `system` to a concrete theme */
-function resolve(theme: Theme): "light" | "dark" {
-  return theme === "system" ? getSystemTheme() : theme;
+function resolveScheme(scheme: ThemePreference): ThemeMode {
+  return scheme === "system" ? getSystemTheme() : scheme;
 }
 
-const STORAGE_KEY = "taskito-theme";
+function applyTheme(theme: ThemeDefinition) {
+  const root = document.documentElement;
+  root.setAttribute("data-theme", theme.mode);
+  root.setAttribute("data-theme-id", theme.id);
 
-/** Theme provider with localStorage persistence and system-preference sync */
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>("system");
-  const [resolved, setResolved] = useState<"light" | "dark">("light");
+  const variables = buildThemeCssVariables(theme);
+  for (const [token, value] of Object.entries(variables)) {
+    root.style.setProperty(token, value);
+  }
+}
 
-  // Initialise from localStorage
+export function ThemeProvider({
+  children,
+  initialAppearance,
+}: {
+  children: React.ReactNode;
+  initialAppearance?: AppearanceSettings;
+}) {
+  const [appearance, setAppearanceState] = useState<AppearanceSettings>(initialAppearance ?? DEFAULT_APPEARANCE_SETTINGS);
+  const [resolved, setResolved] = useState<ThemeMode>(() => resolveScheme(initialAppearance?.scheme ?? DEFAULT_APPEARANCE_SETTINGS.scheme));
+
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY) as Theme | null;
-    const initial = stored ?? "system";
-    setThemeState(initial);
-    setResolved(resolve(initial));
-  }, []);
+    if (!initialAppearance) return;
+    setAppearanceState(initialAppearance);
+    setResolved(resolveScheme(initialAppearance.scheme));
+  }, [initialAppearance]);
 
-  // Apply data-theme attribute
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", resolved);
-  }, [resolved]);
+    const nextResolved = resolveScheme(appearance.scheme);
+    setResolved((current) => (current === nextResolved ? current : nextResolved));
+  }, [appearance.scheme]);
 
-  // Listen for system preference changes when in system mode
   useEffect(() => {
-    if (theme !== "system") return;
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = () => setResolved(getSystemTheme());
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, [theme]);
+    if (appearance.scheme !== "system") return;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = () => setResolved(getSystemTheme());
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, [appearance.scheme]);
 
-  const setTheme = useCallback((t: Theme) => {
-    setThemeState(t);
-    setResolved(resolve(t));
-    localStorage.setItem(STORAGE_KEY, t);
-  }, []);
-
-  return (
-    <ThemeContext.Provider value={{ theme, resolved, setTheme }}>
-      {children}
-    </ThemeContext.Provider>
+  const activeTheme = useMemo(
+    () => resolveThemeDefinition(appearance, resolved),
+    [appearance, resolved]
   );
+
+  useEffect(() => {
+    applyTheme(activeTheme);
+  }, [activeTheme]);
+
+  const themesByMode = useMemo(
+    () => getThemeCollectionByMode(appearance.customThemes as CustomThemeDefinition[]),
+    [appearance.customThemes]
+  );
+
+  const value = useMemo<ThemeContextValue>(() => ({
+    appearance,
+    theme: appearance.scheme,
+    resolved,
+    activeTheme,
+    themesByMode,
+    setAppearance: setAppearanceState,
+    setTheme: (theme) => {
+      setAppearanceState((current) => ({
+        ...current,
+        scheme: theme,
+      }));
+    },
+  }), [activeTheme, appearance, resolved, themesByMode]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
-/** Hook to read and set the current theme */
 export function useTheme() {
   return useContext(ThemeContext);
 }

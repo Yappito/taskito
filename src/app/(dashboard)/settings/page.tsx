@@ -7,6 +7,7 @@ import { trpc } from "@/lib/trpc-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar } from "@/components/ui/avatar";
+import { AppearanceSettingsSection } from "@/components/settings/appearance-settings";
 import { DialogControlled as Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AiProviderForm } from "@/components/ai/ai-provider-form";
 import { AiProviderList } from "@/components/ai/ai-provider-list";
@@ -14,10 +15,10 @@ import { AiProviderList } from "@/components/ai/ai-provider-list";
 /** Settings page — project and user management */
 export default function SettingsPage() {
   const { data: currentUser, isLoading } = trpc.user.me.useQuery();
-  const [tab, setTab] = useState<"profile" | "ai" | "storage" | "projects" | "users" | "groups" | "auth">("profile");
+  const [tab, setTab] = useState<"profile" | "appearance" | "ai" | "storage" | "projects" | "users" | "groups" | "auth">("profile");
 
   useEffect(() => {
-    if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "ai") {
+    if (currentUser?.role !== "admin" && tab !== "profile" && tab !== "appearance" && tab !== "ai") {
       setTab("profile");
     }
   }, [currentUser?.role, tab]);
@@ -35,8 +36,8 @@ export default function SettingsPage() {
   }
 
   const tabs = currentUser.role === "admin"
-    ? (["profile", "ai", "storage", "projects", "users", "groups", "auth"] as const)
-    : (["profile", "ai"] as const);
+    ? (["profile", "appearance", "ai", "storage", "projects", "users", "groups", "auth"] as const)
+    : (["profile", "appearance", "ai"] as const);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8">
@@ -71,8 +72,9 @@ export default function SettingsPage() {
           </button>
         ))}
       </div>
-
+      
       {tab === "profile" && <ProfileSettings currentUser={currentUser} />}
+      {tab === "appearance" && <AppearanceSettingsSection />}
       {tab === "ai" && <PersonalAiSettings currentUserRole={currentUser.role} />}
       {tab === "storage" && currentUser.role === "admin" && <StorageSettings />}
       {tab === "projects" && currentUser.role === "admin" && <ProjectManagement />}

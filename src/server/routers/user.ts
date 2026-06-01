@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { AI_PERMISSION_VALUES } from "@/lib/ai-types";
+import { appearanceSettingsInputSchema, getAppearanceSettings, normalizeAppearanceSettings } from "@/lib/themes";
 import { PROJECT_PERMISSIONS } from "@/server/authz";
 import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
 import { hashPassword, verifyPassword } from "@/lib/password";
@@ -226,6 +227,15 @@ export const userRouter = createTRPCRouter({
     return getAiPreferences(user.settings);
   }),
 
+  appearance: protectedProcedure.query(async ({ ctx }) => {
+    const user = await ctx.prisma.user.findUniqueOrThrow({
+      where: { id: ctx.session.user.id },
+      select: { settings: true },
+    });
+
+    return getAppearanceSettings(user.settings);
+  }),
+
   updateAiPreferences: protectedProcedure
     .input(
       z.object({
@@ -258,6 +268,30 @@ export const userRouter = createTRPCRouter({
       });
 
       return nextPreferences;
+    }),
+
+  updateAppearance: protectedProcedure
+    .input(appearanceSettingsInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const user = await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: ctx.session.user.id },
+        select: { settings: true },
+      });
+
+      const settings = (user.settings ?? {}) as Record<string, unknown>;
+      const nextAppearance = normalizeAppearanceSettings(input);
+
+      await ctx.prisma.user.update({
+        where: { id: ctx.session.user.id },
+        data: {
+          settings: {
+            ...settings,
+            appearance: nextAppearance as unknown as Prisma.JsonObject,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return nextAppearance;
     }),
 
   /** Update the current user's profile */

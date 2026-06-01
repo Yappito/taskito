@@ -167,6 +167,43 @@ export interface User {
   role: UserRole;
 }
 
+export interface ThemePalette {
+  background: string;
+  backgroundElevated: string;
+  backgroundMuted: string;
+  surface: string;
+  border: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  accent: string;
+  accentSecondary: string;
+  success: string;
+  warning: string;
+  danger: string;
+  appGradientFrom: string;
+  appGradientTo: string;
+  headerGradientFrom: string;
+  headerGradientTo: string;
+  spotlightGradientFrom: string;
+  spotlightGradientTo: string;
+}
+
+export interface CustomThemeDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  mode: "light" | "dark";
+  palette: ThemePalette;
+}
+
+export interface AppearanceSettings {
+  scheme: "light" | "dark" | "system";
+  lightThemeId: string;
+  darkThemeId: string;
+  customThemes: CustomThemeDefinition[];
+}
+
 /** Minimal user payload used in task assignment and attribution UI */
 export interface TaskPersonSummary {
   id: string;

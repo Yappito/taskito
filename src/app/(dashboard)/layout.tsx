@@ -39,7 +39,7 @@ export default async function DashboardLayout({
           <div className="flex min-w-0 items-center gap-3">
             <div
               className="grid h-9 w-9 place-items-center rounded-xl text-xs font-bold text-white"
-              style={{ background: "linear-gradient(135deg, var(--color-accent), var(--color-info))" }}
+              style={{ background: "var(--gradient-header)" }}
             >
               T
             </div>
