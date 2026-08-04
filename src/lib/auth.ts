@@ -11,6 +11,8 @@ const productionSecret = process.env.AUTH_SECRET;
 const invalidSecrets = new Set([
   "replace-with-a-random-secret-in-production",
   "change-me-in-production",
+  "replace-with-a-cryptographically-strong-secret",
+  "change-me",
 ]);
 const isProductionRuntime =
   process.env.NODE_ENV === "production" && process.env.NEXT_PHASE !== "phase-production-build";

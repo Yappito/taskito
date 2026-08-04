@@ -547,11 +547,7 @@ export const aiRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
-      if (provider.scope === "shared") {
-        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
-      } else if (provider.scope === "project" && provider.projectId) {
-        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
-      }
+      await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
 
       return { secret: decryptAiSecret(provider.encryptedSecret) };
     }),
@@ -571,6 +567,8 @@ export const aiRouter = createTRPCRouter({
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
       if (provider.scope === "shared") {
         await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+      } else if (provider.scope === "project" && provider.projectId) {
+        await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
       }
       const responsePreview = await runProviderTest(provider);
       return {

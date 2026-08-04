@@ -77,6 +77,7 @@ export async function completeWithOpenAiCompatibleProviderStructured(
         Authorization: `Bearer ${provider.secret}`,
       },
       signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
       body: JSON.stringify({
         model: provider.model,
         messages: normalizeOpenAiMessages(messages),
@@ -84,6 +85,10 @@ export async function completeWithOpenAiCompatibleProviderStructured(
         ...(tools?.length ? { tools: mapOpenAiTools(tools), tool_choice: "auto" } : {}),
       }),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error("AI provider returned a redirect, which is not allowed");
+    }
 
     if (!response.ok) {
       throw new Error(`Provider request failed with status ${response.status}`);
@@ -128,6 +133,7 @@ export async function streamWithOpenAiCompatibleProvider(
         Authorization: `Bearer ${provider.secret}`,
       },
       signal: combinedSignal,
+      redirect: "manual",
       body: JSON.stringify({
         model: provider.model,
         messages: normalizeOpenAiMessages(messages),
@@ -136,6 +142,10 @@ export async function streamWithOpenAiCompatibleProvider(
         ...(tools?.length ? { tools: mapOpenAiTools(tools), tool_choice: "auto" } : {}),
       }),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error("AI provider returned a redirect, which is not allowed");
+    }
 
     if (!response.ok || !response.body) {
       throw new Error(`Provider request failed with status ${response.status}`);

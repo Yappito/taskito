@@ -7,11 +7,16 @@ const IV_LENGTH = 12;
 function getMasterKey() {
   const rawKey = process.env[KEY_ENV_NAME];
   if (!rawKey) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(`${KEY_ENV_NAME} is required in production to encrypt stored secrets`);
+    }
+
     const fallback = process.env[FALLBACK_ENV_NAME];
     if (!fallback) {
       throw new Error(`${KEY_ENV_NAME} or ${FALLBACK_ENV_NAME} is required to encrypt stored secrets`);
     }
 
+    console.warn(`${KEY_ENV_NAME} is not set; falling back to SHA256(${FALLBACK_ENV_NAME}) for secret encryption`);
     return crypto.createHash("sha256").update(fallback, "utf8").digest();
   }
 
