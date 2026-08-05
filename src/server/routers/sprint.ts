@@ -92,7 +92,7 @@ export const sprintRouter = createTRPCRouter({
             orderBy: { createdAt: "asc" },
           },
         },
-        orderBy: [{ status: "asc" }, { startDate: "desc" }, { order: "asc" }],
+        orderBy: [{ order: "asc" }, { startDate: "desc" }],
       });
     }),
 

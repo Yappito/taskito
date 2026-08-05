@@ -176,6 +176,18 @@ const customFieldValueInputSchema = z.object({
   value: z.union([z.string(), z.number(), z.null()]),
 });
 
+/**
+ * Task.description is a Json column holding a TipTap document (object) or null.
+ * Strings are also accepted because the create handler falls back to storing
+ * `body` (a string) in the column when description is null, and existing rows
+ * may hold legacy string values. Everything else (arrays, numbers, booleans,
+ * primitives) is rejected at the boundary.
+ */
+const taskDescriptionSchema = z
+  .union([z.record(z.string(), z.unknown()), z.string().max(20000)])
+  .nullable()
+  .optional();
+
 async function validateCustomFieldValues(
   ctx: { prisma: typeof import("@/lib/prisma").prisma },
   projectId: string,
@@ -456,7 +468,7 @@ export const taskRouter = createTRPCRouter({
           },
           project: { select: { key: true } },
         },
-        orderBy: { dueDate: "asc" },
+        orderBy: [{ dueDate: "asc" }, { taskNumber: "asc" }, { id: "asc" }],
         take: limit + 1,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
@@ -574,7 +586,7 @@ export const taskRouter = createTRPCRouter({
       z.object({
         projectId: z.string().cuid(),
         title: z.string().min(1).max(200),
-        description: z.unknown().optional(),
+        description: taskDescriptionSchema,
         body: z.string().max(20000).nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
         participantIds: z.array(z.string().cuid()).optional(),
@@ -729,7 +741,7 @@ export const taskRouter = createTRPCRouter({
       z.object({
         id: z.string().cuid(),
         title: z.string().min(1).max(200).optional(),
-        description: z.unknown().optional(),
+        description: taskDescriptionSchema,
         body: z.string().nullable().optional(),
         assigneeId: z.string().cuid().nullable().optional(),
         participantIds: z.array(z.string().cuid()).optional(),
@@ -848,9 +860,9 @@ export const taskRouter = createTRPCRouter({
         ...((description !== undefined || body !== undefined)
           ? {
               description:
-                description ??
+                (description ??
                 body ??
-                Prisma.JsonNull,
+                Prisma.JsonNull) as Prisma.InputJsonValue,
             }
           : {}),
         ...(body !== undefined && { body }),

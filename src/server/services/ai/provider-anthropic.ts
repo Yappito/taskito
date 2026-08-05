@@ -64,6 +64,7 @@ export async function completeWithAnthropicProviderStructured(
         "anthropic-version": "2023-06-01",
       },
       signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
       body: JSON.stringify({
         model: provider.model,
         max_tokens: 1200,
@@ -72,6 +73,10 @@ export async function completeWithAnthropicProviderStructured(
         ...(tools?.length ? { tools: mapAnthropicTools(tools) } : {}),
       }),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error("AI provider returned a redirect, which is not allowed");
+    }
 
     if (!response.ok) {
       throw new Error(`Provider request failed with status ${response.status}`);
@@ -116,6 +121,7 @@ export async function streamWithAnthropicProvider(
         "anthropic-version": "2023-06-01",
       },
       signal: combinedSignal,
+      redirect: "manual",
       body: JSON.stringify({
         model: provider.model,
         max_tokens: 1200,
@@ -125,6 +131,10 @@ export async function streamWithAnthropicProvider(
         ...(tools?.length ? { tools: mapAnthropicTools(tools) } : {}),
       }),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error("AI provider returned a redirect, which is not allowed");
+    }
 
     if (!response.ok || !response.body) {
       throw new Error(`Provider request failed with status ${response.status}`);

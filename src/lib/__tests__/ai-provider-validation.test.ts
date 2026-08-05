@@ -1,7 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { LookupAddress } from "node:dns";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { lookupMock } = vi.hoisted(() => ({
+  lookupMock: vi.fn<(hostname: string, options: { all: true; verbatim?: boolean }) => Promise<LookupAddress[]>>(),
+}));
 
 vi.mock("node:dns/promises", () => ({
-  lookup: vi.fn(),
+  lookup: lookupMock,
 }));
 
 import {
@@ -10,12 +15,21 @@ import {
   normalizeAiProviderModel,
   validateAiProviderBaseUrl,
 } from "@/lib/ai-provider-validation";
-import { lookup } from "node:dns/promises";
 
-const lookupMock = vi.mocked(lookup);
+const originalAllowlist = process.env.AI_PROVIDER_HOST_ALLOWLIST;
+
+afterEach(() => {
+  if (originalAllowlist === undefined) {
+    delete process.env.AI_PROVIDER_HOST_ALLOWLIST;
+    return;
+  }
+
+  process.env.AI_PROVIDER_HOST_ALLOWLIST = originalAllowlist;
+});
 
 describe("ai-provider-validation", () => {
   beforeEach(() => {
+    delete process.env.AI_PROVIDER_HOST_ALLOWLIST;
     lookupMock.mockReset();
   });
 
@@ -39,6 +53,33 @@ describe("ai-provider-validation", () => {
     lookupMock.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
 
     await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).resolves.toBe("http://localhost:11434");
+  });
+
+  it("rejects provider hosts that cannot be resolved", async () => {
+    lookupMock.mockResolvedValue([]);
+
+    await expect(assertAiProviderBaseUrlFetchAllowed("https://api.example.com/v1")).rejects.toThrow(/could not be resolved/);
+  });
+
+  it("allows allowlisted hosts during provider fetches", async () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com";
+    lookupMock.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+
+    await expect(assertAiProviderBaseUrlFetchAllowed("https://api.example.com/v1")).resolves.toBe("https://api.example.com/v1");
+  });
+
+  it("rejects hosts that are not present in the allowlist", async () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com";
+    lookupMock.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+
+    await expect(assertAiProviderBaseUrlFetchAllowed("https://other.example.com/v1")).rejects.toThrow(/not present in the allowlist/);
+  });
+
+  it("allows hosts that resolve to an allowlisted IP entry", async () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "10.0.0.5";
+    lookupMock.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+
+    await expect(assertAiProviderBaseUrlFetchAllowed("http://10.0.0.5/v1")).resolves.toBe("http://10.0.0.5/v1");
   });
 
   it("normalizes provider model names", () => {

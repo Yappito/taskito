@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 const RESERVED_HEADER_NAMES = new Set([
   "accept",
   "authorization",
@@ -66,10 +67,23 @@ export function validateAiProviderBaseUrl(rawUrl: string) {
 export async function assertAiProviderBaseUrlFetchAllowed(rawUrl: string) {
   const normalizedUrl = normalizeBaseUrl(rawUrl);
   const parsed = new URL(normalizedUrl);
+  const hostname = normalizeHostname(parsed.hostname);
 
-  const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
   if (addresses.length === 0) {
     throw new Error("Provider host could not be resolved");
+  }
+
+  const allowedHosts = getAllowedHosts();
+  if (allowedHosts.length > 0) {
+    const allowedIpEntries = allowedHosts.filter((entry) => isIP(entry) !== 0);
+    const hostnameAllowed = allowedHosts.includes(hostname);
+    const resolvedAddressesAllowed = addresses.every(
+      (address) => hostnameAllowed || allowedIpEntries.includes(address.address)
+    );
+    if (!resolvedAddressesAllowed) {
+      throw new Error("Provider host is not present in the allowlist");
+    }
   }
 
   return normalizedUrl;

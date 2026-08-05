@@ -171,6 +171,13 @@ export const workflowRouter = createTRPCRouter({
         permission: "workflow_manage",
       });
 
+      const taskCount = await ctx.prisma.task.count({ where: { statusId: input.id } });
+      if (taskCount > 0) {
+        throw new Error(
+          `Cannot delete status: ${taskCount} task(s) still use it. Move the tasks to another status first.`
+        );
+      }
+
       await ctx.prisma.$transaction(async (tx) => {
         await tx.workflowStatus.delete({ where: { id: input.id } });
         await syncProjectClosedTasks(tx, status.projectId);

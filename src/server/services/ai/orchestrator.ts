@@ -164,35 +164,37 @@ export async function persistAiAssistantCompletion(
   );
 
   if (input.conversation.mode === "yolo") {
-    await Promise.all(
-      executions.map(async (execution) => {
-        try {
-          const result = await executeAiAction(prisma, {
-            actionExecution: execution,
-            requestedByUserId: input.requestedByUserId,
-            selectedTaskIds: input.selectedTaskIds,
-          });
+    // Execute sequentially in proposal order: parallel execution could interleave
+    // checkpoints of independent actions and defeats per-action rollback safety.
+    for (const execution of executions) {
+      try {
+        const result = await executeAiAction(prisma, {
+          actionExecution: execution,
+          requestedByUserId: input.requestedByUserId,
+          selectedTaskIds: input.selectedTaskIds,
+        });
 
-          await prisma.aiActionExecution.update({
-            where: { id: execution.id },
-            data: {
-              status: "executed",
-              executedByUserId: input.requestedByUserId,
-              executedPayload: execution.proposedPayload as Prisma.InputJsonValue,
-              result: (result ?? null) as Prisma.InputJsonValue,
-            },
-          });
-        } catch (error) {
-          await prisma.aiActionExecution.update({
-            where: { id: execution.id },
-            data: {
-              status: "failed",
-              errorMessage: error instanceof Error ? error.message : "AI action execution failed",
-            },
-          });
-        }
-      })
-    );
+        await prisma.aiActionExecution.update({
+          where: { id: execution.id },
+          data: {
+            status: "executed",
+            executedByUserId: input.requestedByUserId,
+            executedPayload: execution.proposedPayload as Prisma.InputJsonValue,
+            result: (result ?? null) as Prisma.InputJsonValue,
+          },
+        });
+      } catch (error) {
+        // Persisting the result failed after a successful execution: the
+        // execution must not stay `approved` (it would look re-runnable).
+        await prisma.aiActionExecution.update({
+          where: { id: execution.id },
+          data: {
+            status: "failed",
+            errorMessage: error instanceof Error ? error.message : "AI action execution failed",
+          },
+        });
+      }
+    }
   }
 
   return { message: assistantMessage, proposals: executions };
