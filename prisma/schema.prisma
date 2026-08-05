@@ -662,12 +662,12 @@ model TaskTag {
 model Comment {
   id        String   @id @default(cuid())
   taskId    String
-  authorId  String
+  authorId  String?
   content   String
   createdAt DateTime @default(now())
 
   task        Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author      User                @relation(fields: [authorId], references: [id])
+  author      User?               @relation(fields: [authorId], references: [id], onDelete: SetNull)
   attachments CommentAttachment[]
 
   @@index([taskId, createdAt])
@@ -939,7 +939,7 @@ model AiConversation {
   id                 String             @id @default(cuid())
   projectId          String
   taskId             String?
-  createdByUserId    String
+  createdByUserId    String?
   providerId         String
   mode               AiConversationMode @default(approval)
   title              String?
@@ -952,7 +952,7 @@ model AiConversation {
 
   project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   task          Task?                @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  createdByUser User                 @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  createdByUser User?                @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: SetNull)
   provider      AiProviderConnection @relation(fields: [providerId], references: [id], onDelete: Restrict)
   messages      AiMessage[]
   actionExecutions AiActionExecution[]
@@ -986,7 +986,7 @@ model AiActionExecution {
   messageId         String?
   projectId         String
   taskId            String?
-  requestedByUserId String
+  requestedByUserId String?
   executedByUserId  String?
   actionType        AiActionType
   title             String?
@@ -1010,7 +1010,7 @@ model AiActionExecution {
   message         AiMessage?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
   project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   task            Task?           @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  requestedByUser User            @relation("RequestedAiActions", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  requestedByUser User?           @relation("RequestedAiActions", fields: [requestedByUserId], references: [id], onDelete: SetNull)
   executedByUser  User?           @relation("ExecutedAiActions", fields: [executedByUserId], references: [id], onDelete: SetNull)
   rolledBackByUser User?           @relation("RolledBackAiActions", fields: [rolledBackByUserId], references: [id], onDelete: SetNull)
 

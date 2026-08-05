@@ -993,7 +993,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                             className="flex items-start justify-between gap-3 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
-                            <span>{comment.author.name ?? "User"}</span>
+                            <span>{comment.author?.name ?? "User"}</span>
                             <div className="flex items-center gap-2">
                               <span>
                                 {new Date(comment.createdAt).toLocaleDateString()}

@@ -7,3 +7,4 @@
 - Phase 3 — done 2026-08-05 — 121 tests — model=opencode-go/deepseek-v4-flash variant=max fix_cycles=1 wall=~25min (1 relaunch after dead session)
 - Phase 4 — done 2026-08-05 — 126 tests — model=opencode-go/deepseek-v4-flash variant=max fix_cycles=0 wall=~12min
 - Phase 5 — done 2026-08-05 — 126 tests — model=opencode-go/deepseek-v4-flash variant=max fix_cycles=0 wall=~30min (incl. docker smoke test)
+- Phase 6 — done 2026-08-05 — 136 tests — model=opencode-go/deepseek-v4-flash variant=max fix_cycles=1 wall=~25min (Hermes post-fix: as-never casts)
