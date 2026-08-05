@@ -20,7 +20,7 @@ Taskito is a self-hosted task manager for project-scoped planning, delivery, and
 - Project-scoped search with keyboard navigation, assignee/status context, and task key support
 - Notifications with preferences, mark-all-read, and clear-all actions
 - Global settings for users, projects, workflows, tags, and custom fields
-- Docker Compose deployment with PostgreSQL, nginx, migrations on boot, and persistent uploads
+- Docker Compose deployment with PostgreSQL, nginx, a one-shot migration service, and persistent uploads
 
 ## AI Workspace
 
@@ -137,11 +137,13 @@ docker compose up -d --pull always
 
 This starts:
 
+- `migrate` — a one-shot service that runs `prisma migrate deploy` and exits
 - `app` for the Next.js server
 - `postgres` for the database
 - `nginx` on port `80`
 
-The application container runs `prisma migrate deploy` automatically before starting the server.
+The `app` container waits for the `migrate` service to complete successfully and
+starts the server directly; it no longer runs migrations itself.
 
 ### 4. Create the first admin account
 
@@ -194,6 +196,30 @@ docker compose ps
 docker compose logs -f app
 ```
 
+## Reverse proxy / TLS
+
+The compose stack serves plain HTTP on port `80` via nginx, and the app
+container itself speaks HTTP (no TLS inside the container). For HTTPS in
+production, put a TLS-terminating reverse proxy in front of the stack. Caddy is
+recommended:
+
+```
+# Caddyfile
+taskito.example.com {
+    reverse_proxy app:3000
+}
+```
+
+With automatic HTTPS, Caddy terminates TLS in front of the app container, sends
+HSTS headers by default, and sets the `X-Forwarded-*` headers (including
+`X-Forwarded-Proto: https`) for the upstream app.
+
+Set `AUTH_URL` to the public `https://` URL (for example
+`AUTH_URL=https://taskito.example.com`) — the compose file already injects it
+from your `.env`. In production the app refuses to boot without a valid https
+`AUTH_URL`, uses it to mark session cookies `secure`, and derives `trustHost`
+from it. The compose default `AUTH_TRUST_HOST=true` also works with this setup.
+
 ## Persistence
 
 The compose stack persists two things by default:
@@ -235,6 +261,7 @@ Useful commands from the repository root:
 | `POSTGRES_DB` | Yes | PostgreSQL database name |
 | `AUTH_URL` | Yes | Public base URL of the app |
 | `AUTH_SECRET` | Yes | Auth.js signing secret |
+| `CRON_SECRET` | No | Bearer secret protecting cron endpoints such as `/api/cron/process-recurring` |
 | `OIDC_ISSUER` | No | Generic OIDC issuer URL for single-provider SSO |
 | `OIDC_CLIENT_ID` | No | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | No | OIDC client secret |

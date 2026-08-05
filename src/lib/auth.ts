@@ -21,6 +21,21 @@ if (isProductionRuntime) {
   if (!productionSecret || productionSecret.length < 32 || invalidSecrets.has(productionSecret)) {
     throw new Error("AUTH_SECRET must be set to a cryptographically strong value of at least 32 characters in production");
   }
+
+  // TLS is terminated by the reverse proxy (Caddy/nginx) in front of the app, so the
+  // public URL must be https even though the app itself serves http internally.
+  let authUrl: URL | null = null;
+  const rawAuthUrl = process.env.AUTH_URL;
+  if (rawAuthUrl) {
+    try {
+      authUrl = new URL(rawAuthUrl);
+    } catch {
+      authUrl = null;
+    }
+  }
+  if (!authUrl || authUrl.protocol !== "https:") {
+    throw new Error("AUTH_URL must be set to a valid absolute https URL in production");
+  }
 }
 
 function readProfileString(profile: OidcProfile, keys: string[]) {
@@ -175,7 +190,9 @@ async function buildAuthConfig(): Promise<NextAuthConfig> {
   return {
     adapter: PrismaAdapter(prisma),
     session: { strategy: "jwt", maxAge: 60 * 60 * 12 },
-    trustHost: process.env.AUTH_TRUST_HOST === "true",
+    // Trust the proxy host when AUTH_URL is set (production deployments behind a
+    // reverse proxy) or when explicitly opted in via AUTH_TRUST_HOST (compose sets it).
+    trustHost: Boolean(process.env.AUTH_URL) || process.env.AUTH_TRUST_HOST === "true",
     pages: {
       signIn: "/login",
     },
