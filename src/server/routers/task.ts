@@ -456,7 +456,7 @@ export const taskRouter = createTRPCRouter({
           },
           project: { select: { key: true } },
         },
-        orderBy: { dueDate: "asc" },
+        orderBy: [{ dueDate: "asc" }, { taskNumber: "asc" }, { id: "asc" }],
         take: limit + 1,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });

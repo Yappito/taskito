@@ -1,7 +1,22 @@
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { requireProjectAccess } from "@/server/authz";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
+
+/** Number of most recently closed tasks sampled for cycle-time calculation. */
+const CYCLE_TIME_SAMPLE_SIZE = 500;
+
+/** Top-N overdue tasks included in the summary. */
+const AT_RISK_LIMIT = 10;
+
+const priorityRank: Record<string, number> = {
+  none: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  urgent: 4,
+};
 
 function startOfDay(date: Date) {
   const copy = new Date(date);
@@ -29,16 +44,80 @@ export const analyticsRouter = createTRPCRouter({
         ...(input.sprintId ? { sprintId: input.sprintId } : {}),
       };
 
-      const [tasks, totalLogged] = await Promise.all([
-        ctx.prisma.task.findMany({
+      const activeArchivedWhere: Prisma.TaskWhereInput = {
+        OR: [{ archivedAt: null }, { archivedAt: { gt: now } }],
+      };
+      const completedWhere: Prisma.TaskWhereInput = {
+        ...baseWhere,
+        OR: [
+          { closedAt: { not: null } },
+          { status: { category: { in: ["done", "cancelled"] } } },
+        ],
+      };
+      const overdueWhere: Prisma.TaskWhereInput = {
+        ...baseWhere,
+        ...activeArchivedWhere,
+        dueDate: { lt: today },
+        closedAt: null,
+        status: { category: { notIn: ["done", "cancelled"] } },
+      };
+
+      const velocityDays = Array.from({ length: 7 }, (_, index) => {
+        const day = addDays(weekStart, index);
+        return { day, nextDay: addDays(day, 1) };
+      });
+
+      const [
+        totalTasks,
+        activeTasks,
+        completedTasks,
+        overdueTasks,
+        statusGroups,
+        priorityGroups,
+        statuses,
+        // Cycle time is sampled on the most recent 500 completed tasks (bounded
+        // by design — the full history is not fetched for the average).
+        recentClosedTasks,
+        atRiskTasks,
+        totalLogged,
+      ] = await Promise.all([
+        ctx.prisma.task.count({ where: baseWhere }),
+        ctx.prisma.task.count({ where: { ...baseWhere, ...activeArchivedWhere } }),
+        ctx.prisma.task.count({ where: completedWhere }),
+        ctx.prisma.task.count({ where: overdueWhere }),
+        ctx.prisma.task.groupBy({
+          by: ["statusId"],
           where: baseWhere,
-          include: {
+          _count: { _all: true },
+        }),
+        ctx.prisma.task.groupBy({
+          by: ["priority"],
+          where: baseWhere,
+          _count: { _all: true },
+        }),
+        ctx.prisma.workflowStatus.findMany({
+          where: { projectId: input.projectId },
+          select: { id: true, name: true, color: true, order: true },
+          orderBy: { order: "asc" },
+        }),
+        ctx.prisma.task.findMany({
+          where: { ...completedWhere, closedAt: { not: null } },
+          select: { createdAt: true, closedAt: true },
+          orderBy: { closedAt: "desc" },
+          take: CYCLE_TIME_SAMPLE_SIZE,
+        }),
+        ctx.prisma.task.findMany({
+          where: overdueWhere,
+          select: {
+            id: true,
+            taskNumber: true,
+            title: true,
+            dueDate: true,
             status: { select: { id: true, name: true, color: true, category: true, isFinal: true } },
             assignee: { select: { id: true, name: true, email: true, image: true } },
-            sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           },
           orderBy: [{ dueDate: "asc" }, { taskNumber: "asc" }],
-          take: 500,
+          take: AT_RISK_LIMIT,
         }),
         ctx.prisma.timeLog.aggregate({
           where: { task: baseWhere },
@@ -46,33 +125,33 @@ export const analyticsRouter = createTRPCRouter({
         }),
       ]);
 
-      const activeTasks = tasks.filter((task) => !task.archivedAt || task.archivedAt > now);
-      const completedTasks = tasks.filter((task) => task.closedAt || task.status.category === "done" || task.status.category === "cancelled");
-      const overdueTasks = activeTasks.filter((task) => task.dueDate < today && !task.closedAt && task.status.category !== "done" && task.status.category !== "cancelled");
+      const statusById = new Map(statuses.map((status) => [status.id, status]));
+      const statusDistribution = statusGroups
+        .map((group) => ({
+          id: group.statusId,
+          name: statusById.get(group.statusId)?.name ?? "Unknown",
+          color: statusById.get(group.statusId)?.color ?? "#6b7280",
+          count: group._count._all,
+        }))
+        .sort((a, b) => (statusById.get(a.id)?.order ?? 0) - (statusById.get(b.id)?.order ?? 0));
 
-      const statusDistribution = Object.values(tasks.reduce<Record<string, { id: string; name: string; color: string; count: number }>>((acc, task) => {
-        acc[task.status.id] ??= { id: task.status.id, name: task.status.name, color: task.status.color, count: 0 };
-        acc[task.status.id].count += 1;
-        return acc;
-      }, {}));
+      const priorityDistribution = priorityGroups
+        .map((group) => ({ priority: group.priority, count: group._count._all }))
+        .sort((a, b) => (priorityRank[a.priority] ?? 0) - (priorityRank[b.priority] ?? 0));
 
-      const priorityDistribution = Object.values(tasks.reduce<Record<string, { priority: string; count: number }>>((acc, task) => {
-        acc[task.priority] ??= { priority: task.priority, count: 0 };
-        acc[task.priority].count += 1;
-        return acc;
-      }, {}));
+      const velocityCounts = await Promise.all(
+        velocityDays.flatMap(({ day, nextDay }) => [
+          ctx.prisma.task.count({ where: { ...baseWhere, createdAt: { gte: day, lt: nextDay } } }),
+          ctx.prisma.task.count({ where: { ...baseWhere, closedAt: { gte: day, lt: nextDay } } }),
+        ])
+      );
+      const velocity = velocityDays.map(({ day }, index) => ({
+        date: day.toISOString(),
+        created: velocityCounts[index * 2],
+        completed: velocityCounts[index * 2 + 1],
+      }));
 
-      const velocity = Array.from({ length: 7 }, (_, index) => {
-        const day = addDays(weekStart, index);
-        const nextDay = addDays(day, 1);
-        return {
-          date: day.toISOString(),
-          created: tasks.filter((task) => task.createdAt >= day && task.createdAt < nextDay).length,
-          completed: tasks.filter((task) => task.closedAt && task.closedAt >= day && task.closedAt < nextDay).length,
-        };
-      });
-
-      const closedDurations = completedTasks
+      const closedDurations = recentClosedTasks
         .filter((task) => task.closedAt)
         .map((task) => Math.max(0, task.closedAt!.getTime() - task.createdAt.getTime()));
       const avgCycleTimeHours = closedDurations.length
@@ -80,24 +159,17 @@ export const analyticsRouter = createTRPCRouter({
         : null;
 
       return {
-        totalTasks: tasks.length,
-        activeTasks: activeTasks.length,
-        completedTasks: completedTasks.length,
-        overdueTasks: overdueTasks.length,
-        completionRate: tasks.length ? Math.round((completedTasks.length / tasks.length) * 100) : 0,
+        totalTasks,
+        activeTasks,
+        completedTasks,
+        overdueTasks,
+        completionRate: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0,
         avgCycleTimeHours,
         loggedSeconds: totalLogged._sum.duration ?? 0,
         statusDistribution,
         priorityDistribution,
         velocity,
-        atRiskTasks: overdueTasks.slice(0, 10).map((task) => ({
-          id: task.id,
-          taskNumber: task.taskNumber,
-          title: task.title,
-          dueDate: task.dueDate,
-          status: task.status,
-          assignee: task.assignee,
-        })),
+        atRiskTasks,
       };
     }),
 });
