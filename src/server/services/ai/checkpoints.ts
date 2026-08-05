@@ -46,6 +46,10 @@ function asString(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
 
+function toNullableString(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
 function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
@@ -92,6 +96,7 @@ function serializeTask(task: Awaited<ReturnType<typeof fetchTaskRows>>[number]):
       description: task.description ?? null,
       body: task.body,
       statusId: task.statusId,
+      sprintId: task.sprintId ?? null,
       priority: task.priority,
       dueDate: toIso(task.dueDate),
       startDate: toIso(task.startDate),
@@ -345,6 +350,7 @@ async function restoreTaskSnapshot(
       description: toInputJsonValue(task.data.description),
       body: asString(task.data.body) ?? null,
       statusId: String(task.data.statusId),
+      sprintId: toNullableString(task.data.sprintId),
       priority: task.data.priority as "none" | "low" | "medium" | "high" | "urgent",
       dueDate: toDate(task.data.dueDate, "dueDate"),
       startDate: toNullableDate(task.data.startDate, "startDate"),
