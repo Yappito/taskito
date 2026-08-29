@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
+import { looksLikeBearerApiToken } from "@/lib/api-token-format";
 
 function getOriginalProtocol(req: Request & { nextUrl: URL }) {
   const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
@@ -25,6 +26,7 @@ export default async function middleware(req: Request & { nextUrl: URL }) {
   });
   const isLoggedIn = !!token;
   const { pathname } = req.nextUrl;
+  const authorization = req.headers.get("authorization");
 
   // Public routes that don't require auth
   const publicRoutes = ["/login", "/api/auth", "/manifest.json", "/sw.js", "/icon.svg", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"];
@@ -35,6 +37,19 @@ export default async function middleware(req: Request & { nextUrl: URL }) {
 
   // Allow tRPC health check without auth
   if (pathname.startsWith("/api/trpc") && pathname.includes("project.health")) {
+    return NextResponse.next();
+  }
+
+  // Personal API tokens (bearer auth): API clients — scripts, external tools,
+  // CI, MCP — send `Authorization: Bearer tk_…` instead of a session cookie.
+  // Let valid-looking tokens through to the JSON/tRPC handlers under /api;
+  // the handlers verify the token (hash, expiry, revocation) themselves.
+  // Page routes stay cookie-gated: the cookie gate below is unchanged.
+  if (
+    !isLoggedIn
+    && pathname.startsWith("/api/")
+    && looksLikeBearerApiToken(authorization)
+  ) {
     return NextResponse.next();
   }
 

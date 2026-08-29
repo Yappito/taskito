@@ -6,6 +6,8 @@ declare module "next-auth" {
       id: string;
       role: "admin" | "member";
     };
+    /** "cookie" for interactive sessions; "token" when established via a personal API token. */
+    authMethod?: "cookie" | "token";
   }
 
   interface User {

@@ -51,6 +51,7 @@ model User {
   executedAiActionExecutions AiActionExecution[] @relation("ExecutedAiActions")
   rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
   timeLogs      TimeLog[]
+  apiTokens     ApiToken[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -1021,4 +1022,25 @@ model AiActionExecution {
   @@index([taskId, createdAt])
   @@index([requestedByUserId, createdAt])
   @@index([rolledBackByUserId, createdAt])
+}
+
+/// Personal API tokens for bearer authentication of scripts, external tools
+/// and API clients. The plaintext token is never stored: only a short lookup
+/// prefix and the argon2id hash of the full token.
+model ApiToken {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  tokenPrefix String
+  tokenHash   String
+  scopes      String[]  @default(["*"])
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenPrefix])
 }

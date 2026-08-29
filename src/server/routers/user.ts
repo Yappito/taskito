@@ -9,7 +9,12 @@ import {
 } from "@/lib/notification-preferences";
 import { appearanceSettingsInputSchema, getAppearanceSettings, normalizeAppearanceSettings } from "@/lib/themes";
 import { PROJECT_PERMISSIONS } from "@/server/authz";
-import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
+import { createTRPCRouter, adminProcedure, cookieSessionProcedure, protectedProcedure } from "../trpc";
+import {
+  createApiTokenForUser,
+  listApiTokensForUser,
+  revokeApiTokenForUser,
+} from "@/server/services/api-tokens";
 import { hashPassword, verifyPassword } from "@/lib/password";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@/lib/password-policy";
 
@@ -361,7 +366,8 @@ export const userRouter = createTRPCRouter({
       return next;
     }),
 
-  updateProfile: protectedProcedure
+  /** Update the current user's profile — cookie sessions only, never API tokens. */
+  updateProfile: cookieSessionProcedure
     .input(
       z.object({
         name: z.string().trim().min(1).max(100),
@@ -384,8 +390,8 @@ export const userRouter = createTRPCRouter({
       });
     }),
 
-  /** Change the current user's password */
-  changePassword: protectedProcedure
+  /** Change the current user's password — cookie sessions only, never API tokens. */
+  changePassword: cookieSessionProcedure
     .input(
       z.object({
         currentPassword: z.string().min(1),
@@ -420,6 +426,37 @@ export const userRouter = createTRPCRouter({
         },
       });
 
+      return { success: true };
+    }),
+
+  /** Create a personal API token (cookie sessions only). The plaintext token is returned exactly once. */
+  createApiToken: cookieSessionProcedure
+    .input(
+      z.object({
+        name: z.string().trim().min(1).max(100),
+        expiresInDays: z.number().int().min(1).max(365).optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return createApiTokenForUser(ctx.prisma, ctx.session.user.id, {
+        name: input.name,
+        expiresInDays: input.expiresInDays ?? null,
+      });
+    }),
+
+  /** List the current user's API tokens (cookie sessions only; never includes the hash). */
+  listApiTokens: cookieSessionProcedure.query(async ({ ctx }) => {
+    return listApiTokensForUser(ctx.prisma, ctx.session.user.id);
+  }),
+
+  /** Revoke one of the current user's API tokens (cookie sessions only). */
+  revokeApiToken: cookieSessionProcedure
+    .input(z.object({ id: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const revoked = await revokeApiTokenForUser(ctx.prisma, ctx.session.user.id, input.id);
+      if (!revoked) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "API token not found" });
+      }
       return { success: true };
     }),
 

@@ -275,6 +275,26 @@ Both task recurrence and due-date automation can also be triggered manually from
 
 Prefer running exactly one path: leave the built-in scheduler on and skip the cron job, or disable the built-in scheduler with `SCHEDULER_ENABLED=false` and drive jobs externally.
 
+## API access
+
+Personal API tokens let scripts, external tools (and, later, MCP clients) call Taskito's tRPC API and the task/comment JSON routes as you, without an interactive browser session.
+
+Create a token under **Settings → Profile → API tokens**. The plaintext token (`tk_<32 random bytes, base64url>`) is shown exactly once at creation and only an argon2id hash plus a short lookup prefix are stored. Requests authenticate with a bearer header:
+
+```bash
+curl -s http://localhost:3000/api/trpc/user.me \
+  -H "Authorization: Bearer tk_YOUR-TOKEN-HERE"
+```
+
+This targets the tRPC endpoint (`/api/trpc/...`, superjson-encoded responses) and works the same against the JSON routes under `/api/tasks/**` and `/api/comment-attachments/**`.
+
+Notes:
+
+- Tokens are personal: requests act as the owning user, and the role is always re-read from the user record (a disabled user's tokens stop working immediately).
+- `scopes` is reserved for future fine-grained permissions; v1 creates every token with the `["*"]` wildcard scope only.
+- Tokens never grant admin. v1 decision: token-authenticated requests can call any non-admin API as the user, but every `adminProcedure` — including for admin users — plus `user.changePassword`, `user.updateProfile`, the global-admin checks (e.g. shared AI provider management), and the token management procedures themselves (`user.createApiToken`, `user.listApiTokens`, `user.revokeApiToken`) are rejected and require an interactive browser session. Tokens also cannot be used to change your password or email, and are not accepted by `/api/auth/*` (NextAuth) endpoints.
+- Token requests may not list or modify other users; failed bearer attempts are rate limited per client IP.
+
 ## Operations
 
 Useful commands from the repository root:

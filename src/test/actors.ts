@@ -201,6 +201,11 @@ export function adminUser(): WiredActor {
 
 type CallerFactoryArg = Parameters<typeof createCallerFactory>[0];
 
+export interface CallerForOptions {
+  /** "cookie" (default) for browser sessions; "token" for bearer-token sessions. */
+  authMethod?: "cookie" | "token";
+}
+
 /**
  * Builds a tRPC caller for `router` with the given prisma mock and session
  * user (`{ id, role }`), mirroring `createTRPCContext` in production.
@@ -208,12 +213,17 @@ type CallerFactoryArg = Parameters<typeof createCallerFactory>[0];
 export function callerFor(
   router: CallerFactoryArg,
   prisma: unknown,
-  user: SessionUserLike
+  user: SessionUserLike,
+  options?: CallerForOptions
 ): Record<string, (input?: unknown) => Promise<unknown>> {
   const createCaller = createCallerFactory(router as Parameters<typeof createCallerFactory>[0]);
   return createCaller({
     prisma,
-    session: { user, expires: "" },
+    session: {
+      user,
+      expires: "",
+      ...(options?.authMethod === "token" ? { authMethod: "token" } : {}),
+    },
   } as unknown as TRPCContext) as unknown as Record<
     string,
     (input?: unknown) => Promise<unknown>

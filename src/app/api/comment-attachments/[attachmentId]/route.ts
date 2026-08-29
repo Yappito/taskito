@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import type { Session } from "next-auth";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { bearerSessionFromIdentity, resolveBearerToken } from "@/server/services/api-tokens";
 import { requireProjectAccess } from "@/server/authz";
 import {
   getCommentAttachmentResponseHeaders,
@@ -9,10 +11,15 @@ import {
 } from "@/server/services/comment-attachments";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ attachmentId: string }> }
 ) {
-  const session = await auth();
+  let session: Session | null = await auth();
+  if (!session?.user?.id) {
+    // Personal API tokens: fall back to `Authorization: Bearer tk_…`
+    const identity = await resolveBearerToken(prisma, request.headers);
+    session = identity ? bearerSessionFromIdentity(identity) : null;
+  }
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
