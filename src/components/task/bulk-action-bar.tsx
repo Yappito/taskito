@@ -20,6 +20,9 @@ interface BulkActionSprintOption {
 
 interface BulkActionBarProps {
   selectedCount: number;
+  /** Number of tasks currently loaded in the view; bulk selection only ever
+   * acts on these, never on unloaded pages. */
+  loadedCount: number;
   statuses: BulkActionStatusOption[];
   sprints: BulkActionSprintOption[];
   tags: TaskFilterTagOption[];
@@ -41,6 +44,7 @@ const NO_SPRINT_VALUE = "__no_sprint";
 
 export function BulkActionBar({
   selectedCount,
+  loadedCount,
   statuses,
   sprints,
   tags,
@@ -97,8 +101,8 @@ export function BulkActionBar({
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-sm" style={{ color: "var(--color-text)" }}>
           <span className="font-medium">{selectedCount} selected</span>
-          <Button type="button" variant="secondary" size="sm" onClick={onSelectAllVisible}>
-            {allVisibleSelected ? "Deselect visible" : "Select visible"}
+          <Button type="button" variant="secondary" size="sm" onClick={onSelectAllVisible} aria-label={allVisibleSelected ? "Deselect all loaded tasks" : "Select all loaded tasks"}>
+            {allVisibleSelected ? `Deselect all loaded (${loadedCount})` : `Select all loaded (${loadedCount})`}
           </Button>
           <Button type="button" variant="secondary" size="sm" onClick={onClearSelection}>
             Clear selection

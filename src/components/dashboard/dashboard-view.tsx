@@ -360,6 +360,12 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
     [dashboards, isCreatingDashboard, selectedDashboardId]
   );
 
+  // NOTE(pagination): this view never queries `task.list` directly — widget task
+  // data (metric/pie/bar/table) is fetched server-side by
+  // `dashboard.getDashboardData`, which caps table widgets at a small page
+  // (take: 12). Real pagination for dashboard widget tables is a follow-up:
+  // TODO(pagination): range/offset-based widget task tables (server-side), see
+  // follow-up bead "dashboard widget table pagination".
   const { data: dashboardData, isLoading: dataLoading } = trpc.dashboard.getDashboardData.useQuery(
     { dashboardId: selectedDashboard?.id ?? "" },
     { enabled: !!selectedDashboard?.id }

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Inbox } from "lucide-react";
 import { trpc } from "@/lib/trpc-client";
 import { cn } from "@/lib/utils";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
 import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
+import { useLoadMoreSentinel, useTaskPages } from "@/hooks/use-task-pages";
+import { formatShowingCount } from "@/lib/task-pagination";
 
 import { TaskDetail } from "./task-detail";
 import { BulkActionBar } from "./bulk-action-bar";
@@ -14,12 +16,13 @@ import { TaskViewFilters } from "./task-view-filters";
 import { Alert } from "@/components/ui/alert";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PriorityBadge } from "@/components/ui/priority-badge";
 import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
 import { TagBadgeList } from "@/components/ui/tag-badge";
 import { ariaSortFor, type TaskSortDirection, type TaskSortField } from "./task-view-helpers";
-import type { TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
+import type { TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
 interface ListViewProps {
@@ -52,12 +55,24 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     [projectId, filters.queryFilters]
   );
 
-  const { data, isLoading, error } = trpc.task.list.useQuery(taskListInput, {
-    placeholderData: (previousData) => previousData,
-  });
-
-  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
+  const {
+    tasks,
+    isLoading,
+    error,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+    total,
+    totalLoaded,
+  } = useTaskPages(taskListInput);
   const queryError = error ? (error instanceof Error ? error.message : "Unable to load tasks.") : null;
+
+  const handleLoadMore = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  const sentinelRef = useLoadMoreSentinel(handleLoadMore, hasNextPage && !isFetchingNextPage);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -89,7 +104,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     },
   });
 
-  if (isLoading && !data) {
+  if (isLoading && tasks.length === 0) {
     return (
       <SkeletonGroup className="space-y-2 p-4">
         {Array.from({ length: 5 }).map((_, i) => (
@@ -198,6 +213,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
 
       <BulkActionBar
         selectedCount={selectedTaskIds.length}
+        loadedCount={tasks.length}
         statuses={statuses}
         sprints={sprints.map((sprint) => ({ id: sprint.id, name: sprint.name, status: sprint.status }))}
         tags={tags}
@@ -253,7 +269,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                   type="checkbox"
                   checked={allVisibleSelected}
                   onChange={toggleVisibleSelection}
-                  aria-label="Select all visible tasks"
+                  aria-label={allVisibleSelected ? "Deselect all loaded tasks" : "Select all loaded tasks"}
                 />
               </th>
               <th
@@ -444,7 +460,35 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
             className="p-8"
           />
         )}
+        {tasks.length > 0 && (
+          <div ref={sentinelRef} aria-hidden="true" className="h-px" />
+        )}
       </div>
+
+      {(tasks.length > 0 || hasNextPage) && (
+        <div
+          className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2 text-xs"
+          style={{
+            backgroundColor: "var(--color-surface)",
+            borderColor: "var(--color-border)",
+            color: "var(--color-text-secondary)",
+            boxShadow: "var(--shadow-sm)",
+          }}
+        >
+          <span data-testid="task-pagination-status">{formatShowingCount(totalLoaded, total)}</span>
+          {hasNextPage && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleLoadMore}
+              disabled={isFetchingNextPage}
+            >
+              {isFetchingNextPage ? "Loading more…" : "Load more"}
+            </Button>
+          )}
+        </div>
+      )}
 
       {selectedTaskId && (
         <TaskDetail

@@ -4,7 +4,9 @@ import { useMemo, useState } from "react";
 
 import { TaskDetail } from "@/components/task/task-detail";
 import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/alert";
 import { trpc } from "@/lib/trpc-client";
+import { firstPageTruncationMessage } from "@/lib/task-pagination";
 import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
 interface CalendarViewProps {
@@ -34,8 +36,12 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
   const monthStart = useMemo(() => startOfMonth(cursorDate), [cursorDate]);
   const gridStart = useMemo(() => addDays(monthStart, -monthStart.getDay()), [monthStart]);
   const gridEnd = useMemo(() => addDays(gridStart, 42), [gridStart]);
+  // TODO(pagination): load tasks beyond the first page with range-based queries
+  // (e.g. paged due-date windows per month grid) instead of a single capped page.
+  // Follow-up bead: calendar range-based pagination.
   const { data, isLoading } = trpc.task.list.useQuery({ projectId, dueDateFrom: addDays(gridStart, -1), dueDateTo: addDays(gridEnd, 1), includeArchived: true, limit: 100 });
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
+  const truncationNotice = firstPageTruncationMessage(tasks.length, data?.totalCount ?? null);
   const tasksByDate = useMemo(() => {
     const groups = new Map<string, TaskCardData[]>();
     for (const task of tasks) {
@@ -87,6 +93,11 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
         })}
       </div>
       {isLoading && <p className="mt-4 text-sm" style={{ color: "var(--color-text-muted)" }}>Loading calendar...</p>}
+      {truncationNotice && (
+        <Alert variant="info" title="Calendar is partial:" className="mt-4">
+          {truncationNotice} This view shows a single page; tasks outside it are not rendered.
+        </Alert>
+      )}
       {selectedTaskId && <TaskDetail taskId={selectedTaskId} statuses={statuses} onClose={() => setSelectedTaskId(null)} />}
     </div>
   );

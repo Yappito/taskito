@@ -3,7 +3,9 @@
 import { useMemo, useState } from "react";
 
 import { TaskDetail } from "@/components/task/task-detail";
+import { Alert } from "@/components/ui/alert";
 import { trpc } from "@/lib/trpc-client";
+import { firstPageTruncationMessage } from "@/lib/task-pagination";
 import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
 interface GanttViewProps {
@@ -25,8 +27,12 @@ function daysBetween(start: Date, end: Date) {
 
 export function GanttView({ projectId, statuses }: GanttViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  // TODO(pagination): load tasks beyond the first page with range-based queries
+  // (e.g. paged date windows aligned with the visible timeline) instead of a
+  // single capped page. Follow-up bead: gantt range-based pagination.
   const { data, isLoading } = trpc.task.list.useQuery({ projectId, includeArchived: false, limit: 100 });
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data?.items]);
+  const truncationNotice = firstPageTruncationMessage(tasks.length, data?.totalCount ?? null);
   const range = useMemo(() => {
     const dates = tasks.flatMap((task) => [task.startDate ? new Date(task.startDate) : new Date(task.dueDate), new Date(task.dueDate)]);
     const minTime = dates.reduce((minimum, date) => Math.min(minimum, date.getTime()), Number.POSITIVE_INFINITY);
@@ -94,6 +100,11 @@ export function GanttView({ projectId, statuses }: GanttViewProps) {
           {tasks.length === 0 && <div className="p-8 text-center text-sm" style={{ color: "var(--color-text-muted)" }}>{isLoading ? "Loading tasks..." : "No tasks to show."}</div>}
         </div>
       </div>
+      {truncationNotice && (
+        <Alert variant="info" title="Timeline is partial:" className="mt-4">
+          {truncationNotice} Bars for older tasks beyond the first page are not rendered.
+        </Alert>
+      )}
       {selectedTaskId && <TaskDetail taskId={selectedTaskId} statuses={statuses} onClose={() => setSelectedTaskId(null)} />}
     </div>
   );
