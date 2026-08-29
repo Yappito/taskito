@@ -140,8 +140,10 @@ async function runDueDateAutomationJob(signal: AbortSignal) {
 /**
  * Daily due-soon digest: only runs from SCHEDULER_DIGEST_HOUR_UTC onwards.
  * runDailyDigestJob itself is double-send guarded — a per-process fast path
- * plus a DB-backed per-user lastDigestSentAt check in User.settings — so
- * repeated ticks and other replicas cannot resend for the same UTC day.
+ * plus durable per-user/day EmailDigestClaim rows (unique on userId + dayUtc,
+ * with explicit pending/succeeded/failed states so failed recipients are
+ * retried on a later tick) — so repeated ticks and other replicas cannot
+ * resend for the same UTC day.
  */
 async function runDigestJob(now: Date, signal: AbortSignal) {
   assertTickAlive(signal);
