@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { REENCRYPT_ADVISORY_LOCK_KEY, withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
+import { STORAGE_SETTINGS_ID } from "@/server/services/storage-settings";
 import { aiRouter } from "@/server/routers/ai";
 import { oidcRouter } from "@/server/routers/oidc";
 import { storageRouter } from "@/server/routers/storage";
@@ -170,6 +171,100 @@ describe("secret writers take the rotation advisory lock (M6b)", () => {
 
     expectAdvisoryLockTaken(actor.prisma, "storage.save");
     expect(actor.prisma.storageSettings.upsert).toHaveBeenCalled();
+  });
+
+  // M4: the pre-rotation ciphertext differs from the value visible once the
+  // lock is held — a rotation commits between lock acquisition and the save's
+  // row read. The preservation upsert must write back what the row holds
+  // UNDER the lock, never the stale pre-lock snapshot.
+  const PRE_ROTATION_CIPHERTEXT = "old-key-ciphertext:v1";
+  const POST_ROTATION_CIPHERTEXT = "new-key-ciphertext:v2";
+  const PRE_ROTATION_TOKEN = "old-key-session-token:v1";
+  const POST_ROTATION_TOKEN = "new-key-session-token:v2";
+
+  it("storage.save re-reads the stored ciphertext inside the rotation lock and never restores a stale snapshot (M4)", async () => {
+    const actor = adminUser();
+    const caller = callerFor(storageRouter, actor.prisma, actor.sessionUser);
+
+    // The live row state. A master-key rotation commits right after the
+    // advisory lock is taken (simulated by the $queryRaw lock call) and
+    // replaces the stored ciphertext with new-key values.
+    let storedRow: { encryptedS3SecretAccessKey: string | null; encryptedS3SessionToken: string | null } = {
+      encryptedS3SecretAccessKey: PRE_ROTATION_CIPHERTEXT,
+      encryptedS3SessionToken: PRE_ROTATION_TOKEN,
+    };
+    const events: string[] = [];
+
+    actor.prisma.$queryRaw.mockImplementation(async () => {
+      events.push("lock");
+      // The rotation serializes on pg_advisory_xact_lock and re-encrypts the
+      // S3 row while this save waits for / holds the lock.
+      storedRow = {
+        encryptedS3SecretAccessKey: POST_ROTATION_CIPHERTEXT,
+        encryptedS3SessionToken: POST_ROTATION_TOKEN,
+      };
+      return [[]];
+    });
+    actor.prisma.storageSettings.findUnique.mockImplementation(async () => {
+      events.push("read");
+      return { id: STORAGE_SETTINGS_ID, provider: "s3", ...storedRow, s3AccessKeyId: "AKIATEST" };
+    });
+    actor.prisma.storageSettings.upsert.mockImplementation(async () => {
+      events.push("upsert");
+      return { id: STORAGE_SETTINGS_ID, provider: "s3" };
+    });
+    prismaGlobalMock.storageSettings.findUnique.mockResolvedValue(null);
+
+    // No replacement S3 secret / session token: the save must PRESERVE the
+    // ciphertext it finds under the lock.
+    await caller.save({
+      provider: "s3",
+      s3Bucket: "taskito-uploads",
+      s3Region: "us-east-1",
+      s3AccessKeyId: "AKIATEST",
+      s3SecretAccessKey: null,
+      s3SessionToken: null,
+    });
+
+    // The row read itself happens under the lock: the advisory lock is taken
+    // before the existing row is read (and the upsert follows both).
+    expect(events).toEqual(["lock", "read", "upsert"]);
+
+    const upsertArgs = actor.prisma.storageSettings.upsert.mock.calls[0][0];
+    expect(upsertArgs.update.encryptedS3SecretAccessKey).toBe(POST_ROTATION_CIPHERTEXT);
+    expect(upsertArgs.update.encryptedS3SessionToken).toBe(POST_ROTATION_TOKEN);
+    // The stale pre-rotation snapshot must never be written back.
+    expect(upsertArgs.update.encryptedS3SecretAccessKey).not.toBe(PRE_ROTATION_CIPHERTEXT);
+    expect(upsertArgs.update.encryptedS3SessionToken).not.toBe(PRE_ROTATION_TOKEN);
+  });
+
+  it("storage.save keeps the exists-based validation inside the lock transaction (M4)", async () => {
+    const actor = adminUser();
+    const caller = callerFor(storageRouter, actor.prisma, actor.sessionUser);
+
+    const events: string[] = [];
+    actor.prisma.$queryRaw.mockImplementation(async () => {
+      events.push("lock");
+      return [[]];
+    });
+    actor.prisma.storageSettings.findUnique.mockImplementation(async () => {
+      events.push("read");
+      // The row (and its stored ciphertext) disappears right under the lock.
+      return null;
+    });
+
+    await expect(
+      caller.save({
+        provider: "s3",
+        s3Bucket: "taskito-uploads",
+        s3AccessKeyId: "AKIATEST",
+        s3SecretAccessKey: null,
+      }),
+    ).rejects.toThrow(/S3 secret access key is required/);
+
+    // The validation saw the row state from inside the advisory-lock tx.
+    expect(events).toEqual(["lock", "read"]);
+    expect(actor.prisma.storageSettings.upsert).not.toHaveBeenCalled();
   });
 
   it("webhook router create writes the signing secret inside the rotation lock", async () => {

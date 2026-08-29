@@ -17,6 +17,7 @@ import {
 import { decryptSecret } from "@/lib/secret-crypto";
 import { isWebhookEvent, WEBHOOK_PING_EVENT } from "@/lib/webhook-events";
 import { getEffectiveProjectAccess } from "@/server/authz";
+import { assertTickAlive, TickDeadlineExceededError } from "@/server/services/scheduler-deadline";
 
 import {
   computeWebhookSignature,
@@ -784,13 +785,21 @@ export async function recoverExpiredWebhookDeliveryLeases(
  * delivers every still-`pending` delivery whose `nextAttemptAt` has come due.
  * Each delivery is isolated (failures are logged, never abort the sweep) and
  * claim-guarded inside `deliverWebhook`.
+ *
+ * M9: when called from the scheduler, `options.signal` carries the tick
+ * deadline — it is checked between every unit (lease recovery, page fetch,
+ * per delivery) and unwinds the sweep via {@link TickDeadlineExceededError}
+ * so the tick stops promptly; already-started deliveries are lease-guarded
+ * and a crashed sweep recovers them via the lease expiry on a later tick.
  */
 export async function processDueWebhookDeliveries(
   prisma: PrismaClient,
   now: Date = new Date(),
-  options: { limit?: number; transport?: WebhookTransport } = {},
+  options: { limit?: number; transport?: WebhookTransport; signal?: AbortSignal } = {},
 ): Promise<{ processed: number; succeeded: number }> {
+  assertTickAlive(options.signal);
   await recoverExpiredWebhookDeliveryLeases(prisma, now);
+  assertTickAlive(options.signal);
 
   const due = (await prisma.webhookDelivery.findMany({
     where: {
@@ -805,12 +814,19 @@ export async function processDueWebhookDeliveries(
 
   let succeeded = 0;
   for (const delivery of due) {
+    // M9: stop promptly at the tick deadline instead of walking the whole
+    // page; un-started deliveries remain pending for the next tick.
+    assertTickAlive(options.signal);
     try {
       const result = await deliverWebhook(prisma, delivery.id, { now, transport: options.transport });
       if (result.status === "success") {
         succeeded += 1;
       }
     } catch (error) {
+      if (error instanceof TickDeadlineExceededError) {
+        // Propagate so the scheduler tick stops cleanly at its deadline.
+        throw error;
+      }
       // deliverWebhook is contractually non-throwing; keep the sweep alive.
       console.error(`${LOG_PREFIX} deliverWebhook crashed for delivery ${delivery.id}: ${boundedError(error, "unknown error")}`);
     }

@@ -75,9 +75,10 @@ export const recurrenceRouter = createTRPCRouter({
       // M8: take the same scheduler advisory lock as the built-in tick, so a
       // manual run never races a concurrent tick and double-creates the next
       // occurrence of a recurring task. `null` means the lock was held (a tick
-      // is in flight) — surface that as a skipped result.
-      const result = await withSchedulerLock(() =>
-        processDueRecurrences(ctx.prisma, { projectId: input.projectId, limit: input.limit }),
+      // is in flight) — surface that as a skipped result. M9: the lock helper
+      // also hands over the tick deadline signal.
+      const result = await withSchedulerLock((signal) =>
+        processDueRecurrences(ctx.prisma, { projectId: input.projectId, limit: input.limit, signal }),
       );
       return result ?? { processed: 0, createdTaskIds: [], skipped: true as const };
     }),

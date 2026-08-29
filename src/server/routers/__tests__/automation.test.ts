@@ -233,4 +233,62 @@ describe("automation router (H3: confused-deputy hardening)", () => {
     ).rejects.toThrow();
     expect(actor.prisma.automationRule.update).not.toHaveBeenCalled();
   });
+
+  it("records the EDITOR as the execution principal when B edits A's rule (finding 4)", async () => {
+    const creatorId = "cmab8yxxp0000c000000000000000000000a";
+    const caller = createAutomationManagerWith([
+      { permission: "automation_manage", allowed: true },
+      { permission: "task_comment", allowed: true },
+    ]);
+    // The rule belongs to A; B is editing it now.
+    actor.prisma.automationRule.findUniqueOrThrow.mockResolvedValue({
+      id: RULE_ID,
+      projectId: PROJECT_A,
+      action: "addComment",
+      createdByUserId: creatorId,
+      lastEditedByUserId: null,
+    });
+
+    await caller.update({
+      id: RULE_ID,
+      actionPayload: { content: "repurposed by B" },
+    });
+
+    expect(actor.prisma.automationRule.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          // The original creator is kept for history...
+          createdByUserId: creatorId,
+          // ...but the scheduled execution principal becomes the editor, so
+          // the generated content is attributed to B — never to A.
+          lastEditedByUserId: actor.userId,
+        }),
+      }),
+    );
+    expect(actor.userId).not.toBe(creatorId);
+  });
+
+  it("create records the author as both creator and execution principal (finding 4)", async () => {
+    const caller = createAutomationManagerWith([
+      { permission: "automation_manage", allowed: true },
+      { permission: "task_update", allowed: true },
+    ]);
+
+    await caller.create({
+      projectId: PROJECT_A,
+      name: "Move overdue",
+      trigger: "dueDatePassed",
+      action: "moveStatus",
+      actionPayload: { statusId: STATUS_A },
+    });
+
+    expect(actor.prisma.automationRule.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          createdByUserId: actor.userId,
+          lastEditedByUserId: actor.userId,
+        }),
+      }),
+    );
+  });
 });

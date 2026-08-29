@@ -34,10 +34,21 @@ import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatch
  * skipped.
  *
  * Each tick also carries a deadline (`AbortSignal.timeout(
- * SCHEDULER_TICK_TIMEOUT_MS)`). The advisory lock may outlive an individual job
- * that keeps running on pooled connections, so every job checks the signal
- * between units of work (per rule / per project / per page) and stops promptly
- * at the deadline; the next tick resumes whatever remains.
+ * SCHEDULER_TICK_TIMEOUT_MS)`). The deadline is INDEPENDENT of the lock
+ * transaction's lifetime: jobs run on the GLOBAL prisma client + fetch (DB
+ * operations, SMTP, webhook HTTP calls), so the interactive transaction that
+ * holds the advisory lock can neither cancel them nor be cancelled by them —
+ * the signal is only checked BETWEEN units of work. The lock transaction
+ * therefore performs nothing but the lock query and its timeout is configured
+ * separately (SCHEDULER_LOCK_TX_TIMEOUT_MS, default 24h): expiring it at the
+ * tick deadline would release the advisory lock and clear the in-process guard
+ * while jobs are still live, letting the next tick run concurrently (M9).
+ * Instead the advisory lock is held for the whole run and released exactly
+ * when the run settles (commit in the happy path; if Prisma ever expires the
+ * lock tx anyway, {@link withSchedulerLock} awaits the outstanding work before
+ * reporting, so callers never release their in-flight guard while jobs run).
+ * Durable idempotency (recurrence CAS, digest claims, automation firings,
+ * webhook delivery leases) remains the second safety boundary.
  *
  * Opt out with SCHEDULER_ENABLED=false; tune cadence with SCHEDULER_INTERVAL_MS
  * and the per-tick deadline with SCHEDULER_TICK_TIMEOUT_MS.
@@ -51,6 +62,15 @@ const MIN_INTERVAL_MS = 1_000;
 const DEFAULT_TICK_TIMEOUT_MS = 600_000;
 const DEFAULT_DIGEST_HOUR_UTC = 7;
 const TRANSACTION_MAX_WAIT_MS = 5_000;
+/**
+ * The lock transaction holds exactly one query (pg_try_advisory_xact_lock);
+ * its timeout must never be derived from the tick deadline — expiring it at
+ * the deadline would release the advisory lock while jobs (which run on the
+ * global client and cannot be cancelled by the tx) are still live (M9). The
+ * default keeps the lock connection open for the whole run even when a job
+ * ignores the deadline for a long time.
+ */
+const DEFAULT_LOCK_TX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 type AdvisoryLockRow = { locked?: unknown };
 
@@ -98,6 +118,20 @@ function getTickTimeoutMs() {
     );
   }
   return DEFAULT_TICK_TIMEOUT_MS;
+}
+
+/** Independent transaction timeout for the lock transaction (see above). */
+function getLockTxTimeoutMs() {
+  const parsed = Number(process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS);
+  if (Number.isFinite(parsed) && parsed >= 1_000) {
+    return Math.floor(parsed);
+  }
+  if (process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS) {
+    console.warn(
+      `${SCHEDULER_LOG_PREFIX} invalid SCHEDULER_LOCK_TX_TIMEOUT_MS "${process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS}", using ${DEFAULT_LOCK_TX_TIMEOUT_MS}ms`,
+    );
+  }
+  return DEFAULT_LOCK_TX_TIMEOUT_MS;
 }
 
 /**
@@ -173,7 +207,7 @@ async function runSprintSnapshotJob(signal: AbortSignal) {
 /** Pending webhook deliveries whose nextAttemptAt came due (retries + restarts). */
 async function runWebhookDeliveryJob(signal: AbortSignal) {
   assertTickAlive(signal);
-  const result = await processDueWebhookDeliveries(prisma, new Date());
+  const result = await processDueWebhookDeliveries(prisma, new Date(), { signal });
   if (result.processed > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} webhook delivery job processed ${result.processed} delivery(ies) (${result.succeeded} succeeded)`);
   }
@@ -185,10 +219,21 @@ async function runWebhookDeliveryJob(signal: AbortSignal) {
  * lock could not be acquired (another instance/tick is mid-flight) or the
  * lock transaction failed — callers are expected to treat `null` as "skip".
  *
- * Used by the external cron endpoint and the `recurrence.processDue`
- * procedure so they can never race the built-in tick (or each other).
+ * The tick deadline is created here (after the lock is won) and handed to
+ * `fn`, so every caller — built-in tick, cron endpoint, manual run — drives
+ * its jobs against the same cancellable deadline.
+ *
+ * M9 lock lifetime: the transaction holds ONLY the advisory-lock query; its
+ * timeout is independent of the tick deadline (see getLockTxTimeoutMs).
+ * `fn`'s work runs on the global prisma client / fetch and cannot be cancelled
+ * by the lock transaction, so when Prisma ever expires the lock tx while the
+ * work is still live, we await that work BEFORE returning — a caller that
+ * clears its in-flight guard on our return can never do so while jobs are
+ * still running. The durable idempotency keys inside each job remain the
+ * second boundary against double execution.
  */
-export async function withSchedulerLock<T>(fn: () => Promise<T>): Promise<T | null> {
+export async function withSchedulerLock<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
+  let work: Promise<T> | undefined;
   try {
     return await prisma.$transaction(
       async (tx) => {
@@ -198,24 +243,42 @@ export async function withSchedulerLock<T>(fn: () => Promise<T>): Promise<T | nu
         if (rows[0]?.locked !== true) {
           return null;
         }
-        return await fn();
+        // The deadline starts once the lock is ours; the work itself runs on
+        // the global client (outside this transaction's connection).
+        const deadline = AbortSignal.timeout(getTickTimeoutMs());
+        work = fn(deadline);
+        return await work;
       },
-      { maxWait: TRANSACTION_MAX_WAIT_MS, timeout: getTickTimeoutMs() },
+      // The lock must live for the whole run — it is NOT the tick deadline
+      // (that is the signal handed to fn); expiring the tx would free the
+      // advisory lock while un-cancellable work is still in flight (M9).
+      { maxWait: TRANSACTION_MAX_WAIT_MS, timeout: getLockTxTimeoutMs() },
     );
   } catch (error) {
     // Fail safe: if the transaction (e.g. the lock query) blows up, skip
     // instead of crashing the timer loop or the caller.
     console.error(`${SCHEDULER_LOG_PREFIX} lock acquisition aborted, skipping: ${describeError(error)}`);
+    if (work) {
+      // The lock transaction ended while the work is still running on pooled
+      // connections (e.g. Prisma expired the tx, or the fn itself threw and
+      // the rollback raced it). Await the real end of the work before
+      // reporting: runScheduledJobs clears its in-flight guard only after
+      // this returns, so no second tick can start while jobs are live (M9).
+      await work.catch(() => {});
+    }
     return null;
   }
 }
 
 /**
  * One scheduler tick: guard against in-process overlap, take the scheduler
- * advisory lock via {@link withSchedulerLock}, and run all three jobs under a
+ * advisory lock via {@link withSchedulerLock}, and run all jobs under a
  * cancellable deadline while the lock is held. Each job is isolated so a
- * failure cannot abort the others; the lock itself is released automatically
- * when the transaction commits.
+ * failure cannot abort the others; the lock is released (commit) only when
+ * every job has settled — a job that outlives SCHEDULER_TICK_TIMEOUT_MS keeps
+ * the lock (and the in-process guard) until it actually finishes, so a later
+ * tick cannot run concurrently with live work (M9). The in-flight guard is
+ * cleared in `finally`, i.e. strictly after the lock run completed.
  */
 export async function runScheduledJobs() {
   if (globalForScheduler.__taskitoSchedulerTickInFlight) {
@@ -224,8 +287,7 @@ export async function runScheduledJobs() {
   }
   globalForScheduler.__taskitoSchedulerTickInFlight = true;
   try {
-    const result = await withSchedulerLock(async () => {
-      const deadline = AbortSignal.timeout(getTickTimeoutMs());
+    const result = await withSchedulerLock(async (deadline) => {
       let deadlineHit = false;
 
       for (const job of [

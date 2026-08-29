@@ -52,8 +52,6 @@ export const storageRouter = createTRPCRouter({
   save: adminProcedure
     .input(storageSettingsInput)
     .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.storageSettings.findUnique({ where: { id: STORAGE_SETTINGS_ID } });
-
       if (input.provider === "local") {
         // M6: the encryptedS3* columns are cleared here; serialize with the
         // rotation lock so a concurrent re-encryption never resurrects a
@@ -90,18 +88,29 @@ export const storageRouter = createTRPCRouter({
       const s3SecretAccessKey = clean(input.s3SecretAccessKey);
       const s3SessionToken = clean(input.s3SessionToken);
 
-      if (s3AccessKeyId && !s3SecretAccessKey && !existing?.encryptedS3SecretAccessKey) {
-        throw new Error("S3 secret access key is required for this access key ID");
-      }
       if (!s3AccessKeyId && (s3SecretAccessKey || s3SessionToken)) {
         throw new Error("S3 access key ID is required when access secrets are set");
       }
 
-      // M6: serialize with secret rotation — this writes fresh
-      // encryptedS3SecretAccessKey / encryptedS3SessionToken ciphertext and
-      // must not interleave with a key rotation run.
-      await withSecretRotationLock(ctx.prisma, (tx) =>
-        tx.storageSettings.upsert({
+      // M4: the stored-ciphertext snapshot, the validation that depends on
+      // it, and the preservation upsert must all run INSIDE the rotation-lock
+      // transaction. Reading `existing` outside the lock let a concurrent
+      // master-key rotation commit fresh new-key ciphertext between the read
+      // and this upsert — the preservation branches below wrote the stale
+      // old-key snapshot back and S3 broke at the next cutover. The advisory
+      // lock serializes this save against the rotation, so the row read here
+      // cannot change under us again.
+      await withSecretRotationLock(ctx.prisma, async (tx) => {
+        const existing = await tx.storageSettings.findUnique({ where: { id: STORAGE_SETTINGS_ID } });
+
+        if (s3AccessKeyId && !s3SecretAccessKey && !existing?.encryptedS3SecretAccessKey) {
+          throw new Error("S3 secret access key is required for this access key ID");
+        }
+
+        // M6: serialize with secret rotation — this writes fresh
+        // encryptedS3SecretAccessKey / encryptedS3SessionToken ciphertext and
+        // must not interleave with a key rotation run.
+        await tx.storageSettings.upsert({
           where: { id: STORAGE_SETTINGS_ID },
           create: {
             id: STORAGE_SETTINGS_ID,
@@ -134,8 +143,8 @@ export const storageRouter = createTRPCRouter({
             s3ForcePathStyle: input.s3ForcePathStyle,
             s3Prefix: normalizeS3Prefix(input.s3Prefix),
           },
-        }),
-      );
+        });
+      });
 
       return getStoragePayload();
     }),

@@ -200,6 +200,8 @@ describe("recurrence router", () => {
       expect(processDueRecurrences).toHaveBeenCalledWith(prisma, {
         projectId: PROJECT_ID,
         limit: 10,
+        // M9: the lock helper hands the tick deadline to the processor.
+        signal: expect.any(AbortSignal),
       });
       expect(result).toEqual({ processed: 3, createdTaskIds: ["cmab8yxxp000bi7p4k8n2v3qd"] });
       // The processor ran inside the scheduler lock transaction.

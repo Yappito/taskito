@@ -87,26 +87,40 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
         rule.dayOfMonth ?? null,
       );
 
-      // M8: claim this occurrence with a compare-and-swap on nextDueDate
-      // BEFORE creating the task. nextDueDate doubles as the occurrence's
-      // version: the atomic updateMany only succeeds for one concurrent
-      // caller (`count === 1`), so the loser never creates a duplicate task.
-      const claim = await prisma.recurrenceRule.updateMany({
-        where: { id: rule.id, nextDueDate: rule.nextDueDate },
-        data: { nextDueDate },
-      });
-      if (!claim || claim.count !== 1) {
-        continue;
-      }
-
+      // The next occurrence would be past the end date: the plain advance
+      // (a standalone CAS — no task is created for this occurrence, so there
+      // is no claim/create gap to protect) retires it. A crash here simply
+      // re-runs the retirement on the next tick.
       if (rule.endDate && nextDueDate > rule.endDate) {
-        // The next occurrence would be past the end date: the advance
-        // (already committed by the CAS above) retires this occurrence.
+        await prisma.recurrenceRule.updateMany({
+          where: { id: rule.id, nextDueDate: rule.nextDueDate },
+          data: { nextDueDate },
+        });
         continue;
       }
 
-      try {
-        const created = await createTaskWithNextNumber(prisma, source.projectId, (tx, taskNumber) => tx.task.create({
+      // Occurrence claim AND task creation now run in ONE database
+      // transaction (finding 5): the compare-and-swap on the durable
+      // nextDueDate column is the unique occurrence key, and it commits
+      // atomically with the created task. The previous two-transaction shape
+      // (advance first, then create) permanently consumed the occurrence when
+      // the process crashed between the CAS and the task creation — the
+      // advance was already committed and the compensating rollback below
+      // never ran. Now a crash (or any failure) between claim and create
+      // rolls the advance back with the task: nothing is consumed, and the
+      // next tick recreates the occurrence. The CAS still guarantees only one
+      // concurrent caller wins the occurrence.
+      const created = await createTaskWithNextNumber(prisma, source.projectId, async (tx, taskNumber) => {
+        const claim = await tx.recurrenceRule.updateMany({
+          where: { id: rule.id, nextDueDate: rule.nextDueDate },
+          data: { nextDueDate },
+        });
+        if (!claim || claim.count !== 1) {
+          // Lost the race: another caller already claimed this occurrence.
+          // Returning null aborts this attempt before any task row is written.
+          return null;
+        }
+        return tx.task.create({
           data: {
             projectId: source.projectId,
             taskNumber,
@@ -130,7 +144,9 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
                 }
               : undefined,
           },
-        }));
+        });
+      });
+      if (created) {
         createdTaskIds.push(created.id);
         createTaskActivity({
           taskId: created.id,
@@ -138,18 +154,15 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
           action: "created",
           details: { recurringFromTaskId: source.id, recurrenceRuleId: rule.id },
         }).catch(() => {});
-      } catch (createError) {
-        // The claim succeeded but the task creation failed — roll the advance
-        // back so the occurrence is retried on the next tick instead of being
-        // silently skipped.
-        await prisma.recurrenceRule.updateMany({
-          where: { id: rule.id, nextDueDate },
-          data: { nextDueDate: rule.nextDueDate },
-        }).catch(() => {});
-        throw createError;
       }
     } catch {
-      // Continue processing other recurrence rules; a single bad rule should not block the batch.
+      // The claim and the task creation share one transaction: any failure —
+      // including a task-number conflict after createTaskWithNextNumber's
+      // retries are exhausted — rolls the claimed advance back together with
+      // the (partial) task, so the occurrence stays due and is retried on the
+      // next tick. No compensation write is needed and no occurrence is lost.
+      // Continue processing other recurrence rules; a single bad rule should
+      // not block the batch.
     }
   }
 
