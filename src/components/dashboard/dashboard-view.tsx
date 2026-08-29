@@ -288,7 +288,7 @@ function TableWidget({ widget }: { widget: DashboardDataWidget }) {
             <tr key={task.id} className="border-b last:border-0" style={{ borderColor: "var(--color-border)" }}>
               <td className="whitespace-nowrap py-2 pr-3 text-xs font-semibold" style={{ color: "var(--color-accent)" }}>{task.project.key}-{task.taskNumber}</td>
               <td className="min-w-52 py-2 pr-3" style={{ color: "var(--color-text)" }}>{task.title}</td>
-              <td className="py-2 pr-3"><span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: task.status.color, color: "white" }}>{task.status.name}</span></td>
+              <td className="py-2 pr-3"><span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: task.status.color, color: "var(--color-on-accent)" }}>{task.status.name}</span></td>
               <td className="py-2 pr-3" style={{ color: "var(--color-text-muted)" }}>{task.assignee?.name ?? task.assignee?.email ?? "Unassigned"}</td>
               <td className="whitespace-nowrap py-2" style={{ color: "var(--color-text-muted)" }}>{formatDate(task.dueDate)}</td>
             </tr>

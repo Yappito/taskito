@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { computeGraphLayout } from "@/lib/elk-config";
 import type { GraphLayout, GraphTaskData } from "@/lib/types";
 
@@ -27,25 +27,16 @@ function isValidGraphTask(task: GraphTaskData | null | undefined): task is Graph
 export function useGraphLayout({ tasks, links, timeScale }: UseGraphLayoutParams) {
   const [layout, setLayout] = useState<GraphLayout | null>(null);
   const [isComputing, setIsComputing] = useState(false);
+  const generationRef = useRef(0);
   const safeTasks = useMemo(() => tasks.filter(isValidGraphTask), [tasks]);
 
-  // Memoize the key to detect when recomputation is needed
-  const layoutKey = useMemo(
-    () =>
-      JSON.stringify({
-        tasks: safeTasks
-          .map((t) => ({ id: t.id, dueDate: t.dueDate, statusId: t.statusId }))
-          .sort((a, b) => a.id.localeCompare(b.id)),
-        links: links
-          .map((l) => ({ id: l.id, sourceTaskId: l.sourceTaskId, targetTaskId: l.targetTaskId }))
-          .sort((a, b) => a.id.localeCompare(b.id)),
-      }),
-    [safeTasks, links]
-  );
-
   const compute = useCallback(async () => {
+    // Generation counter so a stale async layout can never overwrite a newer one
+    const generation = ++generationRef.current;
+
     if (safeTasks.length === 0) {
       setLayout({ nodes: [], edges: [], width: 0, height: 0 });
+      setIsComputing(false);
       return;
     }
 
@@ -56,14 +47,17 @@ export function useGraphLayout({ tasks, links, timeScale }: UseGraphLayoutParams
         links,
         timeScale,
       });
-      setLayout(result);
+      if (generation === generationRef.current) {
+        setLayout(result);
+      }
     } catch (err) {
       console.error("Graph layout failed:", err);
     } finally {
-      setIsComputing(false);
+      if (generation === generationRef.current) {
+        setIsComputing(false);
+      }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- layoutKey is a stable serialization of tasks+links
-  }, [layoutKey, safeTasks, links, timeScale]);
+  }, [safeTasks, links, timeScale]);
 
   return { layout, isComputing, compute };
 }

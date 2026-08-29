@@ -43,7 +43,8 @@ export function TimeAxis({
   const todayX = scale(new Date());
 
   return (
-    <g className="time-axis no-theme-transition">
+    <g className="time-axis no-theme-transition" role="img" aria-label="Time axis">
+      <title>Time axis with gridlines and today marker</title>
       {/* Background band */}
       <rect
         x={0}
@@ -96,7 +97,7 @@ export function TimeAxis({
           <line
             y1={0}
             y2={height}
-            stroke="#ef4444"
+            stroke="var(--color-danger)"
             strokeWidth={1.5}
             opacity={0.5}
           />
@@ -106,7 +107,7 @@ export function TimeAxis({
             width={36}
             height={16}
             rx={8}
-            fill="#ef4444"
+            fill="var(--color-danger)"
             opacity={0.9}
           />
           <text
@@ -114,7 +115,7 @@ export function TimeAxis({
             textAnchor="middle"
             fontSize={9}
             fontWeight={600}
-            fill="white"
+            fill="var(--color-on-accent)"
           >
             Today
           </text>

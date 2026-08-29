@@ -14,6 +14,8 @@ import { MiniMap } from "./mini-map";
 import { TaskDetail } from "@/components/task/task-detail";
 import { LinkTypePopup } from "@/components/ui/link-type-popup";
 import { TaskViewFilters } from "@/components/task/task-view-filters";
+import { Alert, EmptyState, Skeleton } from "@/components/ui";
+import { getGraphFocusOrder, getNextGraphFocusId } from "@/lib/graph-keyboard";
 import { createTimeScale } from "@/lib/date-utils";
 import { getDateRange } from "@/lib/date-utils";
 import type { TimeResolution, Viewport, LinkType, GraphTaskData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
@@ -28,6 +30,9 @@ interface TimelineGraphProps {
 
 const AXIS_OFFSET = 50;
 const MAX_GRAPH_SPAN_DAYS = 540;
+
+/** Shared stable fallback so memo'd TaskNode props never get a fresh empty array */
+const EMPTY_TAGS: Array<{ name: string; color: string }> = [];
 
 const RESOLUTION_PIXELS_PER_DAY: Record<TimeResolution, number> = {
   day: 48,
@@ -153,7 +158,7 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     [projectId, filters.queryFilters]
   );
 
-  const { data: taskData } = trpc.task.list.useQuery(taskListInput);
+  const { data: taskData, isLoading: tasksLoading, error: tasksError } = trpc.task.list.useQuery(taskListInput);
 
   const { data: linksData } = trpc.task.links.useQuery({ projectId });
 
@@ -256,6 +261,12 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     timeScale,
   });
 
+  // Latest layout for keyboard handlers (kept out of their closures so they stay stable)
+  const layoutRef = useRef<typeof layout>(null);
+  useEffect(() => {
+    layoutRef.current = layout;
+  }, [layout]);
+
   // Recompute layout when tasks change
   useEffect(() => {
     compute();
@@ -352,6 +363,15 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     [linkingFrom]
   );
 
+  // ─── Stable per-node handlers (dispatch by id so memo'd TaskNode props stay stable) ───
+  const handleNodeHover = useCallback((nodeId: string | null) => {
+    setHoveredTaskId(nodeId);
+  }, []);
+
+  const handleNodeInfoClick = useCallback((nodeId: string) => {
+    setDetailTaskId(nodeId);
+  }, []);
+
   const handleLinkTypeSelect = useCallback(
     (selectedLinkType: LinkType) => {
       if (!pendingLink) return;
@@ -376,6 +396,25 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     }),
     [transform, dimensions]
   );
+
+  // Edge points offset for the time-axis, precomputed once per layout (not per zoom tick)
+  // so memo'd DependencyEdge props stay referentially stable while panning/zooming.
+  const offsetEdges = useMemo(() => {
+    if (!layout) return [];
+    return layout.edges.map((edge) => ({
+      ...edge,
+      points: edge.points.map((p) => ({ x: p.x, y: p.y + AXIS_OFFSET })),
+    }));
+  }, [layout]);
+
+  // Per-node tag chips, precomputed once per layout for the same reason.
+  const nodeTagsById = useMemo(() => {
+    const tagsById = new Map<string, Array<{ name: string; color: string }>>();
+    for (const node of layout?.nodes ?? []) {
+      tagsById.set(node.id, (node.task.tags ?? []).map((t) => t.tag));
+    }
+    return tagsById;
+  }, [layout]);
 
   // Viewport culling: only render nodes/edges within visible area + buffer
   const visibleNodes = useMemo(() => {
@@ -440,6 +479,48 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
     [focusedTaskId, linkingFrom, transform, zoomTo]
   );
 
+  const moveNodeFocus = useCallback((currentId: string, direction: 1 | -1, wrap: boolean) => {
+    const svg = svgRef.current;
+    const currentLayout = layoutRef.current;
+    if (!svg || !currentLayout) return;
+
+    const nodeEls = Array.from(svg.querySelectorAll<SVGGElement>(".graph-node"));
+    const renderedIds = new Set(nodeEls.map((el) => el.getAttribute("data-task-id")));
+    const order = getGraphFocusOrder(
+      currentLayout.nodes.filter((node) => renderedIds.has(node.id))
+    );
+    const nextId = getNextGraphFocusId(order, currentId, direction, wrap);
+    if (!nextId) return;
+
+    nodeEls.find((el) => el.getAttribute("data-task-id") === nextId)?.focus();
+  }, []);
+
+  const handleNodeKeyDown = useCallback(
+    (nodeId: string, event: React.KeyboardEvent) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        handleTaskClick(nodeId);
+        return;
+      }
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        moveNodeFocus(nodeId, 1, false);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveNodeFocus(nodeId, -1, false);
+        return;
+      }
+      if (event.key === "[" || event.key === "]") {
+        event.preventDefault();
+        moveNodeFocus(nodeId, event.key === "]" ? 1 : -1, true);
+      }
+    },
+    [handleTaskClick, moveNodeFocus]
+  );
+
   const resolutions: TimeResolution[] = ["day", "week", "month", "quarter", "year"];
 
   return (
@@ -457,26 +538,29 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
           border: "1px solid var(--color-border)",
         }}
       >
-        {resolutions.map((r) => (
-          <button
-            key={r}
-            onClick={() => setResolution(r)}
-            className={cn(
-              "rounded-lg px-2.5 py-1 text-xs capitalize transition-all",
-              resolution === r ? "font-semibold" : ""
-            )}
-            style={
-              resolution === r
-                ? {
-                    backgroundColor: "var(--color-accent-muted)",
-                    color: "var(--color-accent)",
-                  }
-                : { color: "var(--color-text-secondary)" }
-            }
-          >
-            {r}
-          </button>
-        ))}
+        <div role="radiogroup" aria-label="Time resolution" className="flex items-center gap-1">
+          {resolutions.map((r) => (
+            <button
+              key={r}
+              onClick={() => setResolution(r)}
+              aria-pressed={resolution === r}
+              className={cn(
+                "rounded-lg px-2.5 py-1 text-xs capitalize transition-all",
+                resolution === r ? "font-semibold" : ""
+              )}
+              style={
+                resolution === r
+                  ? {
+                      backgroundColor: "var(--color-accent-muted)",
+                      color: "var(--color-accent)",
+                    }
+                  : { color: "var(--color-text-secondary)" }
+              }
+            >
+              {r}
+            </button>
+          ))}
+        </div>
         <div
           className="mx-1 h-4 w-px"
           style={{ backgroundColor: "var(--color-border)" }}
@@ -581,9 +665,10 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
           className="absolute left-1/2 bottom-16 z-10 -translate-x-1/2 rounded-full px-4 py-1.5 text-xs font-medium"
           style={{
             backgroundColor: "var(--color-accent)",
-            color: "white",
+            color: "var(--color-on-accent)",
             boxShadow: "var(--shadow-md)",
           }}
+          aria-live="polite"
         >
           Drop on a task to create a link — ESC to cancel
         </div>
@@ -631,11 +716,44 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
         />
       )}
 
+      {/* Error / empty / loading states */}
+      {tasksError ? (
+        <div className="absolute inset-x-0 top-1/2 z-10 mx-auto w-fit max-w-md -translate-y-1/2 px-4">
+          <Alert variant="danger" title="Couldn't load tasks.">
+            {tasksError.message || "Please try again later."}
+          </Alert>
+        </div>
+      ) : tasksLoading && tasks.length === 0 ? (
+        <div
+          className="absolute inset-x-0 top-1/2 z-10 mx-auto flex w-72 -translate-y-1/2 flex-col gap-2"
+          aria-label="Loading dependency graph"
+        >
+          <Skeleton className="h-5 w-2/3" />
+          <Skeleton className="h-20 w-full" />
+          <Skeleton className="h-20 w-full" />
+        </div>
+      ) : !tasksLoading && tasks.length === 0 ? (
+        <div className="absolute inset-x-0 top-1/2 z-10 mx-auto w-fit -translate-y-1/2">
+          <EmptyState
+            title="No tasks to graph yet"
+            description="Tasks with due dates appear here as cards on the dependency timeline."
+          />
+        </div>
+      ) : null}
+
       {/* Main SVG */}
+      <p id="graph-keyboard-hint" className="sr-only">
+        Interactive task dependency graph. Tab to a task card, then use the arrow keys to move
+        between cards, Enter or Space to open a card, and the [ or ] keys to cycle through all
+        cards.
+      </p>
       <svg
         ref={svgRef}
         width={dimensions.width}
         height={dimensions.height}
+        role="application"
+        aria-label="Task dependency graph"
+        aria-describedby="graph-keyboard-hint"
         style={{ backgroundColor: "var(--color-bg-graph)", userSelect: "none" }}
         onMouseMove={handleSvgMouseMove}
         onMouseUp={handleSvgMouseUp}
@@ -658,25 +776,18 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
           />
 
           {/* Dependency edges (rendered behind nodes) */}
-          {layout?.edges.map((edge) => {
-            // Offset edge points for the time-axis
-            const offsetPoints = edge.points.map((p) => ({
-              x: p.x,
-              y: p.y + AXIS_OFFSET,
-            }));
-            return (
-              <DependencyEdge
-                key={edge.id}
-                id={edge.id}
-                points={offsetPoints}
-                linkType={edge.linkType}
-                highlighted={
-                  hoveredTaskId === edge.source ||
-                  hoveredTaskId === edge.target
-                }
-              />
-            );
-          })}
+          {offsetEdges.map((edge) => (
+            <DependencyEdge
+              key={edge.id}
+              id={edge.id}
+              points={edge.points}
+              linkType={edge.linkType}
+              highlighted={
+                hoveredTaskId === edge.source ||
+                hoveredTaskId === edge.target
+              }
+            />
+          ))}
 
           {/* In-progress link line */}
           {linkingSourcePos && mousePos && (
@@ -704,9 +815,9 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
               title={node.task.title}
               dueDate={node.task.dueDate}
               statusName={node.task.status?.name ?? ""}
-              statusColor={node.task.status?.color ?? "#6b7280"}
+              statusColor={node.task.status?.color ?? "var(--color-edge-relates)"}
               priority={node.task.priority}
-              tags={(node.task.tags ?? []).map((t) => t.tag)}
+              tags={nodeTagsById.get(node.id) ?? EMPTY_TAGS}
               assigneeName={node.task.assignee?.name?.trim() || node.task.assignee?.email || null}
               assigneeEmail={node.task.assignee?.email ?? null}
               assigneeImage={node.task.assignee?.image ?? null}
@@ -724,12 +835,12 @@ export function TimelineGraph({ projectId, statuses, tags, projectSettings }: Ti
                 alertConfig
               )}
               isLinkTarget={!!linkingFrom && linkingFrom !== node.id}
-              onClick={() => handleTaskClick(node.id)}
-              onInfoClick={() => setDetailTaskId(node.id)}
-              onMouseEnter={() => setHoveredTaskId(node.id)}
-              onMouseLeave={() => setHoveredTaskId(null)}
-              onPortDragStart={(side) => handlePortDragStart(node.id, side)}
-              onPortDrop={(event) => handlePortDrop(node.id, event)}
+              onNodeClick={handleTaskClick}
+              onNodeInfoClick={handleNodeInfoClick}
+              onNodeHover={handleNodeHover}
+              onNodeKeyDown={handleNodeKeyDown}
+              onPortDragStart={handlePortDragStart}
+              onPortDrop={handlePortDrop}
             />
           ))}
         </g>

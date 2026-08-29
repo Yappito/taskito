@@ -45,6 +45,10 @@
   --color-node-shadow: rgba(15, 23, 42, 0.06);
 
   --color-edge-default: #94a3b8;
+  --color-edge-blocks: var(--color-danger);
+  --color-edge-parent: #8b5cf6;
+  --color-edge-child: var(--color-accent);
+  --color-edge-relates: #6b7280;
 
   --color-grid-line: #f1f5f9;
   --color-axis-bg: #f8fafc;
@@ -125,6 +129,10 @@
   --color-node-shadow: rgba(0, 0, 0, 0.3);
 
   --color-edge-default: #475569;
+  --color-edge-blocks: var(--color-danger);
+  --color-edge-parent: #a78bfa;
+  --color-edge-child: var(--color-accent);
+  --color-edge-relates: #94a3b8;
 
   --color-grid-line: #1a1e2e;
   --color-axis-bg: #0f1118;
@@ -256,6 +264,25 @@ body * {
   border-color: var(--color-danger) !important;
 }
 
+/* SVG alert ring around graph nodes (CSS-driven so prefers-reduced-motion can disable it) */
+@keyframes graph-alert-ring {
+  0%,
+  100% {
+    opacity: 0.6;
+    stroke-width: 2;
+  }
+  50% {
+    opacity: 0.15;
+    stroke-width: 5;
+  }
+}
+.graph-alert-ring {
+  animation: graph-alert-ring 2s ease-in-out infinite;
+}
+.graph-alert-ring.graph-alert-ring-critical {
+  animation-duration: 1.5s;
+}
+
 /* SVG pulsation for graph nodes */
 @keyframes svg-pulse-warning {
   0%, 100% { filter: drop-shadow(0 0 0 color-mix(in srgb, var(--color-warning) 0%, transparent)); }
@@ -278,6 +305,7 @@ body * {
   .pulse-critical,
   .graph-node.pulse-warning,
   .graph-node.pulse-critical,
+  .graph-alert-ring,
   .edge-flow-animated,
   .animate-pulse {
     animation: none !important;
