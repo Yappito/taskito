@@ -185,8 +185,17 @@ test.describe("Broader application coverage", () => {
 
     await expect(page.getByText(adminOption!).first()).toBeVisible();
 
+    // A successful bulk update clears the selection on purpose, which unmounts
+    // the action bar (its "Clear selection" control disappears with it) — so
+    // re-select the batch before exercising the manual clear.
+    await page.getByLabel(`Select ${firstTitle}`).check();
+    await page.getByLabel(`Select ${secondTitle}`).check();
+    await expect(selectedCount).toBeVisible({ timeout: 10_000 });
+
     await page.getByRole("button", { name: "Clear selection" }).click();
     await expect(selectedCount).not.toBeVisible();
+    await expect(page.getByLabel(`Select ${firstTitle}`)).not.toBeChecked();
+    await expect(page.getByLabel(`Select ${secondTitle}`)).not.toBeChecked();
   });
 
   test("sprint member assignment is managed from a dialog and persists", async ({ page }) => {

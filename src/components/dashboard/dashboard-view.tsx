@@ -448,7 +448,11 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
   const [widgetDraft, setWidgetDraft] = useState<WidgetDraft>(emptyWidgetDraft);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const { data: dashboards = [], isLoading: dashboardsLoading } = trpc.dashboard.listDashboards.useQuery({ projectId });
+  const {
+    data: dashboards = [],
+    isLoading: dashboardsLoading,
+    isFetching: dashboardsFetching,
+  } = trpc.dashboard.listDashboards.useQuery({ projectId });
   const { data: savedFilters = [] } = trpc.dashboard.listSavedFilters.useQuery({ projectId });
   const { data: people = [] } = trpc.project.people.useQuery({ projectId });
   const { data: sprints = [] } = trpc.sprint.list.useQuery({ projectId });
@@ -481,7 +485,12 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
   );
 
   useEffect(() => {
-    if (dashboardsLoading) return;
+    // Ignore stale list snapshots while a (re)fetch is in
+    // flight. Right after creating the first dashboard this effect used to
+    // run with the still-empty cached list and flip the view back into create
+    // mode (or, with existing dashboards, onto the first old dashboard),
+    // clobbering the selection set by createDashboard.onSuccess.
+    if (dashboardsLoading || dashboardsFetching) return;
     if (dashboards.length === 0) {
       setSelectedDashboardId(null);
       setIsCreatingDashboard(true);
@@ -491,7 +500,7 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
     if (!selectedDashboardId || !dashboards.some((dashboard) => dashboard.id === selectedDashboardId)) {
       setSelectedDashboardId(dashboards[0].id);
     }
-  }, [dashboards, dashboardsLoading, isCreatingDashboard, selectedDashboardId]);
+  }, [dashboards, dashboardsLoading, dashboardsFetching, isCreatingDashboard, selectedDashboardId]);
 
   useEffect(() => {
     if (!selectedDashboard) {
@@ -546,7 +555,12 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
 
   const createDashboard = trpc.dashboard.createDashboard.useMutation({
     onMutate: () => setActionError(null),
-    onSuccess: (dashboard) => {
+    onSuccess: async (dashboard) => {
+      // Refresh the dashboard list BEFORE leaving create mode
+      // so the selection effect above evaluates a list that already contains
+      // the new dashboard. With the previously stale snapshot the selection
+      // was reset (or the view re-entered create mode for a fresh project).
+      await utils.dashboard.listDashboards.invalidate({ projectId });
       setIsCreatingDashboard(false);
       setSelectedDashboardId(dashboard.id);
       invalidateDashboardData(dashboard.id);

@@ -29,7 +29,8 @@ async function filterBoardByTitle(page: Page, title: string) {
   await switchToView(page, "board");
   const filterInput = page.getByPlaceholder("Filter by title...");
   await filterInput.fill(title);
-  await page.waitForTimeout(400);
+  // No fixed sleep: callers assert the filtered task right away and visibility
+  // waits cover the search debounce (250ms) plus the refetch.
 }
 
 async function openTaskLinkForm(page: Page) {
@@ -120,7 +121,7 @@ test.describe("Backlog regression coverage", () => {
     await waitForAppShell(page);
 
     await filterBoardByTitle(page, title);
-    await expect(page.getByText(title)).toBeVisible();
+    await expect(page.getByText(title)).toBeVisible({ timeout: 10_000 });
 
     await openNewTaskDialog(page);
     const templateSelect = page.locator('select').filter({ has: page.locator('option:has-text("No template")') }).first();
@@ -144,12 +145,12 @@ test.describe("Backlog regression coverage", () => {
     await openBoardTaskDetail(page, title);
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
     await detailPanel.getByRole("button", { name: "Duplicate" }).click();
-    await page.waitForTimeout(1000);
     await closeTaskDetail(page);
 
     await page.getByPlaceholder("Filter by title...").fill(`Copy of ${title}`);
-    await page.waitForTimeout(400);
-    await expect(page.getByText(`Copy of ${title}`)).toBeVisible();
+    // Duplication invalidated the task list; the visibility wait below covers
+    // the board refetch (no fixed sleep needed).
+    await expect(page.getByText(`Copy of ${title}`)).toBeVisible({ timeout: 10_000 });
   });
 
   test("task updates are recorded in the activity log", async ({ page }) => {
@@ -198,10 +199,15 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await openBoardTaskDetail(page, taskTitle);
-    const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-    await expect(detailPanel.getByText("Custom Fields")).toBeVisible();
-    await expect(detailPanel.getByText(fieldName)).toBeVisible();
-    await expect(detailPanel.getByText(fieldValue)).toBeVisible();
+    const detailPanel = taskDetailPanel(page);
+    // The rewritten task detail panel shows custom field values in view mode
+    // inside the "Details" section: a muted "Custom Fields" group label plus
+    // one card per field (field name, then its value). The NAME and VALUE the
+    // test set are the meaningful assertions.
+    const detailsSection = detailPanel.locator('[data-task-detail-section="details"]');
+    await expect(detailsSection).toBeVisible();
+    await expect(detailsSection.getByText(fieldName)).toBeVisible();
+    await expect(detailsSection.getByText(fieldValue)).toBeVisible();
   });
 
   test("saved filter presets can be stored and reapplied", async ({ page }) => {
@@ -254,6 +260,23 @@ test.describe("Backlog regression coverage", () => {
     await expect(assignmentsToggle).not.toBeChecked();
     await assignmentsToggle.click();
     await expect(assignmentsToggle).toBeChecked();
+
+    // Toggle an EMAIL channel checkbox too and verify it persists after the
+    // notification center is closed and reopened.
+    const commentsEmailToggle = page.getByLabel("Comments email", { exact: true });
+    const emailInitiallyChecked = await commentsEmailToggle.isChecked();
+    await commentsEmailToggle.click();
+    await expect(commentsEmailToggle).toBeChecked({ checked: !emailInitiallyChecked });
+
+    await page.getByLabel("Open notifications").click({ force: true });
+    await expect(commentsEmailToggle).not.toBeVisible();
+    await page.getByLabel("Open notifications").click({ force: true });
+    await expect(page.getByText("Preferences")).toBeVisible();
+    await expect(commentsEmailToggle).toBeChecked({ checked: !emailInitiallyChecked });
+
+    // Restore the original preference so reruns start from the same state.
+    await commentsEmailToggle.click();
+    await expect(commentsEmailToggle).toBeChecked({ checked: emailInitiallyChecked });
   });
 
   test("assignment notifications reach another project member", async ({ page }) => {
