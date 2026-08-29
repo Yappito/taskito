@@ -3,7 +3,12 @@ import { z } from "zod";
 
 import { decryptAiSecret, encryptAiSecret } from "@/lib/ai-crypto";
 import { normalizeAiPermissions } from "@/lib/ai-permissions";
-import { normalizeAiProviderHeaders, normalizeAiProviderModel, validateAiProviderBaseUrl } from "@/lib/ai-provider-validation";
+import {
+  AiProviderUrlValidationError,
+  normalizeAiProviderHeaders,
+  normalizeAiProviderModel,
+  validateAiProviderBaseUrl,
+} from "@/lib/ai-provider-validation";
 import { AI_PERMISSION_PRESETS, AI_PERMISSION_VALUES, type AiPermission } from "@/lib/ai-types";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { requireGlobalAdmin, requireProjectAccess, requireTaskAccess } from "@/server/authz";
@@ -14,7 +19,7 @@ import { normalizeAiConversationTitle } from "@/server/services/ai/presenter";
 import { completeWithAnthropicProvider } from "@/server/services/ai/provider-anthropic";
 import { completeWithOpenAiCompatibleProvider } from "@/server/services/ai/provider-openai-compatible";
 import { resolveAiProvider } from "@/server/services/ai/provider-registry";
-import { UpstreamProviderError } from "@/server/services/ai/provider-request";
+import { AiProviderError } from "@/server/services/ai/provider-request";
 import { getRequiredPermissionsForActionPayload, resolveAiActionPayload } from "@/server/services/ai/tools";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
@@ -289,12 +294,20 @@ async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisi
       await completeWithOpenAiCompatibleProvider(provider, messages);
     }
   } catch (error) {
-    const status = error instanceof UpstreamProviderError && error.status !== null && Number.isInteger(error.status) && error.status > 0
-      ? error.status
-      : null;
-    const rawMessage = error instanceof Error && error.message ? error.message : "AI provider request failed";
+    const status =
+      error instanceof AiProviderError && error.status !== null && Number.isInteger(error.status) && error.status > 0
+        ? error.status
+        : null;
+    // Only typed error classes are surfaced: AiProviderError messages are
+    // bounded and sanitized by the adapters, and URL validation messages are
+    // authored by Taskito. An arbitrary Error.message is never interpolated —
+    // it can embed upstream response bytes (e.g. from JSON parse failures).
+    const knownMessage =
+      error instanceof AiProviderError || error instanceof AiProviderUrlValidationError
+        ? error.message
+        : "AI provider request failed";
     // Bounded, sanitized status/summary only — never raw upstream body text.
-    throw new Error(summarizeProviderTestOutcome(status, rawMessage));
+    throw new Error(summarizeProviderTestOutcome(status, knownMessage));
   }
 
   // Deliberately do not surface raw upstream body/model text to the client.

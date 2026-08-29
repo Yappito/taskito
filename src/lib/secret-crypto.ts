@@ -85,11 +85,13 @@ function getCurrentKey() {
     return keyFromBase64Material(process.env[KEY_ENV_NAME] as string);
   }
 
-  const fallback = process.env[FALLBACK_ENV_NAME]?.trim();
-  if (!fallback) {
+  const fallback = process.env[FALLBACK_ENV_NAME];
+  if (!fallback || !fallback.trim()) {
     throw new Error(`${KEY_ENV_NAME} or ${FALLBACK_ENV_NAME} is required to encrypt stored secrets`);
   }
 
+  // Derive from the exact original string. Trimming here would silently change
+  // the legacy key for deployments whose secret had surrounding whitespace.
   return keyFromSecretMaterial(fallback);
 }
 

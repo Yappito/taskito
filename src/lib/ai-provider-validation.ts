@@ -1,5 +1,18 @@
 import { lookup } from "node:dns/promises";
 
+/**
+ * Typed error thrown when a provider base URL (or a redirect target reached
+ * through one) fails validation. The message is authored by Taskito and at
+ * most echoes the operator's own hostname and resolved addresses — never
+ * upstream response body bytes — so callers may surface it verbatim.
+ */
+export class AiProviderUrlValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AiProviderUrlValidationError";
+  }
+}
+
 const RESERVED_HEADER_NAMES = new Set([
   "accept",
   "authorization",
@@ -17,15 +30,134 @@ const RESERVED_HEADER_NAMES = new Set([
   "anthropic-version",
 ]);
 
-function getAllowedHosts() {
-  return process.env.AI_PROVIDER_HOST_ALLOWLIST
-    ?.split(",")
-    .map((value) => normalizeHostname(value))
-    .filter(Boolean) ?? [];
-}
-
 function normalizeHostname(hostname: string) {
   return hostname.trim().toLowerCase().replace(/^\[(.*)]$/, "$1");
+}
+
+/**
+ * One allowlist entry. Entries may be `host` (matches any port, but never
+ * authorizes private hosts on its own) or `host:port` (matches exactly one
+ * effective TCP port and is required to opt private hosts in).
+ */
+export interface AiProviderAllowlistEntry {
+  hostname: string;
+  /** Explicit port from a `host:port` entry, or null for a hostname-only entry. */
+  port: number | null;
+}
+
+let allowlistCache: { signature: string; entries: AiProviderAllowlistEntry[] } | null = null;
+
+/**
+ * Parses `AI_PROVIDER_HOST_ALLOWLIST` (comma-separated `host` or `host:port`
+ * entries, IPv6 literals bracketed). Entries are cached per env value so a
+ * malformed entry warns exactly once; invalid entries are dropped, which fails
+ * closed (the hosts they would have matched are simply not allowlisted).
+ */
+function getAllowlistEntries(): AiProviderAllowlistEntry[] {
+  const raw = process.env.AI_PROVIDER_HOST_ALLOWLIST;
+  const signature = raw ?? "";
+  if (allowlistCache?.signature === signature) {
+    return allowlistCache.entries;
+  }
+
+  const entries: AiProviderAllowlistEntry[] = [];
+  for (const part of (raw ?? "").split(",")) {
+    const value = part.trim();
+    if (!value) {
+      continue;
+    }
+    const entry = parseAllowlistEntry(value);
+    if (entry) {
+      entries.push(entry);
+    } else {
+      console.warn(
+        `[ai-provider-validation] Ignoring invalid AI_PROVIDER_HOST_ALLOWLIST entry "${value}" ` +
+          "(expected `host` or `host:port`; port must be 1-65535)",
+      );
+    }
+  }
+
+  allowlistCache = { signature, entries };
+  return entries;
+}
+
+function parseAllowlistEntry(value: string): AiProviderAllowlistEntry | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  // Bracketed IPv6: `[::1]` or `[::1]:11434`.
+  if (normalized.startsWith("[")) {
+    const close = normalized.indexOf("]");
+    if (close < 0) {
+      return null;
+    }
+    const hostname = normalized.slice(1, close);
+    const rest = normalized.slice(close + 1);
+    if (rest && !rest.startsWith(":")) {
+      return null;
+    }
+    if (!rest) {
+      return { hostname, port: null };
+    }
+    if (!/^\d+$/.test(rest.slice(1))) {
+      return null;
+    }
+    const port = Number(rest.slice(1));
+    if (port < 1 || port > 65535) {
+      return null;
+    }
+    return { hostname: normalizeHostname(hostname), port };
+  }
+
+  // Hostnames, IPv4 literals, and `host:port` — none of which contain a colon.
+  const colon = normalized.indexOf(":");
+  if (colon < 0) {
+    return { hostname: normalizeHostname(normalized), port: null };
+  }
+  if (!/^\d+$/.test(normalized.slice(colon + 1))) {
+    return null;
+  }
+  const port = Number(normalized.slice(colon + 1));
+  if (port < 1 || port > 65535) {
+    return null;
+  }
+  return { hostname: normalizeHostname(normalized.slice(0, colon)), port };
+}
+
+/**
+ * The TCP port a request will actually use: the explicit URL port, or the
+ * scheme default (80 for HTTP, 443 for HTTPS).
+ */
+function effectiveUrlPort(parsed: URL): number {
+  if (parsed.port) {
+    return Number(parsed.port);
+  }
+  return parsed.protocol === "https:" ? 443 : 80;
+}
+
+/**
+ * First allowlist entry matching `hostname` and the effective port. A bare
+ * `host` entry matches any port (subject to the private-host gate below); a
+ * `host:port` entry matches only that exact port.
+ */
+function matchingAllowlistEntry(
+  entries: AiProviderAllowlistEntry[],
+  hostname: string,
+  port: number,
+): AiProviderAllowlistEntry | null {
+  return (
+    entries.find((entry) => entry.hostname === hostname && (entry.port === null || entry.port === port)) ?? null
+  );
+}
+
+function allowlistExplicitlyAllowsPort(
+  entries: AiProviderAllowlistEntry[],
+  hostname: string,
+  port: number,
+): boolean {
+  return entries.some((entry) => entry.hostname === hostname && entry.port === port);
 }
 
 /**
@@ -160,45 +292,48 @@ export function isPrivateOrReservedHostname(hostname: string) {
   return isPrivateIpv6Address(normalized);
 }
 
-function assertHostnameIsConnectable(hostname: string) {
-  if (isPrivateOrReservedHostname(hostname) && !allowPrivateProviderHosts()) {
-    throw new Error(
-      "Provider base URL points at a private, loopback, or link-local address. Enable AI_PROVIDER_ALLOW_PRIVATE_HOSTS or allowlist the host explicitly for self-hosted providers"
-    );
-  }
-}
-
 function normalizeBaseUrl(rawUrl: string) {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
-    throw new Error("Provider base URL is required");
+    throw new AiProviderUrlValidationError("Provider base URL is required");
   }
 
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error("Provider base URL must be a valid absolute URL");
+    throw new AiProviderUrlValidationError("Provider base URL must be a valid absolute URL");
   }
 
   const hostname = normalizeHostname(parsed.hostname);
 
   if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("Provider base URL must use HTTP or HTTPS");
+    throw new AiProviderUrlValidationError("Provider base URL must use HTTP or HTTPS");
   }
 
   if (parsed.username || parsed.password) {
-    throw new Error("Provider base URL must not include credentials");
+    throw new AiProviderUrlValidationError("Provider base URL must not include credentials");
   }
 
-  const allowedHosts = getAllowedHosts();
-  if (allowedHosts.length > 0 && !allowedHosts.includes(hostname)) {
-    throw new Error("Provider host is not present in the allowlist");
+  const entries = getAllowlistEntries();
+  const port = effectiveUrlPort(parsed);
+
+  if (entries.length > 0 && !matchingAllowlistEntry(entries, hostname, port)) {
+    const hint =
+      isPrivateOrReservedHostname(hostname) && entries.some((entry) => entry.hostname === hostname)
+        ? " — private and loopback hosts require an exact `host:port` allowlist entry (e.g. localhost:11434)"
+        : "";
+    throw new AiProviderUrlValidationError(`Provider host is not present in the allowlist${hint}`);
   }
 
-  // Private hosts on the allowlist were explicitly permitted in the step above.
-  if (!allowedHosts.includes(hostname)) {
-    assertHostnameIsConnectable(hostname);
+  // Private hosts: allowlisting a bare hostname no longer opens every TCP port
+  // on that host. Only an exact `host:port` entry (or the global
+  // AI_PROVIDER_ALLOW_PRIVATE_HOSTS override) authorizes a private target.
+  const explicitlyAllowedPort = allowlistExplicitlyAllowsPort(entries, hostname, port);
+  if (isPrivateOrReservedHostname(hostname) && !allowPrivateProviderHosts() && !explicitlyAllowedPort) {
+    throw new AiProviderUrlValidationError(
+      "Provider base URL points at a private, loopback, or link-local address. Allowlisting a private host requires an exact `host:port` entry (e.g. localhost:11434) or the AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true override",
+    );
   }
 
   parsed.hash = "";
@@ -215,15 +350,16 @@ export async function assertAiProviderBaseUrlFetchAllowed(rawUrl: string) {
 
   const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
   if (addresses.length === 0) {
-    throw new Error("Provider host could not be resolved");
+    throw new AiProviderUrlValidationError("Provider host could not be resolved");
   }
 
-  const hostIsAllowlisted = getAllowedHosts().includes(normalizeHostname(parsed.hostname));
+  const port = effectiveUrlPort(parsed);
+  const hostIsAllowlisted = matchingAllowlistEntry(getAllowlistEntries(), normalizeHostname(parsed.hostname), port) !== null;
   if (!allowPrivateProviderHosts() && !hostIsAllowlisted) {
     for (const { address } of addresses) {
       if (isPrivateIpv4Address(address) || isPrivateIpv6Address(address)) {
-        throw new Error(
-          `Provider host resolves to a private, loopback, or link-local address (${address}). Enable AI_PROVIDER_ALLOW_PRIVATE_HOSTS or allowlist the host explicitly for self-hosted providers`
+        throw new AiProviderUrlValidationError(
+          `Provider host resolves to a private, loopback, or link-local address (${address}). Enable AI_PROVIDER_ALLOW_PRIVATE_HOSTS or allowlist the host explicitly (use a \`host:port\` entry for private hosts) for self-hosted providers`,
         );
       }
     }

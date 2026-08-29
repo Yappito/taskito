@@ -246,6 +246,28 @@ describe("openai-compatible provider adapter", () => {
         expect(error.message).toBe("Invalid model name");
       });
     });
+
+    it("throws a fixed typed error without echoing upstream bytes on a non-JSON 200", async () => {
+      const fake = installFakeFetch([
+        new Response("INTERNAL_SECRET_200_OK", { status: 200, headers: { "content-type": "text/plain" } }),
+      ]);
+      restoreFake = fake.restore;
+
+      const completion = completeWithOpenAiCompatibleProviderStructured(
+        provider,
+        makeFakeAiMessages({ role: "user", content: "hi" })
+      );
+      await expect(completion).rejects.toBeInstanceOf(AiProviderError);
+      await completion.catch((error: AiProviderError) => {
+        expect(error.status).toBe(200);
+        expect(error.code).toBe("malformed_response_body");
+        expect(error.retryable).toBe(false);
+        // V8 JSON parse errors embed body fragments; the typed error must not.
+        expect(error.message).toBe("Provider returned a malformed response body");
+        expect(error.message).not.toContain("INTERNAL_SECRET_200_OK");
+        expect(error.message).not.toContain("Unexpected token");
+      });
+    });
   });
 
   describe("streaming", () => {

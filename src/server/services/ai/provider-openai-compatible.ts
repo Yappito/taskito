@@ -171,7 +171,18 @@ export async function completeWithOpenAiCompatibleProviderStructured(
       throw await aiProviderErrorFromResponse(response);
     }
 
-    const payload = (await response.json()) as OpenAiChatResponse;
+    let payload: OpenAiChatResponse;
+    try {
+      payload = (await response.json()) as OpenAiChatResponse;
+    } catch {
+      // JSON parse failures must never surface: V8's SyntaxError message embeds
+      // fragments of the response body, which could leak upstream secrets.
+      throw new AiProviderError("Provider returned a malformed response body", {
+        status: response.status,
+        code: "malformed_response_body",
+        retryable: false,
+      });
+    }
     const choice = payload.choices?.[0];
     const message = choice?.message;
     const finishReason = choice?.finish_reason ?? null;

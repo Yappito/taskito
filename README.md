@@ -317,9 +317,10 @@ Useful commands from the repository root:
 | `AUTO_TAGGER_API_KEY` | No | Optional API key for the auto-tagger |
 | `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt AI provider secrets and S3/OIDC secrets at rest. Strongly recommended in production; when unset in production the app refuses to encrypt/decrypt stored secrets unless `AI_ALLOW_AUTH_SECRET_FALLBACK=true` |
 | `AI_ALLOW_AUTH_SECRET_FALLBACK` | No | Set `true` to explicitly allow deriving the secret encryption key from `AUTH_SECRET` when `AI_SECRET_MASTER_KEY` is unset (production only; not recommended — see rotation notes below) |
-| `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated host allowlist for AI provider endpoints |
+| `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated allowlist for AI provider endpoints. Entries are `host` or `host:port` (IPv6 literals bracketed). Public hosts may use a bare `host` entry (any port); private/loopback hosts require an exact `host:port` entry (e.g. `localhost:11434`) or the global `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true` override, so an entry can never open every TCP port on a host |
 | `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | No | Set `true` only to allow AI provider base URLs that point at loopback/private/link-local addresses (self-hosted Ollama, LM Studio, etc.); defaults to `false`, which rejects any provider host that is or resolves to a private address |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
+| `REENCRYPT_TX_TIMEOUT_MS` | No | Interactive-transaction timeout (ms) for the `db:reencrypt-ai-secrets` rotation script; defaults to `300000` because three table scans plus per-row updates can exceed the Prisma 5s default. Run the rotation in a maintenance window: the transaction holds an advisory lock and aborts if row counts change mid-run |
 | `STORAGE_PROVIDER` | No | `local` or `s3`; defaults to `local` |
 | `STORAGE_S3_BUCKET` | Required for S3 | Bucket used for attachments and profile images |
 | `STORAGE_S3_REGION` | No | S3 region; defaults to `us-east-1` |
@@ -345,11 +346,15 @@ Useful commands from the repository root:
 Stored AI provider secrets, OIDC client secrets, and S3 storage credentials are encrypted at rest. New ciphertext is written as `v1:<payload>`; legacy unprefixed ciphertext keeps decrypting. Rotating `AUTH_SECRET` no longer silently breaks those secrets if a dedicated master key is configured — and if it ever does, the re-encryption script restores access:
 
 1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
-2. Dry run (always start here):
+2. Pick a maintenance window and **stop the app (or make AI/provider and storage settings temporarily read-only) for the duration of the rotation**. The re-encryption script re-counts sensitive rows inside a locked transaction and aborts if rows were added or removed mid-run, but a fully idle deployment is the only way to also rule out in-place secret changes during the run.
+3. Dry run (always start here):
    `AI_SECRET_MASTER_KEY=<new key> AI_SECRET_MASTER_KEY_OLD=<old master key> npm run db:reencrypt-ai-secrets -- --dry-run`
    Omit `AI_SECRET_MASTER_KEY_OLD` when the old ciphertext was produced by the legacy `sha256(AUTH_SECRET)` fallback (keep `AUTH_SECRET` set so the old key can be derived).
-3. Apply: run the same command again without `--dry-run`. The script re-encrypts in a single transaction and prints per-table counts.
-4. Update the deployment environment to `AI_SECRET_MASTER_KEY=<new key>` and restart. Only then (optionally) rotate `AUTH_SECRET`.
+4. Apply: run the same command again without `--dry-run`. The script re-encrypts in a single transaction (holding a Postgres advisory lock) and prints per-table counts; it aborts with nothing committed if any row fails to decrypt or row counts change during the run.
+5. Re-check: run the same command once more (no `--dry-run`). It should report every row as "already current" with zero re-encryptions — that confirms the first pass caught everything and that nothing was written under the old key afterwards.
+6. Update the deployment environment to `AI_SECRET_MASTER_KEY=<new key>` and restart. Only then (optionally) rotate `AUTH_SECRET`.
+
+If a run fails with a transaction timeout (very large tables), raise the interactive-transaction budget with `REENCRYPT_TX_TIMEOUT_MS=<milliseconds>` (default `300000`).
 
 If you previously ran without a master key (e.g. compose deployments before this variable was forwarded), migrate from the auth-secret fallback with `AI_SECRET_MASTER_KEY=<new key> AUTH_SECRET=<unchanged> npm run db:reencrypt-ai-secrets`.
 
@@ -364,8 +369,9 @@ If you previously ran without a master key (e.g. compose deployments before this
 - nginx is configured to accept request bodies large enough for the application attachment limit.
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 - The documented `docker compose up -d --pull always` command refreshes the published app image before startup.
-- AI provider URLs are validated before use and can be restricted further with `AI_PROVIDER_HOST_ALLOWLIST`.
+- AI provider URLs are validated before use and can be restricted further with `AI_PROVIDER_HOST_ALLOWLIST` (`host` or `host:port` entries; private/loopback hosts need an exact `host:port` entry).
 - By default, AI provider base URLs must not point at loopback, private, or link-local addresses — including hostnames that resolve to them. Egress to private targets is re-checked on every upstream request. Self-hosted endpoints (e.g. Ollama, LM Studio) require opting in via `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true` or by adding the host to `AI_PROVIDER_HOST_ALLOWLIST`.
+- Provider responses are never fetched with Node's default redirect-following: every redirect hop is re-validated against the same policy (allowlist, private/resolved-address checks) before it is requested, at most 3 redirects are followed, credential headers are stripped when a redirect crosses origins, and 301/302/303 never replay the request body (only 307/308 keep the original method and body). Redirects to disallowed targets are rejected outright.
 - AI-generated writes are permission-scoped and approval-based unless `Yolo mode` is explicitly enabled for the conversation and allowed by project policy.
 
 ## Development
