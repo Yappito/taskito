@@ -2,6 +2,18 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 import tls from "node:tls";
 
+import {
+  assertValidMailbox,
+  encodeDisplayName,
+  encodeHeaderValue,
+  InvalidEmailAddressError,
+  parseEmailAddress,
+} from "./address";
+
+// Mailbox parsing/validation and RFC 2047 encoding live in address.ts;
+// re-exported here for callers that only import the client.
+export { encodeHeaderValue, parseEmailAddress, InvalidEmailAddressError } from "./address";
+
 /**
  * Minimal SMTP client built on node:net / node:tls (no external mail packages).
  * Supports EHLO, STARTTLS (when offered), AUTH PLAIN / AUTH LOGIN,
@@ -28,6 +40,10 @@ export interface SmtpConfig {
   tlsRejectUnauthorized: boolean;
   /** Explicit opt-in to sending credentials over a non-TLS connection. */
   allowInsecureAuth: boolean;
+  /** Deadline for TCP connect + TLS handshakes (default 10000). */
+  connectTimeoutMs?: number;
+  /** Overall per-message deadline for the whole SMTP conversation (default 60000). */
+  messageTimeoutMs?: number;
 }
 
 export interface SmtpSocketLike extends EventEmitter {
@@ -48,10 +64,14 @@ export interface SmtpSendOptions {
   config?: SmtpConfig | null;
   connectionFactory?: SmtpConnectionFactory;
   responseTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  messageTimeoutMs?: number;
 }
 
 export const MAX_PENDING_EMAILS = 100;
 const DEFAULT_RESPONSE_TIMEOUT_MS = 15_000;
+export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+export const DEFAULT_MESSAGE_TIMEOUT_MS = 60_000;
 
 type PendingEmailJob = () => Promise<void>;
 
@@ -72,65 +92,54 @@ function isFalseish(value: string | undefined): boolean {
   return value === "0" || value === "false" || value === "no";
 }
 
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
 /** Parse SMTP_* env vars into a config object; null when email is not configured. */
 export function readSmtpConfig(env: Record<string, string | undefined> = process.env): SmtpConfig | null {
   const host = env.SMTP_HOST?.trim();
-  const from = env.SMTP_FROM?.trim();
-  if (!host || !from) {
+  const rawFrom = env.SMTP_FROM;
+  if (!host || !rawFrom?.trim()) {
     return null;
   }
 
-  const parsedFrom = parseEmailAddress(from);
+  // A malformed SMTP_FROM is a deployment error: fail loudly (typed error,
+  // raw value never echoed) instead of sending an injectable envelope address.
+  const validatedFrom = assertValidMailbox(rawFrom, "SMTP_FROM");
   return {
     host,
     port: env.SMTP_PORT ? Number(env.SMTP_PORT) || 587 : 587,
     secure: isTrueish(env.SMTP_SECURE),
     user: env.SMTP_USER?.trim() || undefined,
     password: env.SMTP_PASSWORD || undefined,
-    from: parsedFrom.address,
-    fromName: parsedFrom.name,
+    from: validatedFrom.address,
+    fromName: validatedFrom.name,
     tlsRejectUnauthorized: !isFalseish(env.SMTP_TLS_REJECT_UNAUTHORIZED),
     allowInsecureAuth: env.SMTP_ALLOW_INSECURE_AUTH === "true",
+    connectTimeoutMs: parseTimeoutMs(env.SMTP_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS),
+    messageTimeoutMs: parseTimeoutMs(env.SMTP_MESSAGE_TIMEOUT_MS, DEFAULT_MESSAGE_TIMEOUT_MS),
   };
 }
 
-export function isEmailConfigured(env: Record<string, string | undefined> = process.env): boolean {
-  return readSmtpConfig(env) !== null;
-}
-
-/** Split "Display Name <addr@host>" or "addr@host" into name + address. */
-export function parseEmailAddress(value: string): { address: string; name?: string } {
-  const match = value.match(/^(.*?)\s*<([^>]+)>\s*$/);
-  if (!match) {
-    return { address: value.trim() };
-  }
-  const name = match[1].trim().replace(/^"|"$/g, "");
-  return { address: match[2].trim(), name: name || undefined };
-}
-
 /**
- * RFC 2047 "B" encoding for header values that must stay 7-bit safe
- * (used for the Subject and display names). Splits multi-byte UTF-8 safely
- * across multiple encoded words and folds them with CRLF + space.
+ * Whether email is usable: SMTP_HOST AND a syntactically valid SMTP_FROM are
+ * set. An invalid SMTP_FROM is not "configured" — the typed error is logged
+ * (raw value never echoed) and the channel reports unconfigured instead of
+ * throwing into every caller.
  */
-export function encodeHeaderValue(value: string): string {
-  const sanitized = value.replace(/[\r\n]+/g, " ").trim();
-  if (!sanitized || /^[\x20-\x7e]*$/.test(sanitized)) {
-    return sanitized;
-  }
-
-  const bytes = Buffer.from(sanitized, "utf8");
-  const words: string[] = [];
-  let start = 0;
-  while (start < bytes.length) {
-    let end = Math.min(start + 45, bytes.length);
-    while (end > start + 1 && (bytes[end] & 0xc0) === 0x80) {
-      end -= 1; // never split a UTF-8 continuation byte
+export function isEmailConfigured(env: Record<string, string | undefined> = process.env): boolean {
+  try {
+    return readSmtpConfig(env) !== null;
+  } catch (error) {
+    if (error instanceof InvalidEmailAddressError) {
+      console.error(`[email] SMTP_FROM is invalid; email is treated as unconfigured: ${error.message}`);
+      return false;
     }
-    words.push(`=?UTF-8?B?${bytes.subarray(start, end).toString("base64")}?=`);
-    start = end;
+    throw error;
   }
-  return words.join("\r\n ");
 }
 
 /** Wrap a payload into base64 lines of at most 76 characters (7-bit safe bodies). */
@@ -155,15 +164,22 @@ export interface BuiltEmail {
 
 /** Build the RFC 5322 message: 7-bit-safe headers, multipart/alternative body. */
 export function buildMimeMessage(message: OutgoingEmailMessage, config: SmtpConfig): BuiltEmail {
+  // Defense in depth: this builder interpolates addresses into wire data, so
+  // it re-validates even though sendEmail checked already — a direct call can
+  // never smuggle CRLF or extra commands through.
+  const validatedFrom = assertValidMailbox(config.from, "SMTP from address");
+  const validatedTo = assertValidMailbox(message.to, "recipient address");
+
   const boundary = `taskito-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const parsedFrom = parseEmailAddress(config.from);
-  const fromAddress = parsedFrom.address;
-  const fromName = config.fromName ?? parsedFrom.name;
+  const fromAddress = validatedFrom.address;
+  const fromName = config.fromName ?? validatedFrom.name;
   const domain = fromAddress.split("@")[1] ?? config.host;
-  const fromLine = fromName
-    ? `${encodeHeaderValue(fromName)} <${fromAddress}>`
-    : `<${fromAddress}>`;
-  const toLine = message.toName ? `${encodeHeaderValue(message.toName)} <${message.to}>` : `<${message.to}>`;
+  // Display names are CR/LF stripped / RFC 2047 encoded / quoted so they can
+  // never add header structure.
+  const fromDisplayName = encodeDisplayName(fromName ?? "");
+  const fromLine = fromDisplayName ? `${fromDisplayName} <${fromAddress}>` : `<${fromAddress}>`;
+  const toDisplayName = encodeDisplayName(message.toName ?? "");
+  const toLine = toDisplayName ? `${toDisplayName} <${validatedTo.address}>` : `<${validatedTo.address}>`;
 
   const headers = [
     `From: ${fromLine}`,
@@ -193,7 +209,7 @@ export function buildMimeMessage(message: OutgoingEmailMessage, config: SmtpConf
     "",
   ].join("\r\n");
 
-  return { data, mailFrom: fromAddress, rcptTo: message.to };
+  return { data, mailFrom: fromAddress, rcptTo: validatedTo.address };
 }
 
 interface ResponseWaiter {
@@ -215,6 +231,10 @@ function createResponseWaiter(socket: SmtpSocketLike, timeoutMs: number): Respon
       };
       const timer = setTimeout(() => {
         cleanup();
+        // A command timeout means this server is no longer making progress.
+        // Close immediately, rather than relying solely on the caller's
+        // finally block, so the one-worker queue is freed promptly.
+        socket.destroy();
         reject(new Error("[smtp] timed out waiting for server response"));
       }, timeoutMs);
 
@@ -263,6 +283,16 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Bounded, PII-free status summary for logs: the 3-digit status code plus the
+ * RFC 3463 enhanced status code only — never the server's reply text, which
+ * can echo envelope data or other PII.
+ */
+function responseStatusSummary(response: SmtpResponse): string {
+  const enhanced = response.lines[0]?.match(/^\d{3}[ -](\d{1,3}\.\d{1,3}\.\d{1,3})\b/);
+  return `${response.code}${enhanced ? ` ${enhanced[1]}` : ""}`;
+}
+
 /** Run the whole SMTP conversation over an established connection. */
 async function runSmtpConversation(
   connection: SmtpConnection,
@@ -281,12 +311,18 @@ async function runSmtpConversation(
       commandSocket.write(`${command}\r\n`);
       return waiter.readResponse();
     };
-    const expect = async (command: string, codes: number[]) => {
+    /**
+     * Security (H1): `label` is a constant, credential-free description of
+     * the command. During AUTH LOGIN the wire command itself IS the
+     * credential (single-token base64), so deriving the label from the
+     * command would leak the password into thrown errors and logs. Error
+     * messages carry only the label plus the bounded status summary below —
+     * never command arguments and never the server's reply text.
+     */
+    const expect = async (label: string, command: string, codes: number[]) => {
       const response = await send(command);
       if (!codes.includes(response.code)) {
-        throw new Error(
-          `[smtp] unexpected reply to ${command.split(" ")[0]}: ${response.code} ${response.text}`
-        );
+        throw new Error(`[smtp] unexpected reply to ${label}: ${responseStatusSummary(response)}`);
       }
       return response;
     };
@@ -297,26 +333,26 @@ async function runSmtpConversation(
 
   const greeting = await waiter.readResponse();
   if (greeting.code !== 220) {
-    throw new Error(`[smtp] unexpected greeting: ${greeting.code} ${greeting.text}`);
+    throw new Error(`[smtp] unexpected greeting: ${responseStatusSummary(greeting)}`);
   }
 
   const parsedFrom = parseEmailAddress(config.from);
   const ehloDomain = parsedFrom.address.split("@")[1] ?? config.host;
-  let capabilities = stripStatusPrefixes((await expect(`EHLO ${ehloDomain}`, [250])).lines);
+  let capabilities = stripStatusPrefixes((await expect("EHLO", `EHLO ${ehloDomain}`, [250])).lines);
 
   // Whether the command stream is encrypted: either implicit TLS from the
   // start (config.secure) or a completed STARTTLS upgrade.
   let tlsActive = config.secure;
 
   if (!config.secure && capabilities.some((line) => line.toUpperCase().startsWith("STARTTLS"))) {
-    await expect("STARTTLS", [220]);
+    await expect("STARTTLS", "STARTTLS", [220]);
     const secureSocket = await connection.upgrade();
     tlsActive = true;
     // Re-bind command/response plumbing to the TLS layer so raw TLS records
     // are not parsed as SMTP reply lines, then re-run EHLO for fresh caps.
     waiter.dispose();
     ({ send, expect } = bindCommands(secureSocket));
-    capabilities = stripStatusPrefixes((await expect(`EHLO ${ehloDomain}`, [250])).lines);
+    capabilities = stripStatusPrefixes((await expect("EHLO", `EHLO ${ehloDomain}`, [250])).lines);
   }
 
   if (config.user && config.password) {
@@ -329,20 +365,22 @@ async function runSmtpConversation(
     }
     if (capabilities.some((line) => line.toUpperCase().includes("AUTH") && line.toUpperCase().includes("PLAIN"))) {
       const initialResponse = Buffer.from(`\u0000${config.user}\u0000${config.password}`, "utf8").toString("base64");
-      await expect(`AUTH PLAIN ${initialResponse}`, [235]);
+      await expect("AUTH PLAIN", `AUTH PLAIN ${initialResponse}`, [235]);
     } else if (capabilities.some((line) => line.toUpperCase().includes("AUTH") && line.toUpperCase().includes("LOGIN"))) {
-      await expect("AUTH LOGIN", [334]);
-      await expect(Buffer.from(config.user, "utf8").toString("base64"), [334]);
-      await expect(Buffer.from(config.password, "utf8").toString("base64"), [235]);
+      await expect("AUTH LOGIN", "AUTH LOGIN", [334]);
+      // AUTH LOGIN steps send the credentials as standalone one-token base64
+      // commands: the safe labels below are what can ever appear in errors.
+      await expect("AUTH LOGIN username", Buffer.from(config.user, "utf8").toString("base64"), [334]);
+      await expect("AUTH LOGIN password", Buffer.from(config.password, "utf8").toString("base64"), [235]);
     } else {
       throw new Error("[smtp] server does not advertise a supported AUTH mechanism");
     }
   }
 
   const built = buildMimeMessage(message, config);
-  await expect(`MAIL FROM:<${built.mailFrom}>`, [250]);
-  await expect(`RCPT TO:<${built.rcptTo}>`, [250, 251]);
-  await expect("DATA", [354]);
+  await expect("MAIL FROM", `MAIL FROM:<${built.mailFrom}>`, [250]);
+  await expect("RCPT TO", `RCPT TO:<${built.rcptTo}>`, [250, 251]);
+  await expect("DATA", "DATA", [354]);
 
   const dotStuffed = dotStuff(built.data);
   const response = await new Promise<SmtpResponse>((resolve, reject) => {
@@ -351,28 +389,41 @@ async function runSmtpConversation(
     });
   });
   if (response.code !== 250) {
-    throw new Error(`[smtp] message was not accepted: ${response.code} ${response.text}`);
+    throw new Error(`[smtp] message was not accepted: ${responseStatusSummary(response)}`);
   }
 
   await send("QUIT");
 }
 
-function defaultConnectionFactory(config: SmtpConfig): SmtpConnectionFactory {
+function defaultConnectionFactory(config: SmtpConfig, connectTimeoutMs: number): SmtpConnectionFactory {
   return async () => {
     const socket: net.Socket | tls.TLSSocket = config.secure
       ? tls.connect({ host: config.host, port: config.port, rejectUnauthorized: config.tlsRejectUnauthorized })
       : net.connect({ host: config.host, port: config.port });
 
+    // TCP connect + implicit-TLS handshake deadline: a black-holed endpoint
+    // must destroy the socket and abort the job, never pin the queue worker.
     await new Promise<void>((resolve, reject) => {
-      const onConnect = () => {
+      const connectEvent = config.secure ? "secureConnect" : "connect";
+      const timer = setTimeout(() => {
+        cleanup();
+        socket.destroy();
+        reject(new Error(`[smtp] connect timeout: ${config.host}:${config.port} did not complete the ${config.secure ? "TLS" : "TCP"} connection within ${Math.round(connectTimeoutMs)}ms`));
+      }, connectTimeoutMs);
+      const cleanup = () => {
+        clearTimeout(timer);
         socket.off("error", onError);
+        socket.off(connectEvent, onConnect);
+      };
+      const onConnect = () => {
+        cleanup();
         resolve();
       };
       const onError = (error: Error) => {
-        socket.off(config.secure ? "secureConnect" : "connect", onConnect);
+        cleanup();
         reject(error);
       };
-      socket.once(config.secure ? "secureConnect" : "connect", onConnect);
+      socket.once(connectEvent, onConnect);
       socket.once("error", onError);
     });
 
@@ -386,9 +437,22 @@ function defaultConnectionFactory(config: SmtpConfig): SmtpConnectionFactory {
           port: config.port,
           rejectUnauthorized: config.tlsRejectUnauthorized,
         };
+        // STARTTLS upgrade has its own handshake deadline; the plaintext
+        // socket is destroyed so the queue can advance.
         const secureSocket: tls.TLSSocket = await new Promise((resolve, reject) => {
-          const upgraded = tls.connect(tlsOptions, () => resolve(upgraded));
-          upgraded.once("error", reject);
+          const upgraded = tls.connect(tlsOptions, () => {
+            clearTimeout(handshakeTimer);
+            resolve(upgraded);
+          });
+          const handshakeTimer = setTimeout(() => {
+            upgraded.destroy();
+            socket.destroy();
+            reject(new Error(`[smtp] STARTTLS handshake timeout after ${Math.round(connectTimeoutMs)}ms`));
+          }, connectTimeoutMs);
+          upgraded.once("error", (error: Error) => {
+            clearTimeout(handshakeTimer);
+            reject(error);
+          });
         });
         current = secureSocket;
         return secureSocket;
@@ -401,6 +465,12 @@ function defaultConnectionFactory(config: SmtpConfig): SmtpConnectionFactory {
 /**
  * Send an email directly. Resolves as a no-op when SMTP is not configured
  * (logs once so operators notice a half-configured deployment).
+ *
+ * Security: the recipient address is validated strictly BEFORE any socket is
+ * opened — an invalid/injection-shaped `to` (or `config.from`) rejects with a
+ * typed `InvalidEmailAddressError` and can never reach MAIL/RCPT lines. The
+ * whole conversation runs under an overall per-message deadline; on any
+ * timeout the socket is destroyed so the queue advances.
  */
 export async function sendEmail(message: OutgoingEmailMessage, options: SmtpSendOptions = {}): Promise<void> {
   const config = options.config ?? readSmtpConfig();
@@ -412,19 +482,88 @@ export async function sendEmail(message: OutgoingEmailMessage, options: SmtpSend
     return;
   }
 
+  // H2: envelope + recipient validation before connecting. buildMimeMessage
+  // re-validates (defense in depth); this check is what keeps a hostile
+  // address from ever opening a connection.
+  assertValidMailbox(config.from, "SMTP from address");
+  assertValidMailbox(message.to, "recipient address");
+
   const responseTimeoutMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
-  const factory = options.connectionFactory ?? defaultConnectionFactory(config);
-  const connection = await factory();
+  const connectTimeoutMs = options.connectTimeoutMs ?? config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const messageTimeoutMs = options.messageTimeoutMs ?? config.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS;
+  const factory = options.connectionFactory ?? defaultConnectionFactory(config, connectTimeoutMs);
+  const messageDeadlineAt = Date.now() + messageTimeoutMs;
+
+  let connection: SmtpConnection | undefined;
   try {
-    await runSmtpConversation(connection, message, config, responseTimeoutMs);
+    // The deadline covers everything: connect/handshake (the default factory
+    // also enforces its own stricter connect timeout) through QUIT. When it
+    // fires we destroy the socket so the pending job fails fast and the
+    // single queue worker moves on to the next message.
+    // A custom connection factory can hang before it returns a connection.
+    // If it resolves after the deadline, still close that late socket so the
+    // abandoned attempt cannot leak a connection.
+    let connectionFactoryTimedOut = false;
+    const pendingConnection = factory().then((lateConnection) => {
+      if (connectionFactoryTimedOut) {
+        lateConnection.close();
+      }
+      return lateConnection;
+    });
+    connection = await withDeadline(
+      pendingConnection,
+      messageTimeoutMs,
+      "SMTP connection was not established within the per-message deadline",
+      () => {
+        connectionFactoryTimedOut = true;
+      }
+    );
+    const remainingConversationMs = messageDeadlineAt - Date.now();
+    if (remainingConversationMs <= 0) {
+      throw new Error(
+        `[smtp] SMTP conversation did not finish within the per-message deadline (deadline ${Math.round(messageTimeoutMs)}ms exceeded)`
+      );
+    }
+    await withDeadline(
+      runSmtpConversation(connection, message, config, responseTimeoutMs),
+      remainingConversationMs,
+      "SMTP conversation did not finish within the per-message deadline",
+      () => connection?.close()
+    );
   } finally {
-    connection.close();
+    connection?.close();
   }
 }
 
 export function logEmailError(context: string, error: unknown): void {
   // Never include SMTP credentials in logs — only the shape of the failure.
   console.error(`[email] ${context}:`, describeError(error));
+}
+
+/**
+ * Race `promise` against a hard deadline. On timeout the promise is left
+ * behind (its own timeouts/finally will clean up) and the returned one
+ * rejects with a bounded error so the caller can destroy the socket and let
+ * the queue advance.
+ */
+async function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => void
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`[smtp] ${message} (deadline ${Math.round(timeoutMs)}ms exceeded)`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { isEmailConfigured, queueEmail } = vi.hoisted(() => ({
+const { isEmailConfigured, queueEmail, canAccessTask } = vi.hoisted(() => ({
   isEmailConfigured: vi.fn(),
   queueEmail: vi.fn(),
+  canAccessTask: vi.fn(),
 }));
 
 vi.mock("@/server/services/email/smtp-client", () => ({
@@ -11,7 +12,7 @@ vi.mock("@/server/services/email/smtp-client", () => ({
 }));
 
 const prismaMock = vi.hoisted(() => ({
-  user: { findUnique: vi.fn() },
+  user: { findUnique: vi.fn(), findFirst: vi.fn() },
   task: { findUnique: vi.fn() },
   notification: { create: vi.fn() },
   taskWatcher: { findMany: vi.fn() },
@@ -19,6 +20,10 @@ const prismaMock = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: prismaMock,
+}));
+
+vi.mock("@/server/authz", () => ({
+  canAccessTask,
 }));
 
 import {
@@ -52,6 +57,7 @@ describe("notification email dispatch", () => {
     vi.clearAllMocks();
     isEmailConfigured.mockReturnValue(true);
     queueEmail.mockReturnValue("queued");
+    canAccessTask.mockResolvedValue(true);
     prismaMock.task.findUnique.mockResolvedValue(taskDetails["task-1"]);
   });
 
@@ -60,6 +66,7 @@ describe("notification email dispatch", () => {
     prismaMock.user.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) =>
       where.id === "user-2" ? found.result : { id: where.id, name: "Actor", email: "actor@example.com", settings: {} }
     );
+    prismaMock.user.findFirst.mockResolvedValue({ ...found.result, disabledAt: null });
     prismaMock.notification.create.mockResolvedValue({ id: "n1" });
 
     const notification = await dispatchNotification({
@@ -82,9 +89,49 @@ describe("notification email dispatch", () => {
     );
   });
 
+  it("does not email a disabled recipient even when their email preference is enabled", async () => {
+    const found = userFound("user-2", { emailChannel: { comments: true } });
+    prismaMock.user.findUnique.mockResolvedValue(found.result);
+    prismaMock.user.findFirst.mockResolvedValue(null);
+    prismaMock.notification.create.mockResolvedValue({ id: "n1" });
+
+    await dispatchNotification({
+      recipientId: "user-2",
+      actorId: "user-1",
+      taskId: "task-1",
+      type: "commented",
+      payload: {},
+    });
+    await flushAsync();
+
+    expect(queueEmail).not.toHaveBeenCalled();
+    expect(canAccessTask).not.toHaveBeenCalled();
+  });
+
+  it("does not email a watcher who no longer has project task-read access", async () => {
+    const found = userFound("user-2", { emailChannel: { comments: true } });
+    prismaMock.user.findUnique.mockResolvedValue(found.result);
+    prismaMock.user.findFirst.mockResolvedValue({ ...found.result, disabledAt: null });
+    prismaMock.notification.create.mockResolvedValue({ id: "n1" });
+    canAccessTask.mockResolvedValue(false);
+
+    await dispatchNotification({
+      recipientId: "user-2",
+      actorId: "user-1",
+      taskId: "task-1",
+      type: "commented",
+      payload: {},
+    });
+    await flushAsync();
+
+    expect(canAccessTask).toHaveBeenCalledWith(prismaMock, "user-2", "task-1");
+    expect(queueEmail).not.toHaveBeenCalled();
+  });
+
   it("does not email when the email channel pref is off (default for comments)", async () => {
     const found = userFound("user-2", {});
     prismaMock.user.findUnique.mockResolvedValue(found.result);
+    prismaMock.user.findFirst.mockResolvedValue({ ...found.result, disabledAt: null });
 
     await dispatchNotification({
       recipientId: "user-2",
@@ -102,6 +149,7 @@ describe("notification email dispatch", () => {
   it("never emails the actor about their own action (recipient == actor)", async () => {
     const found = userFound("user-1", { emailChannel: { comments: true } });
     prismaMock.user.findUnique.mockResolvedValue(found.result);
+    prismaMock.user.findFirst.mockResolvedValue({ ...found.result, disabledAt: null });
 
     await dispatchNotification({
       recipientId: "user-1",
@@ -160,6 +208,10 @@ describe("notification email dispatch", () => {
         ? userFound("user-2", { emailChannel: { statusChanges: true } }).result
         : { id: where.id, name: "X", email: "x@example.com", settings: {} }
     );
+    prismaMock.user.findFirst.mockResolvedValue({
+      ...userFound("user-2", { emailChannel: { statusChanges: true } }).result,
+      disabledAt: null,
+    });
     prismaMock.notification.create.mockResolvedValue({ id: "n" });
 
     await notifyTaskWatchers({

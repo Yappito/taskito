@@ -291,6 +291,23 @@ export async function canAccessProject(prisma: PrismaLike, userId: string, proje
   }
 }
 
+/**
+ * Non-throwing task-read access check (same shape as canAccessProject).
+ * Used by background/email flows that must re-verify access right before
+ * acting on a task and skip silently when access has been lost.
+ */
+export async function canAccessTask(prisma: PrismaLike, userId: string, taskId: string) {
+  try {
+    await requireTaskAccess(prisma, userId, taskId, { permission: "task_read" });
+    return true;
+  } catch (error) {
+    if (error instanceof TRPCError && (error.code === "FORBIDDEN" || error.code === "UNAUTHORIZED" || error.code === "NOT_FOUND")) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 /** Returns the set of project IDs visible to the current user. */
 export async function getAccessibleProjectIds(
   prisma: PrismaLike,

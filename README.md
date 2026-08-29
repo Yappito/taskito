@@ -230,6 +230,8 @@ Email sending activates when `SMTP_HOST` and `SMTP_FROM` are set (all `SMTP_*` v
 
 Credentials are never sent over an unencrypted connection: unless the link is already TLS (`SMTP_SECURE=true`) or the server advertises STARTTLS (which the client always upgrades first), SMTP authentication is refused with a clear error instead of transmitting the password in plaintext. Only set `SMTP_ALLOW_INSECURE_AUTH=true` for trusted, isolated networks (e.g. a local relay you fully control).
 
+SMTP connections and TLS handshakes default to a 10-second deadline (`SMTP_CONNECT_TIMEOUT_MS`), and each message has a 60-second hard deadline (`SMTP_MESSAGE_TIMEOUT_MS`). On timeout, Taskito destroys the socket so its bounded email queue can continue with later messages.
+
 ### Daily due-soon digest
 
 Users can opt in to a daily due-soon digest with the "Daily due-soon digest (email)" preference (stored in `emailChannel.digest`, default OFF). The digest groups, across all of the user's accessible projects:
@@ -433,6 +435,8 @@ Useful commands from the repository root:
 | `SMTP_FROM` | Required for email | Envelope/From address, e.g. `Taskito <noreply@example.com>`; required to enable sending |
 | `SMTP_TLS_REJECT_UNAUTHORIZED` | No | Set `false` only for self-signed certificates; defaults to `true` |
 | `SMTP_ALLOW_INSECURE_AUTH` | No | Must be exactly `true` to allow SMTP AUTH over a connection without TLS; defaults to `false` (refuse instead of leaking credentials) |
+| `SMTP_CONNECT_TIMEOUT_MS` | No | TCP connect, implicit-TLS, and STARTTLS handshake deadline in milliseconds; defaults to `10000` |
+| `SMTP_MESSAGE_TIMEOUT_MS` | No | Hard deadline for one full SMTP message conversation in milliseconds; defaults to `60000` |
 | `SCHEDULER_ENABLED` | No | In-process scheduler for recurrences + due-date automation; defaults to `true` — set `false` to rely only on the external cron endpoint |
 | `SCHEDULER_INTERVAL_MS` | No | Scheduler tick interval in milliseconds; defaults to `60000` (values below 1000 clamp to 1000) |
 | `SCHEDULER_DIGEST_HOUR_UTC` | No | Earliest UTC hour for the daily due-soon digest email; defaults to `7` (0–23) |

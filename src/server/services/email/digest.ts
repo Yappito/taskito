@@ -5,7 +5,7 @@ import { getAlertConfig } from "@/lib/alert-utils";
 import { getAccessibleProjectIds } from "@/server/authz";
 import { readEmailChannelPreference } from "@/server/services/notifications";
 import { isEmailConfigured, logEmailError, sendEmail } from "@/server/services/email/smtp-client";
-import { renderDigestEmail, type DigestTask } from "@/server/services/email/templates";
+import { DIGEST_MAX_TASKS_PER_SECTION, renderDigestEmail, type DigestTask } from "@/server/services/email/templates";
 
 type PrismaLike = typeof prismaClient | Prisma.TransactionClient;
 
@@ -19,6 +19,11 @@ export interface DueSoonDigest {
   dueToday: DigestTask[];
   dueSoon: DigestTask[];
   blockedOn: DigestTask[];
+  /** Number of collected tasks omitted from each capped section. */
+  overdueMore: number;
+  dueTodayMore: number;
+  dueSoonMore: number;
+  blockedOnMore: number;
 }
 
 export interface DigestJobResult {
@@ -144,6 +149,11 @@ export async function buildDueSoonDigest(
     }
   }
 
+  // Cap collection: one query feeds up to four buckets, so allow a generous
+  // multiple of the per-section render cap — bounded work and memory even
+  // for a pathological mailbox (rendering applies the hard "+N more" cap).
+  const collectLimit = DIGEST_MAX_TASKS_PER_SECTION * 4;
+
   const dueTasks = (await prisma.task.findMany({
     where: {
       projectId: { in: accessibleProjectIds },
@@ -154,21 +164,37 @@ export async function buildDueSoonDigest(
     },
     select: taskSelect,
     orderBy: { dueDate: "asc" },
+    take: collectLimit,
   })) as DigestTaskRow[];
 
   const overdue: DigestTask[] = [];
   const dueToday: DigestTask[] = [];
   const dueSoon: DigestTask[] = [];
+  let overdueMore = 0;
+  let dueTodayMore = 0;
+  let dueSoonMore = 0;
   const seen = new Set<string>();
 
   for (const task of dueTasks) {
     const due = task.dueDate.getTime();
     if (due < dayStart) {
-      overdue.push(toDigestTask(task));
+      if (overdue.length < DIGEST_MAX_TASKS_PER_SECTION) {
+        overdue.push(toDigestTask(task));
+      } else {
+        overdueMore += 1;
+      }
     } else if (due < dayEnd) {
-      dueToday.push(toDigestTask(task));
+      if (dueToday.length < DIGEST_MAX_TASKS_PER_SECTION) {
+        dueToday.push(toDigestTask(task));
+      } else {
+        dueTodayMore += 1;
+      }
     } else if (due < (dueSoonEndByProject.get(task.projectId) ?? dayEnd)) {
-      dueSoon.push(toDigestTask(task));
+      if (dueSoon.length < DIGEST_MAX_TASKS_PER_SECTION) {
+        dueSoon.push(toDigestTask(task));
+      } else {
+        dueSoonMore += 1;
+      }
     }
     seen.add(task.id);
   }
@@ -194,9 +220,19 @@ export async function buildDueSoonDigest(
     },
     select: taskSelect,
     orderBy: { dueDate: "asc" },
+    take: collectLimit,
   })) as DigestTaskRow[];
 
-  const blockedOn = blockedTasks.filter((task) => !seen.has(task.id)).map((task) => toDigestTask(task));
+  const blockedOn: DigestTask[] = [];
+  let blockedOnMore = 0;
+  for (const task of blockedTasks) {
+    if (seen.has(task.id)) continue;
+    if (blockedOn.length < DIGEST_MAX_TASKS_PER_SECTION) {
+      blockedOn.push(toDigestTask(task));
+    } else {
+      blockedOnMore += 1;
+    }
+  }
 
   if (overdue.length === 0 && dueToday.length === 0 && dueSoon.length === 0 && blockedOn.length === 0) {
     return null;
@@ -210,6 +246,10 @@ export async function buildDueSoonDigest(
     dueToday,
     dueSoon,
     blockedOn,
+    overdueMore,
+    dueTodayMore,
+    dueSoonMore,
+    blockedOnMore,
   };
 }
 
@@ -253,6 +293,10 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
       dueToday: digest.dueToday,
       dueSoon: digest.dueSoon,
       blockedOn: digest.blockedOn,
+      overdueMore: digest.overdueMore,
+      dueTodayMore: digest.dueTodayMore,
+      dueSoonMore: digest.dueSoonMore,
+      blockedOnMore: digest.blockedOnMore,
     });
 
     try {
@@ -303,19 +347,28 @@ let lastDigestRunDay: string | null = null;
  * at most once per UTC day: this process-level fast path (cheap, per-process)
  * and the DB-backed settings.emailChannel.lastDigestSentAt skip in
  * sendDueSoonDigests (survives restarts and multi-replica deployments).
+ *
+ * The process-level day is ONLY marked as done after sendDueSoonDigests
+ * completes without throwing: if the run crashes mid-way (e.g. a DB error),
+ * the next scheduler tick retries it instead of silently losing the day.
+ * Double-sends between two concurrent ticks are prevented by the DB-backed
+ * per-user lastDigestSentAt guard, which stays as is.
  */
 export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJobResult | { skipped: true }> {
   const day = String(startOfUtcDay(now));
   if (lastDigestRunDay !== null && lastDigestRunDay === day) {
     return { skipped: true };
   }
-  lastDigestRunDay = day;
 
   if (!isEmailConfigured()) {
     return { sent: 0, skipped: 0 };
   }
 
-  return sendDueSoonDigests(now);
+  // A throw here propagates to the scheduler (which logs it) without marking
+  // the day as done, so the same day can be retried on the next tick.
+  const result = await sendDueSoonDigests(now);
+  lastDigestRunDay = day;
+  return result;
 }
 
 /** Test helper: resets the once-per-day guard. */

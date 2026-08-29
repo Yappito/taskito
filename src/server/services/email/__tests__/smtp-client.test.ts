@@ -129,6 +129,8 @@ describe("smtp client env config", () => {
       fromName: "Taskito",
       tlsRejectUnauthorized: false,
       allowInsecureAuth: false,
+      connectTimeoutMs: 10_000,
+      messageTimeoutMs: 60_000,
     });
     expect(isEmailConfigured({ SMTP_HOST: "h", SMTP_FROM: "a@b.c" })).toBe(true);
     expect(isEmailConfigured({})).toBe(false);
@@ -155,6 +157,12 @@ describe("smtp client env config", () => {
       address: "ops@example.com",
       name: "Taskito Ops",
     });
+  });
+
+  it("rejects an injectable SMTP_FROM instead of treating email as configured", () => {
+    const injected = "victim@example.com>\r\nRCPT TO:<attacker@example.com";
+    expect(() => readSmtpConfig({ SMTP_HOST: "smtp.example.com", SMTP_FROM: injected })).toThrow(/CR\/LF/);
+    expect(isEmailConfigured({ SMTP_HOST: "smtp.example.com", SMTP_FROM: injected })).toBe(false);
   });
 });
 
@@ -349,6 +357,96 @@ describe("smtp conversation", () => {
     expect(socket.written).toContain(`${passB64}\r\n`);
   });
 
+  it("never includes AUTH LOGIN credentials or server reply text in errors or queue logs", async () => {
+    const password = "super-secret";
+    const passwordB64 = Buffer.from(password, "utf8").toString("base64");
+    const makeFailingConnection = () => {
+      const socket = new FakeSmtpSocket((line) => {
+        if (line.startsWith("EHLO")) return ["250-mail.local", "250 AUTH LOGIN"];
+        if (line === "AUTH LOGIN") return ["334 VXNlcm5hbWU6"];
+        if (line === Buffer.from("mailer@taskito.local", "utf8").toString("base64")) return ["334 UGFzc3dvcmQ6"];
+        if (line === passwordB64) return [`535 5.7.8 rejected ${passwordB64} ${password}`];
+        return [];
+      }, true);
+      const { connection } = fakeConnection(socket);
+      return {
+        socket,
+        options: {
+          config: { ...testConfig, secure: true, password },
+          connectionFactory: () => {
+            greeting(socket);
+            return Promise.resolve(connection);
+          },
+          responseTimeoutMs: 500,
+        },
+      };
+    };
+
+    const direct = makeFailingConnection();
+    const error = await sendEmail(message, direct.options).then(
+      () => new Error("expected AUTH LOGIN to fail"),
+      (reason: unknown) => reason as Error
+    );
+    expect(error.message).toContain("AUTH LOGIN password: 535 5.7.8");
+    expect(error.message).not.toContain(passwordB64);
+    expect(error.message).not.toContain(password);
+    expect(error.message).not.toContain("rejected");
+
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const queued = makeFailingConnection();
+    enqueueEmailJob(() => sendEmail(message, queued.options));
+    await flushEmailQueueForTests();
+    const output = logged.mock.calls.flat().map(String).join(" ");
+    expect(output).not.toContain(passwordB64);
+    expect(output).not.toContain(password);
+    expect(output).not.toContain("rejected");
+  });
+
+  it("rejects a CRLF recipient before opening an SMTP connection", async () => {
+    const injected = "victim@example.com>\r\nRCPT TO:<attacker@example.com";
+    const factory = vi.fn();
+    await expect(
+      sendEmail(
+        { ...message, to: injected },
+        { config: { ...testConfig, user: undefined, password: undefined }, connectionFactory: factory }
+      )
+    ).rejects.toThrow(/CR\/LF/);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("quotes ASCII-special display names in the MIME headers", async () => {
+    const socket = new FakeSmtpSocket((line) => {
+      if (line.startsWith("EHLO")) return ["250 mail.local"];
+      if (line.startsWith("MAIL FROM")) return ["250 Ok"];
+      if (line.startsWith("RCPT TO")) return ["250 Ok"];
+      if (line === "DATA") return ["354 Go ahead"];
+      if (line === ".") return ["250 Ok"];
+      if (line === "QUIT") return ["221 Bye"];
+      return [];
+    }, false);
+    const { connection } = fakeConnection(socket);
+    await sendEmail(
+      { ...message, toName: 'Recipient <two>, "quoted"' },
+      {
+        config: {
+          ...testConfig,
+          user: undefined,
+          password: undefined,
+          from: "no-reply@taskito.local",
+          fromName: 'Sender <one>, "quoted"',
+        },
+        connectionFactory: () => {
+          greeting(socket);
+          return Promise.resolve(connection);
+        },
+        responseTimeoutMs: 500,
+      }
+    );
+
+    expect(socket.written).toContain('From: "Sender <one>, \\"quoted\\"" <no-reply@taskito.local>\r\n');
+    expect(socket.written).toContain('To: "Recipient <two>, \\"quoted\\"" <ada@example.com>\r\n');
+  });
+
   it("dot-stuffs the DATA payload when the body starts lines with dots", async () => {
     const socket = new FakeSmtpSocket((line) => {
       if (line.startsWith("EHLO")) return ["250-mail.local", "250 8BITMIME"];
@@ -386,6 +484,49 @@ describe("smtp conversation", () => {
     expect(factory).not.toHaveBeenCalled();
     expect(isEmailConfigured({})).toBe(false);
   });
+
+  it("destroys a socket that never replies within the response timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSmtpSocket(() => [], false);
+      const { connection } = fakeConnection(socket);
+      const sending = sendEmail(message, {
+        config: { ...testConfig, user: undefined, password: undefined },
+        connectionFactory: () => Promise.resolve(connection),
+        responseTimeoutMs: 25,
+        messageTimeoutMs: 100,
+      });
+      const rejected = expect(sending).rejects.toThrow(/timed out waiting for server response/);
+      await vi.advanceTimersByTimeAsync(25);
+      await rejected;
+      expect(socket.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses one message deadline across connection setup and the SMTP conversation", async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSmtpSocket(() => [], false);
+      const { connection } = fakeConnection(socket);
+      const sending = sendEmail(message, {
+        config: { ...testConfig, user: undefined, password: undefined },
+        connectionFactory: () =>
+          new Promise<SmtpConnection>((resolve) => {
+            setTimeout(() => resolve(connection), 30);
+          }),
+        responseTimeoutMs: 100,
+        messageTimeoutMs: 50,
+      });
+      const rejected = expect(sending).rejects.toThrow(/SMTP conversation did not finish within the per-message deadline/);
+      await vi.advanceTimersByTimeAsync(50);
+      await rejected;
+      expect(socket.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("bounded email queue", () => {
@@ -417,5 +558,28 @@ describe("bounded email queue", () => {
     await flushEmailQueueForTests();
     expect(started).toBe(MAX_PENDING_EMAILS + 1);
     expect(pendingEmailCount()).toBe(0);
+  });
+
+  it("times out a hung connection factory and advances the queue to the next job", async () => {
+    vi.useFakeTimers();
+    try {
+      let nextJobStarted = 0;
+      enqueueEmailJob(() =>
+        sendEmail(message, {
+          config: { ...testConfig, user: undefined, password: undefined },
+          connectionFactory: () => new Promise<SmtpConnection>(() => {}),
+          messageTimeoutMs: 50,
+        })
+      );
+      enqueueEmailJob(async () => {
+        nextJobStarted += 1;
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(nextJobStarted).toBe(1);
+      expect(pendingEmailCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -4,6 +4,7 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit, resetRateLimit } from "@/lib/rate-limit";
+import { assertValidMailbox, InvalidEmailAddressError } from "@/server/services/email/address";
 import { getClientIpFromHeaders } from "@/lib/request-ip";
 import { getOidcProviderConfigs, type OidcProfile, type OidcProviderConfig } from "@/server/services/oidc-provider-settings";
 
@@ -26,6 +27,21 @@ function readProfileString(profile: OidcProfile, keys: string[]) {
     const value = profile[key];
     if (typeof value === "string" && value.trim()) {
       return value.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * OIDC email is a security-sensitive mailbox, unlike display-name claims:
+ * preserve the claim exactly so validation cannot be bypassed by trimming an
+ * injected trailing newline or other whitespace before it reaches User.email.
+ */
+function readProfileEmail(profile: OidcProfile, keys: string[]) {
+  for (const key of keys) {
+    const value = profile[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
     }
   }
   return null;
@@ -151,9 +167,24 @@ function buildOidcProviders(oidcProviderConfigs: OidcProviderConfig[]) {
         throw new Error("OIDC profile email is not verified");
       }
 
-      const email = readProfileString(profile, ["email", "preferred_username", "upn"]);
+      const email = readProfileEmail(profile, ["email", "preferred_username", "upn"]);
       if (!email) {
         throw new Error("OIDC profile must include an email-like identifier");
+      }
+
+      // The email claim becomes User.email and later flows into SMTP envelope
+      // recipients and the To: header. Validate it with the same strict
+      // single-mailbox validator: injection-shaped values (CRLF, angle
+      // brackets, extra addresses) reject the sign-in with a clear error.
+      try {
+        assertValidMailbox(email, "OIDC profile email claim");
+      } catch (error) {
+        if (error instanceof InvalidEmailAddressError) {
+          throw new Error(
+            `OIDC profile email claim rejected: ${error.message} (sign-in denied; contact your administrator if this address is correct)`
+          );
+        }
+        throw error;
       }
 
       return {
@@ -165,6 +196,9 @@ function buildOidcProviders(oidcProviderConfigs: OidcProviderConfig[]) {
     },
   }));
 }
+
+/** Exposed for tests: builds the OIDC sign-in providers incl. profile mapping. */
+export { buildOidcProviders };
 
 async function buildAuthConfig(): Promise<NextAuthConfig> {
   const oidcProviderConfigs = await getOidcProviderConfigs();
