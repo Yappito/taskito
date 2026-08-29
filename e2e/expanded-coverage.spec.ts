@@ -246,10 +246,11 @@ test.describe("Expanded Playwright coverage", () => {
     await createTask(page, { title, dueDate: todayPlus(6), status: "To Do", description: "Delete me" });
     await openBoardTaskDetail(page, title);
     await taskDetailPanel(page).getByRole("button", { name: "Edit", exact: true }).click();
-    page.once("dialog", (dialog) => void dialog.accept());
     // The edit-mode Delete button lives inside the task detail panel; scope to
     // it so board cards whose titles contain "Delete" cannot match too.
-    await taskDetailPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+    await taskDetailPanel(page).getByRole("button", { name: "Delete", exact: true }).first().click();
+    // Deletion is confirm-gated by the in-app ConfirmDialog (no native confirm()).
+    await page.getByRole("dialog", { name: "Delete this task?" }).getByRole("button", { name: "Delete", exact: true }).click();
     await expect(taskDetailPanel(page)).not.toBeVisible({ timeout: 10_000 });
 
     await switchToView(page, "board");
