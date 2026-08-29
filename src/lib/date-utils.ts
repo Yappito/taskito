@@ -8,6 +8,41 @@ import {
 } from "d3";
 import type { TimeResolution } from "@/lib/types";
 
+/**
+ * Format a date for `<input type="date">` using LOCAL calendar components.
+ * (toISOString().split("T")[0] is UTC and shifts the date west of UTC.)
+ */
+export function toDateInputValue(date: Date | string | number): string {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Parse a `YYYY-MM-DD` date-input value as LOCAL midnight (never UTC),
+ * so the parsed date matches what the user picked. Returns null for empty/
+ * malformed values.
+ */
+export function fromDateInputValue(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const parsed = new Date(year, month - 1, day);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  // Reject rollover artefacts like 2025-02-31 -> 2025-03-03.
+  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) {
+    return null;
+  }
+
+  return parsed;
+}
+
 /** Get the D3 time interval for a resolution */
 export function getTimeInterval(resolution: TimeResolution) {
   switch (resolution) {
