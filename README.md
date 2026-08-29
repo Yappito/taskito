@@ -249,7 +249,8 @@ Useful commands from the repository root:
 | `DEMO_ADMIN_PASSWORD` | No | Optional password for the seeded demo admin account |
 | `AUTO_TAGGER_URL` | No | Optional OpenAI-compatible tagging endpoint |
 | `AUTO_TAGGER_API_KEY` | No | Optional API key for the auto-tagger |
-| `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt stored AI provider secrets |
+| `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt AI provider secrets and S3/OIDC secrets at rest. Strongly recommended in production; when unset in production the app refuses to encrypt/decrypt stored secrets unless `AI_ALLOW_AUTH_SECRET_FALLBACK=true` |
+| `AI_ALLOW_AUTH_SECRET_FALLBACK` | No | Set `true` to explicitly allow deriving the secret encryption key from `AUTH_SECRET` when `AI_SECRET_MASTER_KEY` is unset (production only; not recommended — see rotation notes below) |
 | `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated host allowlist for AI provider endpoints |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
 | `STORAGE_PROVIDER` | No | `local` or `s3`; defaults to `local` |
@@ -261,6 +262,19 @@ Useful commands from the repository root:
 | `STORAGE_S3_SESSION_TOKEN` | No | Optional temporary credentials session token |
 | `STORAGE_S3_FORCE_PATH_STYLE` | No | Set `true` for S3-compatible services that need path-style URLs |
 | `STORAGE_S3_PREFIX` | No | Optional object key prefix, e.g. `taskito/prod` |
+
+### Rotating the secret encryption key (`AI_SECRET_MASTER_KEY`)
+
+Stored AI provider secrets, OIDC client secrets, and S3 storage credentials are encrypted at rest. New ciphertext is written as `v1:<payload>`; legacy unprefixed ciphertext keeps decrypting. Rotating `AUTH_SECRET` no longer silently breaks those secrets if a dedicated master key is configured — and if it ever does, the re-encryption script restores access:
+
+1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
+2. Dry run (always start here):
+   `AI_SECRET_MASTER_KEY=<new key> AI_SECRET_MASTER_KEY_OLD=<old master key> npm run db:reencrypt-ai-secrets -- --dry-run`
+   Omit `AI_SECRET_MASTER_KEY_OLD` when the old ciphertext was produced by the legacy `sha256(AUTH_SECRET)` fallback (keep `AUTH_SECRET` set so the old key can be derived).
+3. Apply: run the same command again without `--dry-run`. The script re-encrypts in a single transaction and prints per-table counts.
+4. Update the deployment environment to `AI_SECRET_MASTER_KEY=<new key>` and restart. Only then (optionally) rotate `AUTH_SECRET`.
+
+If you previously ran without a master key (e.g. compose deployments before this variable was forwarded), migrate from the auth-secret fallback with `AI_SECRET_MASTER_KEY=<new key> AUTH_SECRET=<unchanged> npm run db:reencrypt-ai-secrets`.
 
 ## Notes
 
