@@ -5,7 +5,8 @@ import type { AiToolProposal } from "@/lib/ai-types";
 import { completeWithAnthropicProviderStructured } from "./provider-anthropic";
 import { buildAiConversationContext } from "./context-builder";
 import { executeAiAction } from "./action-executor";
-import { completeWithOpenAiCompatibleProviderStructured, type AiProviderCompletion } from "./provider-openai-compatible";
+import { completeWithOpenAiCompatibleProviderStructured } from "./provider-openai-compatible";
+import { appendAiTruncationNote, type AiProviderCompletion } from "./provider-request";
 import { buildAiContextUserTurn, buildAiSystemPrompt, extractAiProposals, stripAiProposalBlock } from "./presenter";
 import { resolveAiProvider } from "./provider-registry";
 import { YOLO_DESTRUCTIVE_ACTIONS, buildAiToolDefinitions, normalizeAiNativeToolCalls, normalizeAiToolProposals, resolveAiActionPayload, type AiNativeToolDefinition } from "./tools";
@@ -72,6 +73,7 @@ export async function buildAiAssistantTurnRequest(
       toolPayload: null,
       toolCalls: null,
       toolCallId: null,
+      usage: null,
       isStreaming: false,
       createdAt: new Date(0),
     },
@@ -91,6 +93,7 @@ export async function buildAiAssistantTurnRequest(
       toolPayload: null,
       toolCalls: null,
       toolCallId: null,
+      usage: null,
       isStreaming: false,
       createdAt: new Date(0),
     },
@@ -152,7 +155,9 @@ export async function persistAiAssistantCompletion(
   const pendingApprovalCount = input.conversation.mode === "yolo"
     ? proposals.filter((proposal) => !shouldAutoApprove(proposal.actionType)).length
     : 0;
-  const assistantContent = buildAssistantContent(input.completion.content, proposals, { pendingApprovalCount });
+  const builtContent = buildAssistantContent(input.completion.content, proposals, { pendingApprovalCount });
+  // Truncated replies get a visible note so lost output is never silent.
+  const assistantContent = input.completion.truncated ? appendAiTruncationNote(builtContent) : builtContent;
 
   const assistantMessage = await prisma.aiMessage.create({
     data: {
@@ -161,6 +166,7 @@ export async function persistAiAssistantCompletion(
       content: assistantContent,
       ...(proposals.length ? { toolPayload: { proposals } as unknown as Prisma.InputJsonValue } : {}),
       ...(input.completion.toolCalls.length ? { toolCalls: input.completion.toolCalls as unknown as Prisma.InputJsonValue } : {}),
+      ...(input.completion.usage ? { usage: input.completion.usage as unknown as Prisma.InputJsonValue } : {}),
     },
   });
 

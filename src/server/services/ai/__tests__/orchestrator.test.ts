@@ -40,7 +40,7 @@ const state = vi.hoisted(() => ({
 
 import { buildAiAssistantTurnRequest, persistAiAssistantCompletion } from "@/server/services/ai/orchestrator";
 import { extractAiProposals } from "@/server/services/ai/presenter";
-import type { AiProviderCompletion } from "@/server/services/ai/provider-openai-compatible";
+import type { AiProviderCompletion } from "@/server/services/ai/provider-request";
 import type { AiNativeToolCall } from "@/server/services/ai/tools";
 
 const projectId = "clxproject00000000000000000";

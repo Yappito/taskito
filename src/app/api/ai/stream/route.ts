@@ -122,6 +122,7 @@ export async function POST(request: Request) {
           type: "done",
           messageId: persisted.message.id,
           proposalIds: persisted.proposals.map((proposal) => proposal.id),
+          truncated: completion.truncated,
         })));
       } catch (error) {
         controller.enqueue(encoder.encode(sse({

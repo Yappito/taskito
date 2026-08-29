@@ -276,6 +276,7 @@ async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisi
       toolPayload: null,
       toolCalls: null,
       toolCallId: null,
+      usage: null,
       isStreaming: false,
       createdAt: new Date(),
     },
@@ -288,7 +289,7 @@ async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisi
       await completeWithOpenAiCompatibleProvider(provider, messages);
     }
   } catch (error) {
-    const status = error instanceof UpstreamProviderError && Number.isInteger(error.status) && error.status > 0
+    const status = error instanceof UpstreamProviderError && error.status !== null && Number.isInteger(error.status) && error.status > 0
       ? error.status
       : null;
     const rawMessage = error instanceof Error && error.message ? error.message : "AI provider request failed";
@@ -906,6 +907,7 @@ export const aiRouter = createTRPCRouter({
           toolPayload: null,
           toolCalls: null,
           toolCallId: null,
+          usage: null,
           isStreaming: false,
           createdAt: new Date(0),
         },
@@ -918,6 +920,7 @@ export const aiRouter = createTRPCRouter({
           toolPayload: null,
           toolCalls: null,
           toolCallId: null,
+          usage: null,
           isStreaming: false,
           createdAt: new Date(0),
         },
