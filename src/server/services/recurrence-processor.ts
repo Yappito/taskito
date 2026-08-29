@@ -50,13 +50,36 @@ function addInterval(
   return next;
 }
 
+/**
+ * UTC "YYYY-MM-DD" day key — the SAME day granularity the recurrence router
+ * (src/server/routers/recurrence.ts `dateKey`) uses to validate that
+ * nextDueDate is on/before endDate. End-date comparisons must be made on
+ * this granularity, never on exact timestamps (CITADEL-ae2 finding 4).
+ */
+function dayKey(date: Date) {
+  return date.toISOString().split("T")[0];
+}
+
 export async function processDueRecurrences(prisma: PrismaClient, options: { projectId?: string; now?: Date; limit?: number; signal?: AbortSignal } = {}) {
   const now = options.now ?? new Date();
+  // CITADEL-ae2 (finding 4): selection gates on a DUE occurrence existing
+  // (nextDueDate <= now), NOT on endDate >= now. The old `endDate >= now`
+  // gate permanently excluded a rule whose final valid occurrence fell due
+  // on/before the endDate but could only be processed AFTER the endDate
+  // (scheduler downtime spanning the end date) — that occurrence was never
+  // created. Validity is instead decided per rule in the loop below, on the
+  // router's dateKey day granularity: an occurrence whose DAY is on/before
+  // the endDate's day is valid and gets created (then retired by its own
+  // claim advance); only a rule whose current occurrence is already past the
+  // end day hits the standalone retirement branch. Rules already past their
+  // end day are still selected here and retire themselves through that
+  // branch one interval per tick until nextDueDate moves past `now` (a plain
+  // CAS advance, no task created), so they drain out of the due pool instead
+  // of accumulating unseen as under the old gate.
   const rules = await prisma.recurrenceRule.findMany({
     where: {
       nextDueDate: { lte: now },
       ...(options.projectId ? { task: { projectId: options.projectId } } : {}),
-      OR: [{ endDate: null }, { endDate: { gte: now } }],
     },
     include: {
       task: {
@@ -87,27 +110,31 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
         rule.dayOfMonth ?? null,
       );
 
-      // CITADEL-e10 (finding 9): distinguish two end-date situations.
+      // CITADEL-e10 (finding 9) / CITADEL-ae2 (finding 4): distinguish two
+      // end-date situations, compared on the router's dateKey DAY
+      // granularity (an endDate stored as midnight must not exclude a
+      // same-day occurrence later in that day — the router explicitly
+      // accepts nextDueDate on the endDate's calendar day).
       //
-      //  - The CURRENT occurrence (rule.nextDueDate) is already beyond the
-      //    end date: nothing to create — retire the rule with a standalone
+      //  - The CURRENT occurrence (rule.nextDueDate) is already past the
+      //    end DAY: nothing to create — retire the rule with a standalone
       //    advance (a plain CAS with no task creation, so there is no
-      //    claim/create gap to protect). Unreachable through this function's
-      //    own query, which only returns rules with nextDueDate <= now <=
-      //    endDate, but guarded against pre-existing data drift and direct
-      //    invocation. A crash here simply re-runs the retirement on the
-      //    next tick.
+      //    claim/create gap to protect). Reachable for rules selected after
+      //    their end day has passed (e.g. scheduler downtime spanning the
+      //    endDate, or pre-existing data drift). A crash here simply re-runs
+      //    the retirement on the next tick.
       //
-      //  - Only the FOLLOWING occurrence (nextDueDate below) would land
-      //    beyond the end date: the current occurrence is still valid
-      //    (rule.nextDueDate <= endDate) and MUST get its task created. The
-      //    previous code retired here WITHOUT creating the current task,
-      //    silently dropping the final occurrence. Now the flow falls
-      //    through to the ordinary claim+create transaction below; because
-      //    the claimed advance moves nextDueDate past endDate, the rule is
-      //    retired by that very claim — inside the same transaction as the
-      //    task creation, so a crash rolls both back together.
-      if (rule.endDate && rule.nextDueDate > rule.endDate) {
+      //  - The current occurrence is still on/before the end day —
+      //    including the downtime case where `now` itself is already past
+      //    the endDate — so it is VALID and MUST get its task created. The
+      //    flow falls through to the ordinary claim+create transaction
+      //    below; when the FOLLOWING occurrence would land beyond the end
+      //    day, the claimed advance moves nextDueDate past it and the rule
+      //    is retired by that very claim — inside the same transaction as
+      //    the task creation, so a crash rolls both back together. (The
+      //    old exact-timestamp comparison `nextDueDate > endDate` retired
+      //    rules in this situation WITHOUT creating the final occurrence.)
+      if (rule.endDate && dayKey(rule.nextDueDate) > dayKey(rule.endDate)) {
         await prisma.recurrenceRule.updateMany({
           where: { id: rule.id, nextDueDate: rule.nextDueDate },
           data: { nextDueDate },

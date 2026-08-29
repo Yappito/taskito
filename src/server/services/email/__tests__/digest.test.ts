@@ -36,6 +36,7 @@ import { Prisma } from "@prisma/client";
 import {
   buildDueSoonDigest,
   DIGEST_CLAIM_MAX_ATTEMPTS,
+  DIGEST_CLAIM_STALE_MS,
   resetDailyDigestJobForTests,
   runDailyDigestJob,
   sendDueSoonDigests,
@@ -63,6 +64,38 @@ function taskRow(overrides: Record<string, unknown>) {
 }
 
 const projectP1 = { id: "p1", settings: { dueDateWarningDays: 3 } };
+
+interface ClaimRowState {
+  status: string;
+  attempts: number;
+  updatedAt: Date;
+}
+
+/**
+ * Emulate real DB row-level CAS matching for emailDigestClaim.updateMany
+ * against a single mutable "current row" state: the where-clause is matched
+ * against the row's live status/updatedAt/attempts, and on a match the data
+ * is applied. Lets ABA tests keep the preloaded claim snapshot distinct from
+ * the row's actual current state.
+ */
+function emulateClaimCasUpdateMany(
+  updateMany: { mockImplementation: (impl: never) => unknown },
+  currentRow: ClaimRowState,
+) {
+  updateMany.mockImplementation((async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+    const updatedAtLte = (where.updatedAt as { lte?: Date } | undefined)?.lte;
+    const matches =
+      currentRow.status === where.status
+      && (updatedAtLte === undefined || currentRow.updatedAt.getTime() <= updatedAtLte.getTime())
+      && (where.attempts === undefined || currentRow.attempts === where.attempts);
+    if (!matches) {
+      return { count: 0 };
+    }
+    currentRow.status = data.status as string;
+    if (typeof data.attempts === "number") currentRow.attempts = data.attempts;
+    return { count: 1 };
+  }) as never);
+}
 
 /** Prisma mock mirroring the surfaces digest.ts touches. */
 function makePrisma(options: {
@@ -432,13 +465,99 @@ describe("sendDueSoonDigests", () => {
     // Still exactly one send for this user/day — no duplicate digest.
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
-      where: { userId: "u1", dayUtc: "2026-08-29", status: "sending" },
+      where: {
+        userId: "u1",
+        dayUtc: "2026-08-29",
+        status: "sending",
+        // CITADEL-ae2 (finding 5): the abandonment reasserts the staleness
+        // this run observed — updatedAt <= staleBefore AND the attempts it
+        // read — so it can never abandon a FRESH live claim (ABA).
+        updatedAt: { lte: new Date(later.getTime() - 15 * 60_000) },
+        attempts: 1,
+      },
       data: {
         status: "failed",
         attempts: DIGEST_CLAIM_MAX_ATTEMPTS,
         lastError: expect.stringContaining("abandoned"),
       },
     });
+  });
+
+  // CITADEL-ae2 (finding 5) — the ABA race: the stale observer preloads a
+  // stale "sending" claim, but before its abandonment write lands, another
+  // replica already took the claim through failed → pending → a FRESH
+  // "sending" (different attempts, recent updatedAt) and is mid-SMTP. The
+  // abandonment where-clause pins BOTH observed fields, so it matches
+  // nothing (count 0) and the live send is NOT capped at failed/attempts-max.
+  it("does not cap a fresh live sending claim when the observed stale claim was replaced ABA-style (finding 5)", async () => {
+    const staleBefore = new Date(NOW.getTime() - DIGEST_CLAIM_STALE_MS);
+    // What the observer's preload saw: a claim stale for an hour, attempts 1.
+    const staleObservation = {
+      userId: "u1",
+      status: "sending",
+      attempts: 1,
+      updatedAt: new Date(NOW.getTime() - 3600_000),
+    };
+    // What the row actually looks like NOW: after a failed → pending →
+    // sending cycle by another live replica (attempts 2, updatedAt fresh).
+    const currentRow = { status: "sending", attempts: 2, updatedAt: new Date(NOW.getTime() - 30_000) };
+
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: [staleObservation],
+    });
+    // Emulate DB row-level CAS matching against the CURRENT row state.
+    emulateClaimCasUpdateMany(prisma.emailDigestClaim.updateMany, currentRow);
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([staleObservation]) // claim preload
+      .mockResolvedValueOnce([{ id: "claim-1" }]); // retryable sweep: the fresh claim keeps the day open
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    // The pinned abandonment matched nothing…
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: {
+        userId: "u1",
+        dayUtc: "2026-08-29",
+        status: "sending",
+        updatedAt: { lte: staleBefore },
+        attempts: 1,
+      },
+      data: expect.objectContaining({ status: "failed" }),
+    });
+    // …so the FRESH live claim is untouched: still sending, still attempts 2
+    // — NOT capped at failed/attempts-max by the stale observer.
+    expect(currentRow.status).toBe("sending");
+    expect(currentRow.attempts).toBe(2);
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 1 });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  // Legitimate at-most-once abandonment still works when the row genuinely
+  // is the same stale claim the observer saw (no ABA in between).
+  it("still abandons a genuinely stale sending claim whose attempts and updatedAt match the observation (finding 5)", async () => {
+    const staleRow = {
+      userId: "u1",
+      status: "sending",
+      attempts: 2,
+      updatedAt: new Date(NOW.getTime() - 3600_000),
+    };
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: [staleRow],
+    });
+    const currentRow: ClaimRowState = { ...staleRow };
+    emulateClaimCasUpdateMany(prisma.emailDigestClaim.updateMany, currentRow);
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([staleRow]) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep: abandoned claim is terminal
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    expect(currentRow.status).toBe("failed");
+    expect(currentRow.attempts).toBe(DIGEST_CLAIM_MAX_ATTEMPTS);
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it("skips a recipient whose fresh sending claim is owned by another replica", async () => {

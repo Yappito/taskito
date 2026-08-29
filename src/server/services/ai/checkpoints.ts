@@ -392,12 +392,35 @@ async function restoreTaskSnapshot(
 
 async function rollbackCreatedComments(tx: Prisma.TransactionClient, before: AiActionCheckpoint, after: AiActionCheckpoint) {
   const beforeCommentIds = new Set(before.comments.map((comment) => comment.id));
-  const createdCommentIds = after.comments
-    .filter((comment) => comment.exists && !beforeCommentIds.has(comment.id))
-    .map((comment) => comment.id);
+  const createdComments = after.comments.filter(
+    (comment) => comment.exists && !beforeCommentIds.has(comment.id)
+  );
 
-  if (createdCommentIds.length > 0) {
-    await tx.comment.deleteMany({ where: { id: { in: createdCommentIds } } });
+  if (createdComments.length === 0) {
+    return;
+  }
+
+  const createdCommentIds = createdComments.map((comment) => comment.id);
+  await tx.comment.deleteMany({ where: { id: { in: createdCommentIds } } });
+
+  // CITADEL-ae2 (finding 3): the rollback deletes comments WITHOUT going
+  // through comment-service.deleteTaskComment, so the durable
+  // Task.commentThreadVersion bump that every normal comment deletion
+  // performs must be replicated here — in the SAME transaction as the
+  // deleteMany. A task-summary cache compare-and-swap (see
+  // src/server/routers/ai.ts summarizeTask) keys on commentThreadVersion;
+  // without this bump, a summary written after the AI added the comment
+  // would keep passing the CAS even though the comment it observed is now
+  // gone, serving a stale summary forever. The CAS is equality-based, so one
+  // increment per affected task is sufficient to reject every stale write;
+  // updateMany also silently skips tasks that no longer exist instead of
+  // throwing mid-rollback.
+  const affectedTaskIds = unique(createdComments.map((comment) => comment.taskId));
+  if (affectedTaskIds.length > 0) {
+    await tx.task.updateMany({
+      where: { id: { in: affectedTaskIds } },
+      data: { commentThreadVersion: { increment: 1 } },
+    });
   }
 }
 
