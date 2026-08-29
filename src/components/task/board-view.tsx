@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Inbox } from "lucide-react";
 import { trpc } from "@/lib/trpc-client";
 import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
+import { useTaskPages } from "@/hooks/use-task-pages";
+import { boardColumnTruncationNotice, hasUnloadedTasks } from "@/lib/task-pagination";
 import { BulkActionBar } from "./bulk-action-bar";
 import { TaskCard } from "./task-card";
 import { TaskDetail } from "./task-detail";
 import { TaskViewFilters } from "./task-view-filters";
 import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
@@ -77,12 +80,24 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     [projectId, filters.queryFilters]
   );
 
-  const { data, isLoading, error } = trpc.task.list.useQuery(taskListInput, {
-    placeholderData: (previousData) => previousData,
-  });
-
-  const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
+  const {
+    tasks,
+    isLoading,
+    error,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+    total,
+    totalLoaded,
+  } = useTaskPages(taskListInput);
   const queryError = error ? (error instanceof Error ? error.message : "Unable to load tasks.") : null;
+
+  const handleLoadMore = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  const columnTruncationNotice = boardColumnTruncationNotice(totalLoaded, total);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -119,19 +134,28 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
       setActionError(null);
       // Cancel outgoing refetches so they don't overwrite our optimistic update
       await utils.task.list.cancel(taskListInput);
-      // Snapshot previous data
-      const prev = utils.task.list.getData(taskListInput);
-      // Optimistically update the status
+      // Snapshot previous data — task.list is an infinite query, so use the
+      // infinite variants (getInfiniteData/setInfiniteData) to hit its cache
+      // entry (`getData`/`setData` only target plain queries).
+      const prev = utils.task.list.getInfiniteData(taskListInput);
+      // Optimistically update the status across every loaded page
       if (variables.statusId && prev) {
         const newStatus = statuses.find((s) => s.id === variables.statusId);
-        const nextItems = (prev.items as unknown as TaskCardData[]).map((t) =>
-          t.id === variables.id
-            ? { ...t, statusId: variables.statusId!, status: newStatus ? { ...t.status, id: newStatus.id, name: newStatus.name, color: newStatus.color } : t.status }
-            : t
-        );
-        utils.task.list.setData(taskListInput, {
-          ...prev,
-          items: nextItems as unknown as typeof prev.items,
+        utils.task.list.setInfiniteData(taskListInput, (data) => {
+          if (!data) {
+            return data;
+          }
+          return {
+            ...data,
+            pages: data.pages.map((page) => ({
+              ...page,
+              items: (page.items as unknown as TaskCardData[]).map((t) =>
+                t.id === variables.id
+                  ? { ...t, statusId: variables.statusId!, status: newStatus ? { ...t.status, id: newStatus.id, name: newStatus.name, color: newStatus.color } : t.status }
+                  : t
+              ),
+            }) as unknown as typeof page),
+          };
         });
       }
       return { prev };
@@ -139,7 +163,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     onError: (error, _variables, context) => {
       // Roll back on error
       if (context?.prev) {
-        utils.task.list.setData(taskListInput, context.prev);
+        utils.task.list.setInfiniteData(taskListInput, context.prev);
       }
       setActionError(error.message || "Unable to move task.");
     },
@@ -148,7 +172,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     },
   });
 
-  if (isLoading && !data) {
+  if (isLoading && tasks.length === 0) {
     return (
       <div className="flex gap-4 overflow-x-auto p-4">
         {statuses.map((s) => (
@@ -374,6 +398,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
 
       <BulkActionBar
         selectedCount={selectedTaskIds.length}
+        loadedCount={tasks.length}
         statuses={statuses}
         sprints={sprints.map((sprint) => ({ id: sprint.id, name: sprint.name, status: sprint.status }))}
         tags={tags}
@@ -542,6 +567,28 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                     description={`Drop work into ${status.name} when it is ready.`}
                     className="h-24 rounded-2xl border border-dashed px-4"
                   />
+                )}
+                {hasUnloadedTasks(totalLoaded, total) && columnTruncationNotice && (
+                  <div
+                    className="rounded-2xl border border-dashed p-2.5 text-center text-xs"
+                    style={{
+                      borderColor: "var(--color-border)",
+                      color: "var(--color-text-muted)",
+                    }}
+                  >
+                    <span>{columnTruncationNotice}</span>
+                    <div className="mt-1.5 flex justify-center">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleLoadMore}
+                        disabled={isFetchingNextPage}
+                      >
+                        {isFetchingNextPage ? "Loading more…" : "Load more"}
+                      </Button>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
