@@ -91,7 +91,17 @@ export async function createTask(page: Page, options: {
     await page.waitForTimeout(200);
   }
 
-  await page.getByPlaceholder("Task title...").fill(options.title);
+  // Fill the title, then WAIT for its controlled value to commit before
+  // touching another field. On a cold (not-yet-hydrated) page the title
+  // auto-focus effect and React's controlled-input reconciliation can still
+  // be settling; filling the body immediately afterwards then occasionally
+  // raced the title's onChange and the title state committed as
+  // "<title><body>" (intermittent — the saved task/template title came out
+  // concatenated). Asserting the committed value pins the title before the
+  // next fill and removes the race.
+  const titleInput = page.getByPlaceholder("Task title...");
+  await titleInput.fill(options.title);
+  await expect(titleInput).toHaveValue(options.title);
 
   if (options.description !== undefined) {
     await page.getByPlaceholder("Add task details...").fill(options.description);
