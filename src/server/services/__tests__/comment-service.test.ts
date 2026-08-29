@@ -4,12 +4,14 @@ const {
   requireTaskAccess,
   createTaskActivity,
   createNotification,
+  dispatchNotification,
   notifyTaskWatchers,
   resolveMentionedUserIds,
 } = vi.hoisted(() => ({
   requireTaskAccess: vi.fn(),
   createTaskActivity: vi.fn(),
   createNotification: vi.fn(),
+  dispatchNotification: vi.fn(),
   notifyTaskWatchers: vi.fn(),
   resolveMentionedUserIds: vi.fn(),
 }));
@@ -24,6 +26,7 @@ vi.mock("@/server/services/task-activity", () => ({
 
 vi.mock("@/server/services/notifications", () => ({
   createNotification,
+  dispatchNotification,
   notifyTaskWatchers,
   resolveMentionedUserIds,
 }));
@@ -36,6 +39,7 @@ describe("comment service", () => {
     requireTaskAccess.mockResolvedValue({ id: "task-1", projectId: "project-1", statusId: "status-1" });
     createTaskActivity.mockResolvedValue(undefined);
     createNotification.mockResolvedValue(undefined);
+    dispatchNotification.mockResolvedValue(undefined);
     notifyTaskWatchers.mockResolvedValue(undefined);
     resolveMentionedUserIds.mockResolvedValue([]);
   });
@@ -143,8 +147,8 @@ describe("comment service", () => {
         data: { content: "Updated @alex and @sam" },
       })
     );
-    expect(createNotification).toHaveBeenCalledTimes(1);
-    expect(createNotification).toHaveBeenCalledWith(
+    expect(dispatchNotification).toHaveBeenCalledTimes(1);
+    expect(dispatchNotification).toHaveBeenCalledWith(
       expect.objectContaining({
         recipientId: "user-3",
         actorId: "user-1",

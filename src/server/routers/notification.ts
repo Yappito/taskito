@@ -1,19 +1,16 @@
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
+import {
+  EMAIL_CHANNEL_KEYS,
+  getNotificationPreferences,
+  normalizeEmailChannelInput,
+} from "@/lib/notification-preferences";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
-function getNotificationPreferences(settings: unknown) {
-  const root = (settings ?? {}) as Record<string, unknown>;
-  const preferences = (root.notificationPreferences ?? {}) as Record<string, unknown>;
-
-  return {
-    assignments: preferences.assignments !== false,
-    comments: preferences.comments !== false,
-    statusChanges: preferences.statusChanges !== false,
-    mentions: preferences.mentions !== false,
-  };
-}
+const emailChannelInputSchema = z
+  .object(EMAIL_CHANNEL_KEYS.reduce((shape, key) => ({ ...shape, [key]: z.boolean() }), {}))
+  .partial();
 
 export const notificationRouter = createTRPCRouter({
   list: protectedProcedure.query(async ({ ctx }) => {
@@ -86,6 +83,7 @@ export const notificationRouter = createTRPCRouter({
         comments: z.boolean(),
         statusChanges: z.boolean(),
         mentions: z.boolean(),
+        emailChannel: emailChannelInputSchema.optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -95,17 +93,34 @@ export const notificationRouter = createTRPCRouter({
       });
 
       const settings = (user.settings ?? {}) as Record<string, unknown>;
+      const currentPreferences = getNotificationPreferences(settings);
+      const nextEmailChannel = input.emailChannel
+        ? normalizeEmailChannelInput({ ...currentPreferences.emailChannel, ...input.emailChannel })
+        : currentPreferences.emailChannel;
+      const nextPreferences = {
+        assignments: input.assignments,
+        comments: input.comments,
+        statusChanges: input.statusChanges,
+        mentions: input.mentions,
+        emailChannel: nextEmailChannel,
+      };
 
       await ctx.prisma.user.update({
         where: { id: ctx.session.user.id },
         data: {
           settings: {
             ...settings,
-            notificationPreferences: input,
+            notificationPreferences: {
+              assignments: input.assignments,
+              comments: input.comments,
+              statusChanges: input.statusChanges,
+              mentions: input.mentions,
+            },
+            emailChannel: nextEmailChannel,
           } as Prisma.InputJsonValue,
         },
       });
 
-      return input;
+      return nextPreferences;
     }),
 });

@@ -1,5 +1,5 @@
 import { createTaskActivity } from "@/server/services/task-activity";
-import { createNotification, notifyTaskWatchers, resolveMentionedUserIds } from "@/server/services/notifications";
+import { dispatchNotification, notifyTaskWatchers, resolveMentionedUserIds } from "@/server/services/notifications";
 import { requireTaskAccess } from "@/server/authz";
 import { getCommentBody, normalizeCommentContent } from "@/lib/comment-content";
 
@@ -83,7 +83,7 @@ export async function createTaskComment(
       userIds
         .filter((userId) => userId !== input.authorId)
         .map((userId) =>
-          createNotification({
+          dispatchNotification({
             recipientId: userId,
             actorId: input.authorId,
             taskId: input.taskId,
@@ -169,7 +169,7 @@ export async function updateTaskComment(
     nextMentionedUserIds
       .filter((userId) => userId !== input.actorId && !previousMentionSet.has(userId))
       .map((userId) =>
-        createNotification({
+        dispatchNotification({
           recipientId: userId,
           actorId: input.actorId,
           taskId: input.taskId,

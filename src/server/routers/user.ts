@@ -2,6 +2,11 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { AI_PERMISSION_VALUES } from "@/lib/ai-types";
+import {
+  EMAIL_CHANNEL_KEYS,
+  getNotificationPreferences,
+  normalizeEmailChannelInput,
+} from "@/lib/notification-preferences";
 import { appearanceSettingsInputSchema, getAppearanceSettings, normalizeAppearanceSettings } from "@/lib/themes";
 import { PROJECT_PERMISSIONS } from "@/server/authz";
 import { createTRPCRouter, adminProcedure, protectedProcedure } from "../trpc";
@@ -295,6 +300,67 @@ export const userRouter = createTRPCRouter({
     }),
 
   /** Update the current user's profile */
+  notificationPreferences: protectedProcedure.query(async ({ ctx }) => {
+    const user = await ctx.prisma.user.findUniqueOrThrow({
+      where: { id: ctx.session.user.id },
+      select: { settings: true },
+    });
+
+    return getNotificationPreferences(user.settings);
+  }),
+
+  updateNotificationPreferences: protectedProcedure
+    .input(
+      z.object({
+        assignments: z.boolean().optional(),
+        comments: z.boolean().optional(),
+        statusChanges: z.boolean().optional(),
+        mentions: z.boolean().optional(),
+        emailChannel: z
+          .object(
+            EMAIL_CHANNEL_KEYS.reduce((shape, key) => ({ ...shape, [key]: z.boolean() }), {})
+          )
+          .partial()
+          .optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const user = await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: ctx.session.user.id },
+        select: { settings: true },
+      });
+
+      const settings = (user.settings ?? {}) as Record<string, unknown>;
+      const current = getNotificationPreferences(settings);
+      const next = {
+        assignments: input.assignments ?? current.assignments,
+        comments: input.comments ?? current.comments,
+        statusChanges: input.statusChanges ?? current.statusChanges,
+        mentions: input.mentions ?? current.mentions,
+        emailChannel: input.emailChannel
+          ? normalizeEmailChannelInput({ ...current.emailChannel, ...input.emailChannel })
+          : current.emailChannel,
+      };
+
+      await ctx.prisma.user.update({
+        where: { id: ctx.session.user.id },
+        data: {
+          settings: {
+            ...settings,
+            notificationPreferences: {
+              assignments: next.assignments,
+              comments: next.comments,
+              statusChanges: next.statusChanges,
+              mentions: next.mentions,
+            },
+            emailChannel: next.emailChannel,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return next;
+    }),
+
   updateProfile: protectedProcedure
     .input(
       z.object({
