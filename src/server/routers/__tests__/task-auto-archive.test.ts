@@ -51,6 +51,7 @@ vi.mock("@/server/services/automation-evaluator", () => ({
 
 import { createCallerFactory } from "@/server/trpc";
 import { taskRouter } from "@/server/routers/task";
+import { createPrismaMock } from "@/test/prisma-mock";
 
 const createCaller = createCallerFactory(taskRouter);
 
@@ -60,47 +61,6 @@ const STATUS_ID = "cmab8yxxp0003i7p4k8n2v3q6";
 const SOURCE_TASK_ID = "cmab8yxxp0004i7p4k8n2v3q7";
 const TAG_ID = "cmab8yxxp0005i7p4k8n2v3q8";
 const NOW = new Date("2026-05-19T09:00:00.000Z");
-
-function createPrismaMock() {
-  const prisma = {
-    user: {
-      findUnique: vi.fn(),
-    },
-    project: {
-      findUniqueOrThrow: vi.fn(),
-    },
-    workflowStatus: {
-      findFirst: vi.fn(),
-    },
-    tag: {
-      findMany: vi.fn(),
-    },
-    task: {
-      findFirst: vi.fn(),
-      create: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
-      findMany: vi.fn(),
-      update: vi.fn(),
-    },
-    taskParticipant: {
-      createMany: vi.fn(),
-      deleteMany: vi.fn(),
-    },
-    workflowTransition: {
-      findFirst: vi.fn(),
-    },
-    taskTag: {
-      createMany: vi.fn(),
-      deleteMany: vi.fn(),
-    },
-    taskWatcher: {
-      create: vi.fn(),
-    },
-    $transaction: vi.fn(async (callback: (tx: typeof prisma) => unknown) => await callback(prisma)),
-  };
-
-  return prisma;
-}
 
 function createTaskUpdateResult(participants: Array<{ user: { id: string; name: string | null; email: string; image: string | null } }> = []) {
   return {

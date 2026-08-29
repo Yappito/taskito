@@ -2,36 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createCallerFactory } from "@/server/trpc";
 import { projectRouter } from "@/server/routers/project";
+import { createPrismaMock } from "@/test/prisma-mock";
 
 const createCaller = createCallerFactory(projectRouter);
 
 const PROJECT_ID = "cmab8yxxp0101i7p4k8n2v3q4";
 const USER_ID = "cmab8yxxp0102i7p4k8n2v3q5";
 const PARTICIPANT_ID = "cmab8yxxp0103i7p4k8n2v3q6";
-
-function createPrismaMock() {
-  return {
-    user: {
-      findUnique: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
-      findMany: vi.fn(),
-      update: vi.fn(),
-    },
-    projectMember: {
-      findUnique: vi.fn(),
-    },
-    workflowStatus: {
-      findUnique: vi.fn(),
-    },
-    tag: {
-      findMany: vi.fn(),
-    },
-    project: {
-      findUniqueOrThrow: vi.fn(),
-      update: vi.fn(),
-    },
-  };
-}
 
 describe("project template participants", () => {
   beforeEach(() => {

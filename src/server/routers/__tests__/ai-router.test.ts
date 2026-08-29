@@ -1,34 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createCallerFactory } from "@/server/trpc";
 import { aiRouter } from "@/server/routers/ai";
+import { createPrismaMock } from "@/test/prisma-mock";
 
 const createCaller = createCallerFactory(aiRouter);
 const projectId = "cmab8yxxp0001i7p4k8n2v3q4";
 const sharedProviderId = "cmab8yxxp0002i7p4k8n2v3q5";
 const projectProviderId = "cmab8yxxp0003i7p4k8n2v3q6";
-
-function createPrismaMock() {
-  return {
-    user: {
-      findUniqueOrThrow: vi.fn(),
-      findUnique: vi.fn(),
-    },
-    projectMember: {
-      findUnique: vi.fn(),
-    },
-    aiProviderConnection: {
-      findMany: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
-    },
-    aiProjectPolicy: {
-      findUnique: vi.fn(),
-    },
-    task: {
-      count: vi.fn(),
-    },
-  } as const;
-}
 
 describe("ai router provider visibility", () => {
   it("redacts shared provider configuration in chat scope for project members", async () => {
