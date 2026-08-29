@@ -2,8 +2,10 @@
  * Shared helper for scheduler-driven work (built-in tick, cron endpoint,
  * manual "process due" procedures): a job cooperatively stops at the tick's
  * deadline by checking an `AbortSignal` between units of work (per rule, per
- * project, per page). Throwing unwinds the job cleanly so the tick's
- * transaction — and therefore its advisory lock — is released promptly.
+ * project, per page). Throwing unwinds the job cleanly, the scheduler run settles, and the
+ * session-scoped advisory lock on its dedicated lock connection is released
+ * promptly (an unlock+close in `finally`, and a dead process drops the lock
+ * with its session regardless).
  *
  * This lives in its own module (rather than scheduler.ts) because the
  * processors import it and the scheduler imports the processors; a cycle
