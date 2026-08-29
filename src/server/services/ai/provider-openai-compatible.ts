@@ -3,7 +3,7 @@ import type { AiMessage } from "@prisma/client";
 import { assertAiProviderBaseUrlFetchAllowed } from "@/lib/ai-provider-validation";
 
 import type { ResolvedAiProvider } from "./provider-registry";
-import { getAiProviderRequestTimeoutMs, normalizeAiProviderRequestError } from "./provider-request";
+import { fetchAiProvider, getAiProviderRequestTimeoutMs, normalizeAiProviderRequestError, UpstreamProviderError } from "./provider-request";
 import type { AiNativeToolCall, AiNativeToolDefinition } from "./tools";
 
 interface OpenAiChatResponse {
@@ -69,7 +69,7 @@ export async function completeWithOpenAiCompatibleProviderStructured(
   const timeoutMs = getAiProviderRequestTimeoutMs();
 
   try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         ...provider.defaultHeaders,
@@ -86,7 +86,7 @@ export async function completeWithOpenAiCompatibleProviderStructured(
     });
 
     if (!response.ok) {
-      throw new Error(`Provider request failed with status ${response.status}`);
+      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
     }
 
     const payload = (await response.json()) as OpenAiChatResponse;
@@ -120,7 +120,7 @@ export async function streamWithOpenAiCompatibleProvider(
   const toolCallsByIndex = new Map<number, { id?: string; name: string; argumentsBuffer: string }>();
 
   try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         ...provider.defaultHeaders,
@@ -138,7 +138,7 @@ export async function streamWithOpenAiCompatibleProvider(
     });
 
     if (!response.ok || !response.body) {
-      throw new Error(`Provider request failed with status ${response.status}`);
+      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
     }
 
     const reader = response.body.getReader();

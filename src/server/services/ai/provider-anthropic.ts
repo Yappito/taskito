@@ -3,7 +3,7 @@ import type { AiMessage } from "@prisma/client";
 import { assertAiProviderBaseUrlFetchAllowed } from "@/lib/ai-provider-validation";
 
 import type { ResolvedAiProvider } from "./provider-registry";
-import { getAiProviderRequestTimeoutMs, normalizeAiProviderRequestError } from "./provider-request";
+import { fetchAiProvider, getAiProviderRequestTimeoutMs, normalizeAiProviderRequestError, UpstreamProviderError } from "./provider-request";
 import type { AiNativeToolCall, AiNativeToolDefinition } from "./tools";
 
 interface AnthropicMessageResponse {
@@ -55,7 +55,7 @@ export async function completeWithAnthropicProviderStructured(
   const timeoutMs = getAiProviderRequestTimeoutMs();
 
   try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/messages`, {
+    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/messages`, {
       method: "POST",
       headers: {
         ...provider.defaultHeaders,
@@ -74,7 +74,7 @@ export async function completeWithAnthropicProviderStructured(
     });
 
     if (!response.ok) {
-      throw new Error(`Provider request failed with status ${response.status}`);
+      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
     }
 
     const payload = (await response.json()) as AnthropicMessageResponse;
@@ -107,7 +107,7 @@ export async function streamWithAnthropicProvider(
   const toolCalls = new Map<number, { id?: string; name: string; inputBuffer: string }>();
 
   try {
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/messages`, {
+    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/messages`, {
       method: "POST",
       headers: {
         ...provider.defaultHeaders,
@@ -127,7 +127,7 @@ export async function streamWithAnthropicProvider(
     });
 
     if (!response.ok || !response.body) {
-      throw new Error(`Provider request failed with status ${response.status}`);
+      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
     }
 
     const reader = response.body.getReader();

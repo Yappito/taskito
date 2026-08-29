@@ -122,6 +122,7 @@ Optional values:
 - `AUTO_TAGGER_API_KEY`
 - `AI_SECRET_MASTER_KEY`
 - `AI_PROVIDER_HOST_ALLOWLIST`
+- `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`
 - `AI_PROVIDER_REQUEST_TIMEOUT_MS`
 - `ALLOW_DEMO_SEED`
 
@@ -252,6 +253,7 @@ Useful commands from the repository root:
 | `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt AI provider secrets and S3/OIDC secrets at rest. Strongly recommended in production; when unset in production the app refuses to encrypt/decrypt stored secrets unless `AI_ALLOW_AUTH_SECRET_FALLBACK=true` |
 | `AI_ALLOW_AUTH_SECRET_FALLBACK` | No | Set `true` to explicitly allow deriving the secret encryption key from `AUTH_SECRET` when `AI_SECRET_MASTER_KEY` is unset (production only; not recommended — see rotation notes below) |
 | `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated host allowlist for AI provider endpoints |
+| `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | No | Set `true` only to allow AI provider base URLs that point at loopback/private/link-local addresses (self-hosted Ollama, LM Studio, etc.); defaults to `false`, which rejects any provider host that is or resolves to a private address |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
 | `STORAGE_PROVIDER` | No | `local` or `s3`; defaults to `local` |
 | `STORAGE_S3_BUCKET` | Required for S3 | Bucket used for attachments and profile images |
@@ -288,7 +290,7 @@ If you previously ran without a master key (e.g. compose deployments before this
 - The GitHub Actions workflow in `.github/workflows/build-container.yml` publishes `latest` from `main`, version tags from Git tags such as `v1.0.0`, and a commit SHA tag for traceability.
 - The documented `docker compose up -d --pull always` command refreshes the published app image before startup.
 - AI provider URLs are validated before use and can be restricted further with `AI_PROVIDER_HOST_ALLOWLIST`.
-- AI providers may use either `http://` or `https://`, including local or private-network endpoints for self-hosted LLMs.
+- By default, AI provider base URLs must not point at loopback, private, or link-local addresses — including hostnames that resolve to them. Egress to private targets is re-checked on every upstream request. Self-hosted endpoints (e.g. Ollama, LM Studio) require opting in via `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true` or by adding the host to `AI_PROVIDER_HOST_ALLOWLIST`.
 - AI-generated writes are permission-scoped and approval-based unless `Yolo mode` is explicitly enabled for the conversation and allowed by project policy.
 
 ## Development
