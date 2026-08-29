@@ -269,7 +269,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                   type="checkbox"
                   checked={allVisibleSelected}
                   onChange={toggleVisibleSelection}
-                  aria-label={allVisibleSelected ? "Deselect all loaded tasks" : "Select all loaded tasks"}
+                  aria-label={allVisibleSelected ? "Deselect all visible tasks" : "Select all visible tasks"}
                 />
               </th>
               <th
