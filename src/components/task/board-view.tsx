@@ -1,12 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Inbox } from "lucide-react";
 import { trpc } from "@/lib/trpc-client";
 import { useTaskViewFilters } from "@/hooks/use-task-view-filters";
 import { BulkActionBar } from "./bulk-action-bar";
 import { TaskCard } from "./task-card";
 import { TaskDetail } from "./task-detail";
 import { TaskViewFilters } from "./task-view-filters";
+import { Alert } from "@/components/ui/alert";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
 import type { BoardStatus, TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
@@ -73,11 +77,12 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     [projectId, filters.queryFilters]
   );
 
-  const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
+  const { data, isLoading, error } = trpc.task.list.useQuery(taskListInput, {
     placeholderData: (previousData) => previousData,
   });
 
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
+  const queryError = error ? (error instanceof Error ? error.message : "Unable to load tasks.") : null;
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -147,16 +152,7 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
     return (
       <div className="flex gap-4 overflow-x-auto p-4">
         {statuses.map((s) => (
-          <div
-            key={s.id}
-            className="w-72 shrink-0 animate-pulse rounded-lg p-4"
-            style={{ backgroundColor: "var(--color-bg-muted)" }}
-          >
-            <div
-              className="h-5 w-20 rounded"
-              style={{ backgroundColor: "var(--color-border)" }}
-            />
-          </div>
+          <Skeleton key={s.id} className="w-80 shrink-0 rounded-3xl" style={{ height: "10rem" }} />
         ))}
       </div>
     );
@@ -165,6 +161,8 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
   const draggedTask = draggingTaskId
     ? tasks.find((task) => task.id === draggingTaskId) ?? null
     : null;
+
+  const statusOptions = statuses.map((s) => ({ id: s.id, name: s.name }));
 
   const visibleTaskIds = tasks.map((task) => task.id);
   const allVisibleSelected = visibleTaskIds.length > 0 && visibleTaskIds.every((taskId) => selectedTaskIds.includes(taskId));
@@ -403,17 +401,16 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
         </div>
       )}
 
+      {queryError && (
+        <Alert variant="danger" className="mx-4 mt-3">
+          {queryError}
+        </Alert>
+      )}
+
       {actionError && (
-        <div
-          className="mx-4 mt-3 rounded-lg border px-3 py-2 text-sm"
-          style={{
-            backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-            borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-            color: "var(--color-danger)",
-          }}
-        >
+        <Alert variant="danger" className="mx-4 mt-3">
           {actionError}
-        </div>
+        </Alert>
       )}
 
       <div className="flex flex-1 gap-5 overflow-x-auto p-4 lg:p-6">
@@ -483,7 +480,6 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                     key={task.id}
                     data-board-task-id={task.id}
                     className="select-none"
-                    onClick={() => handleTaskClick(task.id)}
                     onPointerDown={(e) => handlePointerDown(e, task.id, status.id)}
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}
@@ -498,6 +494,11 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                   >
                     <TaskCard
                       task={task}
+                      onClick={() => handleTaskClick(task.id)}
+                      statusOptions={statusOptions}
+                      onMoveToStatus={(statusId) =>
+                        updateTask.mutate({ id: task.id, statusId })
+                      }
                       className={selectedTaskIds.includes(task.id) ? "ring-2 ring-[var(--color-accent)]" : undefined}
                       leadingContent={
                         <input
@@ -531,13 +532,12 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                   </div>
                 )}
                 {columnTasks.length === 0 && !draggingTaskId && (
-                  <div
-                    className="flex h-24 flex-col items-center justify-center rounded-2xl border border-dashed px-4 text-center text-xs"
-                    style={{ borderColor: "var(--color-border)", color: "var(--color-text-muted)", backgroundColor: "var(--color-bg-overlay)" }}
-                  >
-                    <span className="font-medium">No tasks here</span>
-                    <span className="mt-1">Drop work into {status.name} when it is ready.</span>
-                  </div>
+                  <EmptyState
+                    icon=<Inbox />
+                    title="No tasks match these filters."
+                    description={`Drop work into ${status.name} when it is ready.`}
+                    className="h-24 rounded-2xl border border-dashed px-4"
+                  />
                 )}
               </div>
             </div>

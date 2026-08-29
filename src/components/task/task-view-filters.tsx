@@ -1,7 +1,11 @@
 "use client";
 
+import * as React from "react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { getTagToggleChipStyle } from "./task-view-helpers";
 import type { TaskDateFilterState, TaskFilterAssigneeOption, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import type { TaskQuickDateFilter } from "@/hooks/use-task-view-filters";
 
@@ -39,6 +43,44 @@ function getStartOfMonth(base: Date) {
 function getEndOfMonth(base: Date) {
   return new Date(base.getFullYear(), base.getMonth() + 1, 0);
 }
+
+/**
+ * Single toggle chip shared by the quick-date, tag and assignee recipes.
+ * Styled like the Badge primitive and exposing an aria-pressed toggle state.
+ */
+export interface ToggleChipProps {
+  selected: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  className?: string;
+  /** Overrides merged on top of the default accent/neutral chip colours */
+  style?: React.CSSProperties;
+}
+
+export function ToggleChip({ selected, onClick, children, className, style }: ToggleChipProps) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+        className
+      )}
+      style={{
+        backgroundColor: selected ? "var(--color-accent-muted)" : "var(--color-surface)",
+        borderColor: selected ? "var(--color-accent)" : "var(--color-border)",
+        color: selected ? "var(--color-accent)" : "var(--color-text-secondary)",
+        ...style,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Tag variant of the toggle chip: selected state uses the tag's own colour */
+export { getTagToggleChipStyle };
 
 interface TaskViewFiltersProps {
   search: string;
@@ -157,47 +199,40 @@ export function TaskViewFilters({
     >
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex-1">
-          <input
+          <Input
             value={search}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder={searchPlaceholder}
-            className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-            style={{
-              backgroundColor: "var(--color-surface)",
-              borderColor: "var(--color-border)",
-              color: "var(--color-text)",
-            }}
           />
         </div>
-        <button
+        <Button
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => setIsExpanded((value) => !value)}
-          className="rounded-lg px-3 py-2 text-xs transition-colors"
-          style={{
-            backgroundColor: "var(--color-bg-muted)",
-            color: "var(--color-text-secondary)",
-          }}
         >
           {isExpanded ? "Hide filters" : `Show filters${activeAdvancedFilterCount > 0 ? ` (${activeAdvancedFilterCount})` : ""}`}
-        </button>
+        </Button>
       </div>
 
-      <button
+      <Button
         type="button"
+        variant="outline"
+        size="sm"
         onClick={onClear}
-        className="mt-2 rounded-lg px-3 py-2 text-xs transition-colors"
-        style={{
-          backgroundColor: hasAnyFilters
-            ? "color-mix(in srgb, var(--color-danger) 14%, var(--color-surface))"
-            : "var(--color-bg-muted)",
-          color: hasAnyFilters ? "var(--color-danger)" : "var(--color-text-secondary)",
-          border: hasAnyFilters
-            ? "1px solid color-mix(in srgb, var(--color-danger) 28%, var(--color-border))"
-            : "1px solid var(--color-border)",
-        }}
+        className="mt-2"
+        style={
+          hasAnyFilters
+            ? {
+                backgroundColor: "color-mix(in srgb, var(--color-danger) 14%, var(--color-surface))",
+                color: "var(--color-danger)",
+                borderColor: "color-mix(in srgb, var(--color-danger) 28%, var(--color-border))",
+              }
+            : undefined
+        }
       >
         Clear all filters
-      </button>
+      </Button>
 
       {isExpanded && (
         <>
@@ -214,33 +249,24 @@ export function TaskViewFilters({
             <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               {onSavePreset && (
                 <div className="flex gap-2">
-                  <input
+                  <Input
                     value={presetName}
                     onChange={(event) => setPresetName(event.target.value)}
                     placeholder="Preset name"
-                    className="rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
                   />
-                  <button
+                  <Button
                     type="button"
+                    variant="default"
+                    size="sm"
                     onClick={() => {
                       const trimmed = presetName.trim();
                       if (!trimmed) return;
                       onSavePreset(trimmed);
                       setPresetName("");
                     }}
-                    className="rounded-lg px-3 py-2 text-xs font-medium transition-colors"
-                    style={{
-                      backgroundColor: "var(--color-accent)",
-                      color: "white",
-                    }}
                   >
                     Save preset
-                  </button>
+                  </Button>
                 </div>
               )}
 
@@ -248,27 +274,27 @@ export function TaskViewFilters({
                 <div className="flex flex-wrap gap-2">
                   {presets.map((preset) => (
                     <div key={preset.id} className="flex items-center gap-1 rounded-full border px-2 py-1" style={{ borderColor: "var(--color-border)" }}>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="sm"
                         onClick={() => {
                           onApplyPreset?.(preset);
                           setIsExpanded(true);
                         }}
-                        className="text-xs font-medium transition-colors"
-                        style={{ color: "var(--color-text-secondary)" }}
                       >
                         {preset.name}
-                      </button>
+                      </Button>
                       {onDeletePreset && (
-                        <button
+                        <Button
                           type="button"
+                          variant="ghost"
+                          size="sm"
                           onClick={() => onDeletePreset(preset.id)}
-                          className="text-xs transition-colors"
-                          style={{ color: "var(--color-text-muted)" }}
                           aria-label={`Delete preset ${preset.name}`}
                         >
                           ✕
-                        </button>
+                        </Button>
                       )}
                     </div>
                   ))}
@@ -285,30 +311,20 @@ export function TaskViewFilters({
               <div className="grid gap-2 sm:grid-cols-2">
                 <label className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                   From
-                  <input
+                  <Input
                     type="date"
                     value={dueDateFrom}
                     onChange={(event) => onDateFilterChange("dueDateFrom", event.target.value)}
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
+                    className="mt-1"
                   />
                 </label>
                 <label className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                   To
-                  <input
+                  <Input
                     type="date"
                     value={dueDateTo}
                     onChange={(event) => onDateFilterChange("dueDateTo", event.target.value)}
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
+                    className="mt-1"
                   />
                 </label>
               </div>
@@ -321,30 +337,20 @@ export function TaskViewFilters({
               <div className="grid gap-2 sm:grid-cols-2">
                 <label className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                   From
-                  <input
+                  <Input
                     type="date"
                     value={closedAtFrom}
                     onChange={(event) => onDateFilterChange("closedAtFrom", event.target.value)}
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
+                    className="mt-1"
                   />
                 </label>
                 <label className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                   To
-                  <input
+                  <Input
                     type="date"
                     value={closedAtTo}
                     onChange={(event) => onDateFilterChange("closedAtTo", event.target.value)}
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
+                    className="mt-1"
                   />
                 </label>
               </div>
@@ -360,27 +366,13 @@ export function TaskViewFilters({
                 { id: "closed-this-month", label: "Closed this month" },
                 { id: "clear-dates", label: "Clear dates" },
               ].map((action) => (
-                <button
+                <ToggleChip
                   key={action.id}
-                  type="button"
+                  selected={isQuickFilterActive(action.id as TaskQuickDateFilter)}
                   onClick={() => onApplyQuickDateFilter(action.id as TaskQuickDateFilter)}
-                  className="rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  style={
-                    isQuickFilterActive(action.id as TaskQuickDateFilter)
-                      ? {
-                          borderColor: "var(--color-accent)",
-                          backgroundColor: "var(--color-accent-muted)",
-                          color: "var(--color-accent)",
-                        }
-                      : {
-                          borderColor: "var(--color-border)",
-                          backgroundColor: "var(--color-bg-muted)",
-                          color: "var(--color-text-secondary)",
-                        }
-                  }
                 >
                   {action.label}
-                </button>
+                </ToggleChip>
               ))}
             </div>
           )}
@@ -389,19 +381,14 @@ export function TaskViewFilters({
             {tags.map((tag) => {
               const selected = selectedTagIds.includes(tag.id);
               return (
-                <button
+                <ToggleChip
                   key={tag.id}
-                  type="button"
+                  selected={selected}
                   onClick={() => onToggleTag(tag.id)}
-                  className="rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                  style={{
-                    backgroundColor: selected ? `${tag.color}20` : "var(--color-surface)",
-                    borderColor: selected ? tag.color : "var(--color-border)",
-                    color: selected ? tag.color : "var(--color-text-secondary)",
-                  }}
+                  style={getTagToggleChipStyle(selected, tag.color)}
                 >
                   {tag.name}
-                </button>
+                </ToggleChip>
               );
             })}
           </div>
@@ -413,19 +400,13 @@ export function TaskViewFilters({
                 const label = assignee.name?.trim() || assignee.email;
 
                 return (
-                  <button
+                  <ToggleChip
                     key={assignee.id}
-                    type="button"
+                    selected={selected}
                     onClick={() => onToggleAssignee(assignee.id)}
-                    className="rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-                    style={{
-                      backgroundColor: selected ? "var(--color-accent-muted)" : "var(--color-surface)",
-                      borderColor: selected ? "var(--color-accent)" : "var(--color-border)",
-                      color: selected ? "var(--color-accent)" : "var(--color-text-secondary)",
-                    }}
                   >
                     {label}
-                  </button>
+                  </ToggleChip>
                 );
               })}
             </div>

@@ -1,36 +1,33 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { StatusBadge } from "./status-badge";
+import { PriorityBadge } from "@/components/ui/priority-badge";
+import { TagBadgeList } from "@/components/ui/tag-badge";
 import { Badge } from "@/components/ui/badge";
+import { Select } from "@/components/ui/select";
 import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
+import { isInteractiveCardTarget } from "./task-view-helpers";
 import type { AlertLevel } from "@/lib/alert-utils";
 import type { TaskCardData } from "@/lib/types";
 
-interface TaskCardProps {
+export interface TaskCardStatusOption {
+  id: string;
+  name: string;
+}
+
+export interface TaskCardProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "onClick"> {
   task: TaskCardData;
   onClick?: () => void;
   className?: string;
   alertLevel?: AlertLevel;
   leadingContent?: ReactNode;
+  /** Statuses offered by the per-card "Move to…" select (keyboard/wheel status changes) */
+  statusOptions?: TaskCardStatusOption[];
+  /** Same status update the drag-and-drop gesture performs */
+  onMoveToStatus?: (statusId: string) => void;
 }
-
-const priorityColors: Record<string, string> = {
-  urgent: "var(--color-priority-urgent)",
-  high: "var(--color-priority-high)",
-  medium: "var(--color-priority-medium)",
-  low: "var(--color-priority-low)",
-  none: "var(--color-text-muted)",
-};
-
-const priorityLabels: Record<string, string> = {
-  urgent: "Urgent",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-  none: "None",
-};
 
 function getDependencyMessages(task: TaskCardData) {
   const messages: string[] = [];
@@ -47,9 +44,21 @@ function getDependencyMessages(task: TaskCardData) {
 }
 
 /** Card displaying a single task with status, priority, tags */
-export function TaskCard({ task, onClick, className, alertLevel, leadingContent }: TaskCardProps) {
+export function TaskCard({
+  task,
+  onClick,
+  className,
+  alertLevel,
+  leadingContent,
+  statusOptions,
+  onMoveToStatus,
+  onKeyDown,
+  style,
+  ...rest
+}: TaskCardProps) {
   const dueDate = new Date(task.dueDate);
-  const isOverdue = dueDate < new Date() && task.status.name !== "Done" && task.status.name !== "Cancelled";
+  const isOverdue =
+    dueDate < new Date() && task.status.category !== "done" && task.status.category !== "cancelled";
   const taskKey = task.project?.key && task.taskNumber
     ? `${task.project.key}-${task.taskNumber}`
     : null;
@@ -59,12 +68,29 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
   const extraParticipantCount = Math.max(participantPeople.length - visibleParticipants.length, 0);
   const participantTitle = participantPeople.map((person) => person.name?.trim() || person.email).join(", ");
   const dependencyMessages = getDependencyMessages(task);
+  const interactive = onClick != null;
+
+  function handleCardKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!interactive) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (isInteractiveCardTarget(event.target, event.currentTarget)) return;
+    event.preventDefault();
+    onClick?.();
+  }
 
   return (
     <div
+      {...rest}
       onClick={onClick}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (!event.defaultPrevented) handleCardKeyDown(event);
+      }}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
       className={cn(
-        "group cursor-pointer overflow-hidden rounded-2xl border p-3.5 transition-colors transition-shadow hover:shadow-[var(--shadow-md)]",
+        "group overflow-hidden rounded-2xl border p-3.5 transition-colors transition-shadow hover:shadow-[var(--shadow-md)]",
+        interactive ? "cursor-pointer" : "",
         alertLevel === "critical" && "pulse-critical",
         alertLevel === "warning" && "pulse-warning",
         className
@@ -74,21 +100,12 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
         borderColor: isOverdue ? "color-mix(in srgb, var(--color-danger) 42%, var(--color-border))" : "var(--color-border)",
         color: "var(--color-text)",
         boxShadow: "var(--shadow-sm)",
+        ...style,
       }}
     >
       <div className="mb-3 flex items-center justify-between gap-2">
         <StatusBadge name={task.status.name} color={task.status.color} />
-        {task.priority !== "none" && (
-          <span
-            className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em]"
-            style={{
-              backgroundColor: `color-mix(in srgb, ${priorityColors[task.priority]} 14%, transparent)`,
-              color: priorityColors[task.priority],
-            }}
-          >
-            {priorityLabels[task.priority]}
-          </span>
-        )}
+        <PriorityBadge priority={task.priority} />
       </div>
 
       <div className="flex items-start justify-between gap-2">
@@ -119,15 +136,13 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
             Sprint: {task.sprint.name}
           </Badge>
         )}
-        {task.tags.slice(0, 3).map(({ tag }) => (
-          <Badge
-            key={tag.id}
-            className="text-[10px]"
-            style={{ backgroundColor: `${tag.color}20`, color: tag.color } as React.CSSProperties}
-          >
-            {tag.name}
-          </Badge>
-        ))}
+        {task.tags.length > 0 && (
+          <TagBadgeList
+            tags={task.tags.map(({ tag }) => tag)}
+            max={3}
+            className="max-w-full"
+          />
+        )}
       </div>
 
       {dependencyMessages.length > 0 && (
@@ -147,16 +162,42 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
         </div>
       )}
 
-      <div className="mt-3 flex items-center justify-between border-t pt-3" style={{ borderColor: "var(--color-border-muted)" }}>
-        <span
-          className={cn("rounded-full px-2 py-1 text-[11px]", isOverdue ? "font-semibold" : "")}
-          style={{
-            backgroundColor: isOverdue ? "var(--color-danger-muted)" : "var(--color-bg-muted)",
-            color: isOverdue ? "var(--color-danger)" : "var(--color-text-muted)",
-          }}
-        >
-          {isOverdue ? "Overdue" : "Due"} {dueDate.toLocaleDateString()}
-        </span>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3" style={{ borderColor: "var(--color-border-muted)" }}>
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={cn("rounded-full px-2 py-1 text-[11px]", isOverdue ? "font-semibold" : "")}
+            style={{
+              backgroundColor: isOverdue ? "var(--color-danger-muted)" : "var(--color-bg-muted)",
+              color: isOverdue ? "var(--color-danger)" : "var(--color-text-muted)",
+            }}
+          >
+            {isOverdue ? "Overdue" : "Due"} {dueDate.toLocaleDateString()}
+          </span>
+          {onMoveToStatus && (statusOptions?.length ?? 0) > 0 && (
+            <div
+              className="cursor-pointer"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              <Select
+                aria-label={`Move ${task.title} to status`}
+                value={task.statusId}
+                onChange={(event) => {
+                  const statusId = event.target.value;
+                  if (statusId) onMoveToStatus(statusId);
+                }}
+                className="h-7 w-32 px-2 py-0 text-[11px]"
+              >
+                {statusOptions!.map((status) => (
+                  <option key={status.id} value={status.id}>
+                    {status.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
+        </div>
         <div className="flex max-w-[11rem] items-center gap-2 text-right">
           {participantPeople.length > 0 && (
             <div className="flex items-center" title={participantTitle}>
@@ -167,7 +208,7 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
                   email={participant.email}
                   image={participant.image}
                   size="xs"
-                  className="ring-1 ring-black/5"
+                  className="ring-1 ring-[var(--color-border)]"
                   style={{ marginLeft: index === 0 ? 0 : -8 }}
                 />
               ))}
@@ -191,7 +232,7 @@ export function TaskCard({ task, onClick, className, alertLevel, leadingContent 
                 email={task.assignee.email}
                 image={task.assignee.image}
                 size="xs"
-                className="ring-1 ring-black/5"
+                className="ring-1 ring-[var(--color-border)]"
               />
             )}
             <span

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Inbox } from "lucide-react";
 import { trpc } from "@/lib/trpc-client";
 import { cn } from "@/lib/utils";
 import { getAlertConfig, getAlertLevel } from "@/lib/alert-utils";
@@ -10,8 +11,14 @@ import { TaskDetail } from "./task-detail";
 import { BulkActionBar } from "./bulk-action-bar";
 import { StatusBadge } from "./status-badge";
 import { TaskViewFilters } from "./task-view-filters";
+import { Alert } from "@/components/ui/alert";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { PriorityBadge } from "@/components/ui/priority-badge";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
+import { TagBadgeList } from "@/components/ui/tag-badge";
+import { ariaSortFor, type TaskSortDirection, type TaskSortField } from "./task-view-helpers";
 import type { TaskCardData, TaskFilterPreset, TaskFilterTagOption } from "@/lib/types";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
 
@@ -28,8 +35,8 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [sortField, setSortField] = useState<"dueDate" | "title" | "priority">("dueDate");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortField, setSortField] = useState<TaskSortField>("dueDate");
+  const [sortDir, setSortDir] = useState<TaskSortDirection>("asc");
   const filters = useTaskViewFilters();
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
@@ -45,11 +52,12 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     [projectId, filters.queryFilters]
   );
 
-  const { data, isLoading } = trpc.task.list.useQuery(taskListInput, {
+  const { data, isLoading, error } = trpc.task.list.useQuery(taskListInput, {
     placeholderData: (previousData) => previousData,
   });
 
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
+  const queryError = error ? (error instanceof Error ? error.message : "Unable to load tasks.") : null;
 
   useEffect(() => {
     setSelectedTaskIds((prev) => prev.filter((taskId) => tasks.some((task) => task.id === taskId)));
@@ -83,15 +91,11 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
 
   if (isLoading && !data) {
     return (
-      <div className="animate-pulse space-y-2 p-4">
+      <SkeletonGroup className="space-y-2 p-4">
         {Array.from({ length: 5 }).map((_, i) => (
-          <div
-            key={i}
-            className="h-12 rounded"
-            style={{ backgroundColor: "var(--color-bg-muted)" }}
-          />
+          <Skeleton key={i} className="h-12" />
         ))}
-      </div>
+      </SkeletonGroup>
     );
   }
 
@@ -107,7 +111,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
     return ((priorityOrder[a.priority] ?? 0) - (priorityOrder[b.priority] ?? 0)) * dir;
   });
 
-  function handleSort(field: typeof sortField) {
+  function handleSort(field: TaskSortField) {
     if (sortField === field) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -221,17 +225,16 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
         </div>
       )}
 
+      {queryError && (
+        <Alert variant="danger" className="mx-4 mt-3">
+          {queryError}
+        </Alert>
+      )}
+
       {actionError && (
-        <div
-          className="mx-4 mt-3 rounded-lg border px-3 py-2 text-sm"
-          style={{
-            backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-            borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-            color: "var(--color-danger)",
-          }}
-        >
+        <Alert variant="danger" className="mx-4 mt-3">
           {actionError}
-        </div>
+        </Alert>
       )}
 
       <div className="flex-1 overflow-x-auto p-4 pt-3">
@@ -254,23 +257,41 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                 />
               </th>
               <th
-                className="cursor-pointer px-4 py-3"
-                onClick={() => handleSort("title")}
+                className="px-4 py-3"
+                aria-sort={ariaSortFor("title", sortField, sortDir)}
               >
-                Title{sortIcon("title")}
+                <button
+                  type="button"
+                  onClick={() => handleSort("title")}
+                  className="cursor-pointer transition-colors"
+                >
+                  Title{sortIcon("title")}
+                </button>
               </th>
               <th className="px-4 py-3">Status</th>
               <th
-                className="cursor-pointer px-4 py-3"
-                onClick={() => handleSort("priority")}
+                className="px-4 py-3"
+                aria-sort={ariaSortFor("priority", sortField, sortDir)}
               >
-                Priority{sortIcon("priority")}
+                <button
+                  type="button"
+                  onClick={() => handleSort("priority")}
+                  className="cursor-pointer transition-colors"
+                >
+                  Priority{sortIcon("priority")}
+                </button>
               </th>
               <th
-                className="cursor-pointer px-4 py-3"
-                onClick={() => handleSort("dueDate")}
+                className="px-4 py-3"
+                aria-sort={ariaSortFor("dueDate", sortField, sortDir)}
               >
-                Due Date{sortIcon("dueDate")}
+                <button
+                  type="button"
+                  onClick={() => handleSort("dueDate")}
+                  className="cursor-pointer transition-colors"
+                >
+                  Due Date{sortIcon("dueDate")}
+                </button>
               </th>
               <th className="px-4 py-3">Assignee</th>
               <th className="px-4 py-3">Participants</th>
@@ -288,9 +309,8 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
               return (
               <tr
                 key={task.id}
-                onClick={() => setSelectedTaskId(task.id)}
                 className={cn(
-                  "cursor-pointer border-b transition-colors",
+                  "border-b transition-colors",
                   alertLevel === "critical" && "pulse-critical",
                   alertLevel === "warning" && "pulse-warning"
                 )}
@@ -310,7 +330,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                     e.currentTarget.style.backgroundColor = "";
                 }}
               >
-                <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                <td className="px-4 py-3">
                   <input
                     type="checkbox"
                     checked={selectedTaskIds.includes(task.id)}
@@ -327,7 +347,13 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                       {(task as { project?: { key: string } }).project!.key}-{(task as { taskNumber?: number }).taskNumber}
                     </span>
                   )}
-                  <div>{task.title}</div>
+                  <button
+                    type="button"
+                    className="cursor-pointer text-left transition-colors hover:text-[var(--color-accent)]"
+                    onClick={() => setSelectedTaskId(task.id)}
+                  >
+                    {task.title}
+                  </button>
                   {task.sprint && (
                     <div className="mt-1">
                       <Badge
@@ -357,8 +383,8 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                 <td className="px-4 py-3">
                   <StatusBadge name={task.status.name} color={task.status.color} />
                 </td>
-                <td className="px-4 py-3 capitalize" style={{ color: "var(--color-text-secondary)" }}>
-                  {task.priority}
+                <td className="px-4 py-3">
+                  <PriorityBadge priority={task.priority} showNone />
                 </td>
                 <td className="px-4 py-3" style={{ color: "var(--color-text-secondary)" }}>
                   {new Date(task.dueDate).toLocaleDateString()}
@@ -403,20 +429,7 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  <div className="flex gap-1">
-                    {task.tags.slice(0, 2).map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
-                      <span
-                        key={tag.id}
-                        className="rounded px-1.5 py-0.5 text-xs"
-                        style={{
-                          backgroundColor: `${tag.color}20`,
-                          color: tag.color,
-                        }}
-                      >
-                        {tag.name}
-                      </span>
-                    ))}
-                  </div>
+                  <TagBadgeList tags={task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => tag)} max={2} />
                 </td>
               </tr>
               );
@@ -424,12 +437,12 @@ export function ListView({ projectId, statuses, tags, projectSettings }: ListVie
           </tbody>
         </table>
         {tasks.length === 0 && (
-          <p
-            className="p-8 text-center"
-            style={{ color: "var(--color-text-muted)" }}
-          >
-            No tasks yet. Create one!
-          </p>
+          <EmptyState
+            icon=<Inbox />
+            title="No tasks match these filters."
+            description="Adjust the filters above or create a new task."
+            className="p-8"
+          />
         )}
       </div>
 

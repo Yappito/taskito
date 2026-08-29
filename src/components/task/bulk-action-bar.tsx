@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { Select } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import type { TaskFilterAssigneeOption, TaskFilterTagOption } from "@/lib/types";
 
 interface BulkActionStatusOption {
@@ -58,14 +60,29 @@ export function BulkActionBar({
   const [assigneeId, setAssigneeId] = useState("");
   const [sprintId, setSprintId] = useState("");
   const [tagId, setTagId] = useState("");
+  const { confirm, confirmElement } = useConfirm();
 
   const assigneeOptions = useMemo(
     () => assignees.map((assignee) => ({ value: assignee.id, label: assignee.name?.trim() || assignee.email })),
     [assignees]
   );
 
+  async function handleArchiveClick() {
+    const confirmed = await confirm({
+      title: "Archive selected tasks?",
+      description: `${selectedCount} ${selectedCount === 1 ? "task" : "tasks"} will be moved to the archive. You can restore them from the archive view.`,
+      confirmLabel: "Archive",
+      cancelLabel: "Cancel",
+      destructive: true,
+    });
+
+    if (confirmed) {
+      onArchive();
+    }
+  }
+
   if (selectedCount === 0) {
-    return null;
+    return confirmElement;
   }
 
   return (
@@ -80,28 +97,12 @@ export function BulkActionBar({
       <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-sm" style={{ color: "var(--color-text)" }}>
           <span className="font-medium">{selectedCount} selected</span>
-          <button
-            type="button"
-            onClick={onSelectAllVisible}
-            className="rounded-lg px-2.5 py-1 text-xs transition-colors"
-            style={{
-              backgroundColor: "var(--color-bg-muted)",
-              color: "var(--color-text-secondary)",
-            }}
-          >
+          <Button type="button" variant="secondary" size="sm" onClick={onSelectAllVisible}>
             {allVisibleSelected ? "Deselect visible" : "Select visible"}
-          </button>
-          <button
-            type="button"
-            onClick={onClearSelection}
-            className="rounded-lg px-2.5 py-1 text-xs transition-colors"
-            style={{
-              backgroundColor: "var(--color-bg-muted)",
-              color: "var(--color-text-secondary)",
-            }}
-          >
+          </Button>
+          <Button type="button" variant="secondary" size="sm" onClick={onClearSelection}>
             Clear selection
-          </button>
+          </Button>
         </div>
 
         <div className="grid gap-2 md:grid-cols-2 xl:flex xl:flex-wrap xl:items-center">
@@ -112,18 +113,18 @@ export function BulkActionBar({
                 <option key={status.id} value={status.id}>{status.name}</option>
               ))}
             </Select>
-            <button
+            <Button
               type="button"
+              variant="default"
+              size="sm"
               disabled={!statusId || isPending}
               onClick={() => {
                 onApplyStatus(statusId);
                 setStatusId("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-accent)", color: "white" }}
             >
               Apply status
-            </button>
+            </Button>
           </div>
 
           <div className="flex gap-2">
@@ -134,18 +135,18 @@ export function BulkActionBar({
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </Select>
-            <button
+            <Button
               type="button"
+              variant="default"
+              size="sm"
               disabled={!assigneeId || isPending}
               onClick={() => {
                 onApplyAssignee(assigneeId === UNASSIGNED_VALUE ? null : assigneeId);
                 setAssigneeId("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-accent)", color: "white" }}
             >
               Apply assignee
-            </button>
+            </Button>
           </div>
 
           <div className="flex gap-2">
@@ -162,18 +163,18 @@ export function BulkActionBar({
                 <option key={sprint.id} value={sprint.id}>{sprint.name} ({sprint.status})</option>
               ))}
             </Select>
-            <button
+            <Button
               type="button"
+              variant="default"
+              size="sm"
               disabled={!sprintId || isPending}
               onClick={() => {
                 onApplySprint(sprintId === NO_SPRINT_VALUE ? null : sprintId);
                 setSprintId("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-accent)", color: "white" }}
             >
               Apply sprint
-            </button>
+            </Button>
           </div>
 
           <div className="flex gap-2">
@@ -183,43 +184,44 @@ export function BulkActionBar({
                 <option key={tag.id} value={tag.id}>{tag.name}</option>
               ))}
             </Select>
-            <button
+            <Button
               type="button"
+              variant="secondary"
+              size="sm"
               disabled={!tagId || isPending}
               onClick={() => {
                 onAddTag(tagId);
                 setTagId("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-secondary)" }}
             >
               Add tag
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
+              variant="secondary"
+              size="sm"
               disabled={!tagId || isPending}
               onClick={() => {
                 onRemoveTag(tagId);
                 setTagId("");
               }}
-              className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-secondary)" }}
             >
               Remove tag
-            </button>
+            </Button>
           </div>
 
-          <button
+          <Button
             type="button"
+            variant="destructive"
+            size="sm"
             disabled={isPending}
-            onClick={onArchive}
-            className="rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-            style={{ backgroundColor: "var(--color-danger)", color: "white" }}
+            onClick={handleArchiveClick}
           >
             Archive selected
-          </button>
+          </Button>
         </div>
       </div>
+      {confirmElement}
     </div>
   );
 }
