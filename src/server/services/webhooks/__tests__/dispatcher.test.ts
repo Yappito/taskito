@@ -1,17 +1,25 @@
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptSecret } from "@/lib/secret-crypto";
+import { createPinnedOutboundLookup } from "@/lib/ai-provider-validation";
 import {
   buildWebhookTaskSnapshot,
+  defaultWebhookTransport,
   deliverWebhook,
   emitWebhookEvent,
+  outboundDeliveryQueueState,
   processDueWebhookDeliveries,
   sendWebhookPing,
   WEBHOOK_MAX_ATTEMPTS,
   WEBHOOK_RETRY_DELAYS_MS,
+  type DeliverWebhookOptions,
+  type WebhookOutboundRequest,
+  type WebhookOutboundResponse,
 } from "@/server/services/webhooks/dispatcher";
 import { computeWebhookSignature } from "@/server/services/webhooks/signature";
-import { installFakeFetch, jsonResponse } from "@/server/services/ai/__tests__/helpers/fake-provider";
 import { createPrismaMock } from "@/test/prisma-mock";
 
 // Public IP literal (skips DNS resolution entirely — see
@@ -19,6 +27,18 @@ import { createPrismaMock } from "@/test/prisma-mock";
 // touch the network in this offline sandbox.
 const PUBLIC_URL = "https://93.184.216.34/hook";
 const MASTER_KEY = Buffer.alloc(32, 9).toString("base64");
+
+// ---------------------------------------------------------------------------
+// DNS mock: `node:dns/promises` is replaced file-wide. Validation-time
+// lookups are fully controllable so tests can simulate DNS rebinding
+// (validation answers public, later/connect-time answers private).
+// ---------------------------------------------------------------------------
+const { dnsLookupMock } = vi.hoisted(() => ({
+  dnsLookupMock: vi.fn(),
+}));
+vi.mock("node:dns/promises", () => ({
+  lookup: dnsLookupMock,
+}));
 
 function webhookRowFor(secret: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -30,21 +50,87 @@ function webhookRowFor(secret: string, overrides: Record<string, unknown> = {}) 
   };
 }
 
-describe("webhook dispatcher", () => {
-  let restoreFetch: (() => void) | undefined;
+interface MockDeliveryRow {
+  id: string;
+  status: string;
+  attempts: number;
+  payload: unknown;
+  event: string;
+  webhook: Record<string, unknown>;
+}
 
+function pendingDeliveryRow(webhook: Record<string, unknown>, overrides: Partial<MockDeliveryRow> = {}): MockDeliveryRow {
+  return {
+    id: "delivery-1",
+    status: "pending",
+    attempts: 0,
+    payload: {},
+    event: "task.created",
+    webhook,
+    ...overrides,
+  };
+}
+
+/** Injectable fake transport recording each request (replacement for a fake global fetch). */
+function recordingTransport(handler?: (request: WebhookOutboundRequest) => WebhookOutboundResponse) {
+  const requests: WebhookOutboundRequest[] = [];
+  const transport = vi.fn(async (request: WebhookOutboundRequest): Promise<WebhookOutboundResponse> => {
+    requests.push(request);
+    return handler?.(request) ?? { status: 200, error: null };
+  });
+  return { transport, requests };
+}
+
+/** Async result of the pinned lookup, as the HTTP agent would invoke it at connect time. */
+function invokePinnedLookup(
+  lookup: NonNullable<WebhookOutboundRequest["lookup"]>,
+  options: { all?: boolean } = {},
+): Promise<Array<{ address: string; family: number }> | { address: string; family: number }> {
+  return new Promise((resolve, reject) => {
+    lookup("whatever-hostname.agent-asks.example", options, (err, address, family) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (Array.isArray(address)) {
+        resolve(address);
+      } else {
+        resolve({ address: address as string, family: family as number });
+      }
+    });
+  });
+}
+
+function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const tick = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        reject(new Error("waitFor timed out"));
+        return;
+      }
+      setTimeout(tick, 5);
+    };
+    tick();
+  });
+}
+
+describe("webhook dispatcher", () => {
   beforeEach(() => {
     vi.stubEnv("AI_SECRET_MASTER_KEY", MASTER_KEY);
     vi.stubEnv("WEBHOOK_ALLOW_PRIVATE_HOSTS", "false");
+    vi.stubEnv("WEBHOOK_DELIVERY_CONCURRENCY", "5");
+    dnsLookupMock.mockReset();
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.useRealTimers();
-    if (restoreFetch) {
-      restoreFetch();
-      restoreFetch = undefined;
-    }
+    vi.restoreAllMocks();
   });
 
   describe("buildWebhookTaskSnapshot", () => {
@@ -83,12 +169,106 @@ describe("webhook dispatcher", () => {
     });
   });
 
+  describe("creator permission gate (delivery build time)", () => {
+    /**
+     * Wires `prisma.user.findUnique` for both the envelope actor lookup and
+     * the dispatcher's creator re-check (`getEffectiveProjectAccess`), keyed
+     * on the requested `select` shape exactly like `@/test/actors` does for
+     * the router suites.
+     */
+    function stubUserAccess(prisma: ReturnType<typeof createPrismaMock>, grants: Array<{ permission: string; allowed: boolean }>) {
+      prisma.user.findUnique.mockImplementation(async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        if (args?.select && "projectMemberships" in args.select) {
+          return {
+            id: "creator-1",
+            role: "member",
+            disabledAt: null,
+            projectMemberships: [{ role: "manager" }],
+            projectPermissionGrants: grants,
+            groupMemberships: [],
+          };
+        }
+        return { id: args?.where?.id ?? "creator-1", name: "Actor One" };
+      });
+    }
+
+    it("delivers to webhooks whose creator holds automation_manage + task_read", async () => {
+      const prisma = createPrismaMock();
+      prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
+      prisma.webhook.findMany.mockResolvedValue([{ id: "wh1", createdByUserId: "creator-1" }]);
+      stubUserAccess(prisma, []);
+      prisma.webhookDelivery.create.mockResolvedValue({ id: "delivery-1" });
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor("whsec_x")),
+      );
+
+      const { transport } = recordingTransport();
+      const result = await emitWebhookEvent(prisma as never, {
+        projectId: "p1",
+        event: "task.created",
+        transport,
+      });
+
+      expect(result.delivered).toBe(1);
+      // The queue delivery is fire-and-forget: wait for it to complete.
+      await waitFor(() => transport.mock.calls.length === 1);
+      // The queue drained completely.
+      expect(outboundDeliveryQueueState()).toEqual({ queued: 0, active: 0 });
+    });
+
+    it("stops delivering for a webhook whose creator lost task_read (confused-deputy exfil guard)", async () => {
+      const prisma = createPrismaMock();
+      prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
+      prisma.webhook.findMany.mockResolvedValue([{ id: "wh1", createdByUserId: "creator-1" }]);
+      stubUserAccess(prisma, [{ permission: "task_read", allowed: false }]);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { transport } = recordingTransport(() => {
+        throw new Error("delivery must not be built for a task_read-denied creator");
+      });
+      const result = await emitWebhookEvent(prisma as never, {
+        projectId: "p1",
+        event: "task.created",
+        transport,
+      });
+
+      expect(result.delivered).toBe(0);
+      expect(transport).not.toHaveBeenCalled();
+      expect(prisma.webhookDelivery.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe("emitWebhookEvent", () => {
+    function stubEmitSuccess(prisma: ReturnType<typeof createPrismaMock>) {
+      prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
+      prisma.user.findUnique.mockImplementation(async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        if (args?.select && "projectMemberships" in args.select) {
+          return {
+            id: "creator-1",
+            role: "member",
+            disabledAt: null,
+            projectMemberships: [{ role: "manager" }],
+            projectPermissionGrants: [],
+            groupMemberships: [],
+          };
+        }
+        return { id: "actor1", name: "Actor One" };
+      });
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) =>
+        pendingDeliveryRow(webhookRowFor("whsec_x", { id: "wh1" }), { id: args.where.id }),
+      );
+    }
+
     it("creates one delivery per enabled+subscribed webhook with a whitelisted payload", async () => {
       const prisma = createPrismaMock();
       prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
-      prisma.webhook.findMany.mockResolvedValue([{ id: "wh1" }, { id: "wh2" }]);
-      prisma.user.findUnique.mockResolvedValue({ id: "actor1", name: "Actor One" });
+      prisma.webhook.findMany.mockResolvedValue([
+        { id: "wh1", createdByUserId: "creator-1" },
+        { id: "wh2", createdByUserId: "creator-1" },
+      ]);
+      stubEmitSuccess(prisma);
       let seq = 0;
       prisma.webhookDelivery.create.mockImplementation(async () => ({ id: `delivery-${++seq}` }));
       prisma.webhookDelivery.update.mockResolvedValue({});
@@ -105,12 +285,15 @@ describe("webhook dispatcher", () => {
         creator: { email: "creator@example.com" },
       };
 
+      const { transport, requests } = recordingTransport();
       const result = await emitWebhookEvent(prisma as never, {
         projectId: "p1",
         event: "task.created",
         actorId: "actor1",
         payload: { task: sensitiveTask },
+        transport,
       });
+      await waitFor(() => requests.length === 2);
 
       expect(result.delivered).toBe(2);
       expect(prisma.webhook.findMany).toHaveBeenCalledWith(
@@ -162,6 +345,173 @@ describe("webhook dispatcher", () => {
       expect(result.delivered).toBe(0);
       expect(prisma.webhookDelivery.create).not.toHaveBeenCalled();
     });
+
+    it("bounds outbound delivery concurrency through the worker/queue (no immediate fetch per webhook)", async () => {
+      const prisma = createPrismaMock();
+      prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
+      prisma.webhook.findMany.mockResolvedValue(
+        Array.from({ length: 7 }, (_, index) => ({ id: `wh${index}`, createdByUserId: "creator-1" })),
+      );
+      stubEmitSuccess(prisma);
+      let seq = 0;
+      prisma.webhookDelivery.create.mockImplementation(async () => ({ id: `delivery-${++seq}` }));
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const resolveFns = new Map<string, () => void>();
+      const transport = vi.fn(async (request: WebhookOutboundRequest): Promise<WebhookOutboundResponse> => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise<WebhookOutboundResponse>((resolve) => {
+          const deliveryId = request.headers["x-taskito-delivery"];
+          resolveFns.set(deliveryId, () => {
+            inFlight -= 1;
+            resolve({ status: 200, error: null });
+          });
+        });
+      });
+
+      const emitted = await emitWebhookEvent(prisma as never, {
+        projectId: "p1",
+        event: "task.created",
+        transport,
+      });
+      expect(emitted.delivered).toBe(7);
+      // While nothing resolves, at most WEBHOOK_DELIVERY_CONCURRENCY posts run.
+      await waitFor(() => transport.mock.calls.length >= 5);
+      expect(transport).toHaveBeenCalledTimes(5);
+      expect(maxInFlight).toBe(5);
+
+      // Freeing one slot releases exactly one queued delivery.
+      [...resolveFns.values()][0]();
+      await waitFor(() => transport.mock.calls.length === 6);
+
+      // Drain: keep resolving every registered resolver (deliveries queued
+      // later register fresh ones) until all 7 have run to completion and the
+      // queue has fully drained — none are lost or left behind.
+      await waitFor(() => {
+        for (const resolveFn of [...resolveFns.values()]) {
+          resolveFn();
+        }
+        return (
+          transport.mock.calls.length === 7 &&
+          outboundDeliveryQueueState().queued === 0 &&
+          outboundDeliveryQueueState().active === 0
+        );
+      });
+
+      expect(maxInFlight).toBeLessThanOrEqual(5);
+      expect(maxInFlight).toBeGreaterThan(1);
+    });
+  });
+
+  describe("deliverWebhook — exclusive claim (processing state)", () => {
+    /**
+     * Models the real SQL behind the claim: the transition is
+     * `UPDATE ... SET status='processing' WHERE id=? AND status='pending' AND
+     * next_attempt_at <= now` — exactly one concurrent UPDATE matches, so
+     * exactly one worker proceeds and finalizes.
+     */
+    function exclusiveDeliveryStore() {
+      const row = { status: "pending" as string, attempts: 0 };
+      const updateMany = vi.fn(
+        async (args: {
+          where: { id?: string; status?: string };
+          data: { status?: string; attempts?: { increment?: number } | number };
+        }) => {
+          const claimedFrom = args.where.status;
+          const transitionTo = typeof args.data.status === "string" ? args.data.status : undefined;
+
+          if (claimedFrom === "pending" && transitionTo === "processing") {
+            if (row.status !== "pending") {
+              return { count: 0 };
+            }
+            row.status = "processing";
+            const increment = typeof args.data.attempts === "object" && args.data.attempts !== null
+              ? (args.data.attempts.increment ?? 0)
+              : 0;
+            row.attempts += increment;
+            return { count: 1 };
+          }
+
+          if (claimedFrom === "pending" && transitionTo === undefined) {
+            // Pre-fix behavior (the mutation we prove against): the claim only
+            // bumps attempts and LEAVES status pending, so a second concurrent
+            // updateMany with the same {id, status:"pending"} predicate matches
+            // too — both workers believe they own the row and both POST.
+            row.attempts += 1;
+            return { count: 1 };
+          }
+
+          if (claimedFrom === "processing") {
+            if (row.status !== "processing") {
+              return { count: 0 };
+            }
+            if (transitionTo) {
+              row.status = transitionTo;
+            }
+            return { count: 1 };
+          }
+
+          return { count: 0 };
+        },
+      );
+      return { row, updateMany };
+    }
+
+    it("two concurrent claims: exactly one wins and POSTs, the loser skips without fetching", async () => {
+      const prisma = createPrismaMock();
+      const store = exclusiveDeliveryStore();
+      prisma.webhookDelivery.updateMany.mockImplementation(store.updateMany as never);
+      prisma.webhookDelivery.findUnique.mockImplementation(async () =>
+        pendingDeliveryRow(webhookRowFor("whsec_test_secret"), { attempts: 0 }),
+      );
+
+      const { transport, requests } = recordingTransport();
+
+      const [winner, loser] = (await Promise.all([
+        deliverWebhook(prisma as never, "delivery-1", { transport }),
+        deliverWebhook(prisma as never, "delivery-1", { transport }),
+      ])) as Array<{ status: string; error?: string }>;
+
+      const succeeded = [winner, loser].filter((r) => r.status === "success");
+      const skipped = [winner, loser].filter((r) => r.status === "skipped");
+      expect(succeeded).toHaveLength(1);
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.error).toMatch(/claimed by another worker/i);
+
+      // Exactly one POST happened — no double-delivery.
+      expect(requests).toHaveLength(1);
+      // The claim consumed exactly one attempt and the row finalized as success.
+      expect(store.row).toEqual({ status: "success", attempts: 1 });
+    });
+
+    it("claims with the atomic processing predicate (pending + due) and a lease, not just attempts++", async () => {
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      const { transport } = recordingTransport();
+
+      await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+
+      const claimCall = prisma.webhookDelivery.updateMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(claimCall.where).toEqual({ id: "delivery-1", status: "pending", nextAttemptAt: { lte: now } });
+      expect(claimCall.data.status).toBe("processing");
+      expect(claimCall.data.attempts).toEqual({ increment: 1 });
+      expect(claimCall.data.leaseExpiresAt).toEqual(new Date(now.getTime() + 300_000));
+
+      // Success finalization guards on the processing state, not on pending.
+      const finalizeCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(finalizeCall.where).toEqual({ id: "delivery-1", status: "processing" });
+      expect(finalizeCall.data.leaseExpiresAt).toBeNull();
+    });
   });
 
   describe("deliverWebhook", () => {
@@ -172,23 +522,17 @@ describe("webhook dispatcher", () => {
 
       const prisma = createPrismaMock();
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
-      prisma.webhookDelivery.findUnique.mockResolvedValue({
-        id: "delivery-1",
-        status: "pending",
-        attempts: 0,
-        payload,
-        event: "task.created",
-        webhook: webhookRowFor(secret),
-      });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor(secret), { payload }),
+      );
 
-      const fake = installFakeFetch(() => jsonResponse({ ok: true }, 200));
-      restoreFetch = fake.restore;
+      const { transport, requests } = recordingTransport();
 
-      const result = await deliverWebhook(prisma as never, "delivery-1", { now });
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
 
       expect(result).toEqual({ status: "success", responseCode: 200 });
-      expect(fake.requests).toHaveLength(1);
-      const request = fake.requests[0];
+      expect(requests).toHaveLength(1);
+      const request = requests[0];
       expect(request.url).toBe(PUBLIC_URL);
       expect(request.headers["x-taskito-event"]).toBe("task.created");
       expect(request.headers["x-taskito-delivery"]).toBe("delivery-1");
@@ -196,7 +540,7 @@ describe("webhook dispatcher", () => {
       expect(timestamp).toBe(Math.floor(now.getTime() / 1000).toString());
 
       const expectedBody = JSON.stringify({ ...payload, id: "delivery-1" });
-      expect(request.rawBody).toBe(expectedBody);
+      expect(request.body).toBe(expectedBody);
       const expectedSignature = computeWebhookSignature(secret, timestamp, expectedBody);
       expect(request.headers["x-taskito-signature"]).toBe(`sha256=${expectedSignature}`);
 
@@ -207,46 +551,20 @@ describe("webhook dispatcher", () => {
       expect(successCall.data.responseCode).toBe(200);
     });
 
-    it("skips a delivery already claimed by another worker, without calling fetch", async () => {
-      const prisma = createPrismaMock();
-      prisma.webhookDelivery.findUnique.mockResolvedValue({
-        id: "delivery-1",
-        status: "pending",
-        attempts: 0,
-        payload: {},
-        event: "task.created",
-        webhook: webhookRowFor("whsec_x"),
-      });
-      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 0 });
-
-      const fake = installFakeFetch(() => jsonResponse({}, 200));
-      restoreFetch = fake.restore;
-
-      const result = await deliverWebhook(prisma as never, "delivery-1");
-      expect(result.status).toBe("skipped");
-      expect(fake.fetchMock).not.toHaveBeenCalled();
-    });
-
-    it("rejects a delivery whose URL now resolves to a private address, without calling fetch (mutation-provable)", async () => {
+    it("refuses a delivery whose URL now resolves to a private address, without sending (mutation-provable)", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
-      prisma.webhookDelivery.findUnique.mockResolvedValue({
-        id: "delivery-1",
-        status: "pending",
-        attempts: 0,
-        payload: {},
-        event: "task.created",
-        webhook: webhookRowFor("whsec_x", { url: "http://127.0.0.1:9000/hook" }),
-      });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor("whsec_x", { url: "http://127.0.0.1:9000/hook" })),
+      );
 
-      const fake = installFakeFetch(() => {
-        throw new Error("fetch must not be called for a private target");
+      const { transport } = recordingTransport(() => {
+        throw new Error("delivery must not be sent to a private target");
       });
-      restoreFetch = fake.restore;
 
       const result = await deliverWebhook(prisma as never, "delivery-1", { now });
-      expect(fake.fetchMock).not.toHaveBeenCalled();
+      expect(transport).not.toHaveBeenCalled();
       expect(result.status).toBe("pending");
       expect(result.error).toMatch(/private, loopback, or link-local/);
 
@@ -256,27 +574,149 @@ describe("webhook dispatcher", () => {
       expect(failureCall.data.nextAttemptAt).toEqual(new Date(now.getTime() + WEBHOOK_RETRY_DELAYS_MS[0]));
     });
 
+    it("refuses a hostname whose resolved answers include ANY private record (all A/AAAA validated)", async () => {
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor("whsec_x", { url: "http://mixed.attacker.example:8080/hook" })),
+      );
+
+      // One public answer and one private answer: the whole record set must fail.
+      dnsLookupMock.mockResolvedValue([
+        { address: "93.184.216.34", family: 4 },
+        { address: "10.1.2.3", family: 4 },
+      ]);
+
+      const { transport } = recordingTransport(() => {
+        throw new Error("must never connect when any answer is private");
+      });
+
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now });
+      expect(transport).not.toHaveBeenCalled();
+      expect(result.status).toBe("pending");
+      expect(result.error).toMatch(/private, loopback, or link-local/);
+      expect(dnsLookupMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("pins the send-time connection to the validated DNS answer (DNS-rebinding TOCTOU, mutation-provable)", async () => {
+      const REBIND_HOST = "rebind.attacker.example";
+      const PUBLIC_IP = "93.184.216.34";
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor("whsec_x", { url: `http://${REBIND_HOST}:8080/hook` })),
+      );
+
+      // Validation-time resolution: PUBLIC. Every later resolution — what a
+      // re-resolving fetch would see at connect time — returns the cloud
+      // metadata endpoint (rebinding world).
+      dnsLookupMock.mockImplementation(async (hostname: string) => {
+        if (hostname === REBIND_HOST) {
+          return [{ address: PUBLIC_IP, family: 4 }];
+        }
+        throw new Error(`unexpected DNS lookup for ${hostname}`);
+      });
+
+      let capturedRequest: WebhookOutboundRequest | null = null;
+      const { transport } = recordingTransport((request) => {
+        capturedRequest = request;
+        return { status: 200, error: null };
+      });
+
+      const options: DeliverWebhookOptions = { now, transport };
+      const result = await deliverWebhook(prisma as never, "delivery-1", options);
+      expect(result.status).toBe("success");
+      expect(transport).toHaveBeenCalledTimes(1);
+
+      // The dispatcher handed the transport a pinned lookup.
+      expect(capturedRequest).not.toBeNull();
+      const pinned = capturedRequest as unknown as WebhookOutboundRequest;
+      expect(pinned.lookup).toBeTypeOf("function");
+      // The original hostname (SNI + Host) is preserved — only the IP is pinned.
+      expect(pinned.url).toBe(`http://${REBIND_HOST}:8080/hook`);
+
+      // Now flip DNS to the metadata endpoint: the pinned lookup must STILL
+      // return the validated public address — the connection never re-resolves.
+      dnsLookupMock.mockImplementation(async () => [{ address: "169.254.169.254", family: 4 }]);
+      const allAnswers = await invokePinnedLookup(pinned.lookup as NonNullable<WebhookOutboundRequest["lookup"]>, { all: true });
+      expect(allAnswers).toEqual([{ address: PUBLIC_IP, family: 4 }]);
+      const singleAnswer = await invokePinnedLookup(pinned.lookup as NonNullable<WebhookOutboundRequest["lookup"]>);
+      expect(singleAnswer).toEqual({ address: PUBLIC_IP, family: 4 });
+    });
+
     it("allows a private-address delivery when WEBHOOK_ALLOW_PRIVATE_HOSTS=true", async () => {
       vi.stubEnv("WEBHOOK_ALLOW_PRIVATE_HOSTS", "true");
       const now = new Date("2026-01-01T00:00:00.000Z");
       const secret = "whsec_test_secret";
       const prisma = createPrismaMock();
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
-      prisma.webhookDelivery.findUnique.mockResolvedValue({
-        id: "delivery-1",
-        status: "pending",
-        attempts: 0,
-        payload: { event: "task.created" },
-        event: "task.created",
-        webhook: webhookRowFor(secret, { url: "http://127.0.0.1:9000/hook" }),
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(webhookRowFor(secret, { url: "http://127.0.0.1:9000/hook" })),
+      );
+
+      const { transport, requests } = recordingTransport();
+
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+      expect(result.status).toBe("success");
+      expect(transport).toHaveBeenCalledTimes(1);
+      // No pin applies for opted-in private targets: the transport may resolve normally.
+      expect(requests[0].lookup).toBeUndefined();
+    });
+
+    it("marks a 3xx redirect response as a failure (redirects are never followed)", async () => {
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+
+      const { transport, requests } = recordingTransport(() => ({ status: 302, error: null }));
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+
+      expect(requests).toHaveLength(1);
+      expect(result.status).toBe("pending");
+      expect(result.responseCode).toBe(302);
+      expect(result.error).toMatch(/HTTP status 302/);
+      expect(transport).toHaveBeenCalledTimes(1);
+    });
+
+    it("finalizes as failed when the secret can no longer be decrypted (post-rotation, capped)", async () => {
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(
+        pendingDeliveryRow(
+          webhookRowFor("whsec_x", {
+            // Ciphertext that decrypts cleanly under NO configured key: what a
+            // master-key cutover without re-encryption produces.
+            encryptedSecret: "v1:c2hvcnRjaXBoZXJ0ZXh0",
+          }),
+          { attempts: WEBHOOK_MAX_ATTEMPTS - 1 },
+        ),
+      );
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { transport } = recordingTransport(() => {
+        throw new Error("must not POST when the secret cannot be decrypted");
       });
 
-      const fake = installFakeFetch(() => jsonResponse({}, 200));
-      restoreFetch = fake.restore;
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
 
-      const result = await deliverWebhook(prisma as never, "delivery-1", { now });
-      expect(result.status).toBe("success");
-      expect(fake.fetchMock).toHaveBeenCalledTimes(1);
+      expect(transport).not.toHaveBeenCalled();
+      expect(result.status).toBe("failed");
+      expect(result.error).toMatch(/could not be decrypted/);
+
+      const failureCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(failureCall.where).toEqual({ id: "delivery-1", status: "processing" });
+      expect(failureCall.data.status).toBe("failed");
+      expect(failureCall.data.attempts).toEqual({ set: WEBHOOK_MAX_ATTEMPTS });
+      // No further retry is scheduled: the row stops churning at the cap.
+      expect(failureCall.data.nextAttemptAt).toEqual(now);
+      expect(failureCall.data.leaseExpiresAt).toBeNull();
     });
 
     it("schedules 1m then 5m backoff and marks failed after WEBHOOK_MAX_ATTEMPTS", async () => {
@@ -286,20 +726,14 @@ describe("webhook dispatcher", () => {
       const prisma = createPrismaMock();
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
 
-      const fake = installFakeFetch(() => new Response("", { status: 500, statusText: "Internal Server Error" }));
-      restoreFetch = fake.restore;
+      const { transport, requests } = recordingTransport(() => ({ status: 500, error: null }));
 
       for (let attemptIndex = 0; attemptIndex < WEBHOOK_MAX_ATTEMPTS; attemptIndex += 1) {
-        prisma.webhookDelivery.findUnique.mockResolvedValueOnce({
-          id: "delivery-1",
-          status: "pending",
-          attempts: attemptIndex,
-          payload: {},
-          event: "task.created",
-          webhook: webhookRowFor(secret),
-        });
+        prisma.webhookDelivery.findUnique.mockResolvedValueOnce(
+          pendingDeliveryRow(webhookRowFor(secret), { attempts: attemptIndex }),
+        );
 
-        const result = await deliverWebhook(prisma as never, "delivery-1", { now });
+        const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
         const failureCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
           data: Record<string, unknown>;
         };
@@ -316,32 +750,36 @@ describe("webhook dispatcher", () => {
           expect(failureCall.data.nextAttemptAt).toEqual(new Date(now.getTime() + expectedDelay));
         }
         expect(failureCall.data.attempts).toEqual({ set: attempts });
+        expect(failureCall.data.leaseExpiresAt).toBeNull();
       }
 
-      expect(fake.fetchMock).toHaveBeenCalledTimes(WEBHOOK_MAX_ATTEMPTS);
+      expect(transport).toHaveBeenCalledTimes(WEBHOOK_MAX_ATTEMPTS);
+      expect(requests).toHaveLength(WEBHOOK_MAX_ATTEMPTS);
     });
   });
 
   describe("processDueWebhookDeliveries", () => {
-    it("sweeps pending deliveries whose nextAttemptAt has come due", async () => {
+    it("recovers expired processing leases, then sweeps due pending deliveries", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const secret = "whsec_test_secret";
       const prisma = createPrismaMock();
       prisma.webhookDelivery.findMany.mockResolvedValue([{ id: "d1" }, { id: "d2" }]);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
-      prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) => ({
-        id: args.where.id,
-        status: "pending",
-        attempts: 0,
-        payload: {},
-        event: "task.created",
-        webhook: webhookRowFor(secret),
-      }));
+      prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) =>
+        pendingDeliveryRow(webhookRowFor(secret), { id: args.where.id }),
+      );
+      vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const fake = installFakeFetch(() => jsonResponse({}, 200));
-      restoreFetch = fake.restore;
+      const { transport, requests } = recordingTransport();
+      const result = await processDueWebhookDeliveries(prisma as never, now, { transport });
 
-      const result = await processDueWebhookDeliveries(prisma as never, now);
+      // Recovery: expired processing rows are deliberately handed back to pending.
+      const recoveryCall = prisma.webhookDelivery.updateMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(recoveryCall.where).toEqual({ status: "processing", leaseExpiresAt: { lte: now } });
+      expect(recoveryCall.data).toEqual({ status: "pending", nextAttemptAt: now, leaseExpiresAt: null });
 
       expect(prisma.webhookDelivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -353,7 +791,8 @@ describe("webhook dispatcher", () => {
         }),
       );
       expect(result).toEqual({ processed: 2, succeeded: 2 });
-      expect(fake.fetchMock).toHaveBeenCalledTimes(2);
+      expect(transport).toHaveBeenCalledTimes(2);
+      expect(requests).toHaveLength(2);
     });
 
     it("keeps sweeping even when deliverWebhook throws for one row", async () => {
@@ -363,24 +802,18 @@ describe("webhook dispatcher", () => {
         if (args.where.id === "d1") {
           throw new Error("boom");
         }
-        return {
-          id: "d2",
-          status: "pending",
-          attempts: 0,
-          payload: {},
-          event: "task.created",
-          webhook: webhookRowFor("whsec_x"),
-        };
+        return pendingDeliveryRow(webhookRowFor("whsec_x"), { id: "d2" });
       });
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
 
-      const fake = installFakeFetch(() => jsonResponse({}, 200));
-      restoreFetch = fake.restore;
+      const { transport } = recordingTransport();
       vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const result = await processDueWebhookDeliveries(prisma as never, new Date());
+      const result = await processDueWebhookDeliveries(prisma as never, new Date(), { transport });
       expect(result.processed).toBe(2);
       expect(result.succeeded).toBe(1);
+      expect(transport).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -390,37 +823,163 @@ describe("webhook dispatcher", () => {
       const prisma = createPrismaMock();
       prisma.project.findUnique.mockResolvedValue({ id: "p1", key: "AAA", slug: "proj", name: "Proj" });
 
-      const fake = installFakeFetch(() => jsonResponse({}, 200));
-      restoreFetch = fake.restore;
+      const { transport, requests } = recordingTransport();
 
       const result = await sendWebhookPing(prisma as never, {
         webhookId: "wh1",
         url: PUBLIC_URL,
         encryptedSecret: encryptSecret(secret),
         projectId: "p1",
+        transport,
       });
 
       expect(result).toEqual({ status: "success", responseCode: 200, error: null });
-      expect(fake.requests[0].headers["x-taskito-event"]).toBe("ping");
+      expect(requests[0].headers["x-taskito-event"]).toBe("ping");
     });
 
     it("rejects a private ping target before sending anything", async () => {
       const prisma = createPrismaMock();
-      const fake = installFakeFetch(() => {
+      const { transport } = recordingTransport(() => {
         throw new Error("must not be called");
       });
-      restoreFetch = fake.restore;
 
       const result = await sendWebhookPing(prisma as never, {
         webhookId: "wh1",
         url: "http://10.0.0.5/hook",
         encryptedSecret: encryptSecret("whsec_x"),
         projectId: "p1",
+        transport,
       });
 
       expect(result.status).toBe("failed");
       expect(result.error).toMatch(/private, loopback, or link-local/);
-      expect(fake.fetchMock).not.toHaveBeenCalled();
+      expect(transport).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("defaultWebhookTransport (Node transport)", () => {
+    let servers: http.Server[] = [];
+
+    afterEach(async () => {
+      await Promise.all(
+        servers.map(
+          (server) =>
+            new Promise<void>((resolve) => {
+              server.close(() => resolve());
+            }),
+        ),
+      );
+      servers = [];
+    });
+
+    function listenOnLoopback(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<number> {
+      const server = http.createServer(handler);
+      servers.push(server);
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port));
+      });
+    }
+
+    function pinnedLookupToLoopback(hostname: string, port: number) {
+      const url = `http://${hostname}:${port}/hook`;
+      return createPinnedOutboundLookup({ url, hostname, pinned: { address: "127.0.0.1", family: 4 } });
+    }
+
+    it("connects to the pinned address while preserving the original Host header", async () => {
+      const seen: { host: string | undefined; url: string | undefined; body: string } = { host: undefined, url: undefined, body: "" };
+      const port = await listenOnLoopback((req, res) => {
+        seen.host = req.headers.host;
+        seen.url = req.url;
+        let raw = "";
+        req.on("data", (chunk: Buffer) => {
+          raw += chunk.toString("utf8");
+        });
+        req.on("end", () => {
+          seen.body = raw;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end('{"ok":true}');
+        });
+      });
+
+      const HOSTNAME = "rebinding-hostname.invalid";
+      const result = await defaultWebhookTransport({
+        url: `http://${HOSTNAME}:${port}/hook`,
+        headers: { "content-type": "application/json", "x-taskito-event": "ping" },
+        body: JSON.stringify({ hello: "world" }),
+        timeoutMs: 5_000,
+        // Connect-time "DNS" says loopback (simulating the validated answer),
+        // while the URL hostname is intentionally unresolvable — only the
+        // pinned lookup can get us there.
+        lookup: pinnedLookupToLoopback(HOSTNAME, port),
+      });
+
+      expect(result).toEqual({ status: 200, error: null });
+      // The connection reached the loopback server THROUGH the pinned lookup
+      // (the hostname itself can never resolve), with the original Host.
+      expect(seen.host).toBe(`${HOSTNAME}:${port}`);
+      expect(seen.url).toBe("/hook");
+      expect(JSON.parse(seen.body)).toEqual({ hello: "world" });
+    });
+
+    it("destroys responses larger than the cap instead of draining them", async () => {
+      const TOTAL_BYTES = 4 * 1024 * 1024;
+      const CHUNK = 32 * 1024;
+      let serverFinished = false;
+      let serverWroteBytes = 0;
+
+      const port = await listenOnLoopback((req, res) => {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        const step = () => {
+          if (serverFinished) {
+            return;
+          }
+          if (serverWroteBytes >= TOTAL_BYTES) {
+            serverFinished = true;
+            res.end();
+            return;
+          }
+          serverWroteBytes += CHUNK;
+          res.write(Buffer.alloc(CHUNK, 0x61), () => setImmediate(step));
+        };
+        step();
+        res.on("close", () => {
+          serverFinished = true;
+        });
+        res.on("error", () => {
+          serverFinished = true;
+        });
+      });
+
+      const result = await defaultWebhookTransport({
+        url: `http://127.0.0.1:${port}/huge`,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ok: 1 }),
+        timeoutMs: 10_000,
+      });
+
+      // Status was captured even though the body was truncated at the cap.
+      expect(result.status).toBe(200);
+      // The transport resolved while the server was STILL streaming the 4MB
+      // body — it did not wait for (or buffer) the whole payload.
+      expect(serverFinished).toBe(false);
+      expect(serverWroteBytes).toBeLessThan(TOTAL_BYTES);
+    });
+
+    it("reports a timeout error when the target never answers", async () => {
+      const port = await listenOnLoopback(() => {
+        // Never respond.
+      });
+
+      const result = await defaultWebhookTransport({
+        url: `http://127.0.0.1:${port}/hang`,
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        timeoutMs: 50,
+      });
+
+      expect(result.status).toBeNull();
+      expect(result.error).toMatch(/timed out after 1 seconds/);
     });
   });
 });

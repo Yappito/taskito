@@ -607,6 +607,7 @@ model Webhook {
 
 enum WebhookDeliveryStatus {
   pending
+  processing
   success
   failed
 }
@@ -621,6 +622,10 @@ model WebhookDelivery {
   attempts      Int                   @default(0)
   lastError     String?               @db.Text
   nextAttemptAt DateTime
+  // Exclusive-claim lease: set when a worker transitions the row
+  // pending -> processing; expired leases are deliberately recovered back to
+  // pending by the scheduler sweep so a crashed worker cannot strand a row.
+  leaseExpiresAt DateTime?
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
 

@@ -322,7 +322,7 @@ Notes:
 
 ## Webhooks
 
-Outbound, project-scoped webhooks are the generic integration path into Slack, n8n, Matrix, Zaps, and any other endpoint without Taskito shipping per-target connectors. Owners/managers (users with the project-wide `automation_manage` permission) create them under `Project settings → Webhooks`.
+Outbound, project-scoped webhooks are the generic integration path into Slack, n8n, Matrix, Zaps, and any other endpoint without Taskito shipping per-target connectors. Owners/managers (users with the project-wide `automation_manage` AND `task_read` permissions) create them under `Project settings → Webhooks`. Creating, updating/enabling, deleting, testing, and redelivering a webhook all require both permissions — webhook endpoints receive task metadata, so a principal with task read denied cannot route task data to an endpoint either (this is re-checked against the webhook's creator at fan-out time, and each project is capped at `WEBHOOK_MAX_WEBHOOKS_PER_PROJECT` webhooks).
 
 ### Delivery envelope
 
@@ -376,10 +376,12 @@ The signing secret is generated at create time, encrypted at rest with the same 
 
 ### Delivery & retry policy
 
-- Deliveries are attempted up to **3 times**: the initial POST (fired inline, fire-and-forget — it can never block or fail the originating mutation) plus scheduled retries on a 1m / 5m backoff ladder.
+- Deliveries are attempted up to **3 times**: the initial POST (fired through a bounded worker queue of `WEBHOOK_DELIVERY_CONCURRENCY` concurrent posts — it can never block or fail the originating mutation) plus scheduled retries on a 1m / 5m backoff ladder.
+- A delivery is claimed **exclusively** (atomic `pending → processing` transition guarded by a `WEBHOOK_DELIVERY_LEASE_MS` lease), so the inline pass and the scheduler sweep can never double-deliver the same event; leases of crashed workers are deliberately recovered back to `pending` on the next sweep.
 - Failed attempts are recorded in the per-project delivery log (event, status, HTTP response code, attempts, time) visible in project settings with a one-click **Redeliver**.
-- Outbound requests use a 10-second timeout, HTTP redirects are **never** followed, and response bodies are never reflected into errors or logs.
-- The target URL is re-validated at send time against the same SSRF policy used at create time, so a webhook created before a policy change (or whose DNS changed later) cannot reach newly-forbidden targets.
+- Outbound requests use a 10-second timeout, HTTP redirects are **never** followed, and response bodies are stream-discarded after 64 KB (the delivery only needs the status code) and never reflected into errors or logs.
+- The target URL is re-validated at send time against the same SSRF policy used at create time, and the connection is **pinned to that validated DNS answer** (lookup override on the Node http/https request) while keeping the original hostname for TLS SNI and the Host header — a hostname whose validation-time resolution is public cannot be re-resolved into loopback/link-local space at connect time (DNS-rebinding TOCTOU).
+- Webhook signing secrets are included in the master-key rotation plan (`db:reencrypt-ai-secrets`); if a delivery's secret cannot be decrypted, the delivery fails via the normal bounded retry ladder instead of being retried forever.
 - The in-process scheduler (see Scheduling) sweeps pending deliveries whose `nextAttemptAt` is due — enabling it with `SCHEDULER_ENABLED=true` (default) also guarantees eventual delivery after restarts.
 
 ### Environment variable
@@ -387,6 +389,9 @@ The signing secret is generated at create time, encrypted at rest with the same 
 | Variable | Default | Notes |
 |---|---|---|
 | `WEBHOOK_ALLOW_PRIVATE_HOSTS` | `false` | Set `true` only to allow webhook URLs that point at loopback/private/link-local addresses (e.g. an n8n instance on the same host); rejected by default to prevent SSRF |
+| `WEBHOOK_MAX_WEBHOOKS_PER_PROJECT` | `20` | Cap on webhooks per project, enforced at create time to bound the fan-out surface |
+| `WEBHOOK_DELIVERY_CONCURRENCY` | `5` | Max concurrent outbound webhook POSTs across the process (bounded worker queue) |
+| `WEBHOOK_DELIVERY_LEASE_MS` | `300000` | How long a delivery row may stay `processing` (exclusive claim lease) before the scheduler recovers it back to `pending` |
 
 ## Operations
 
@@ -460,7 +465,7 @@ Useful commands from the repository root:
 
 ### Rotating the secret encryption key (`AI_SECRET_MASTER_KEY`)
 
-Stored AI provider secrets, OIDC client secrets, and S3 storage credentials are encrypted at rest. New ciphertext is written as `v1:<payload>`; legacy unprefixed ciphertext keeps decrypting. Rotating `AUTH_SECRET` no longer silently breaks those secrets if a dedicated master key is configured — and if it ever does, the re-encryption script restores access:
+Stored AI provider secrets, OIDC client secrets, S3 storage credentials, and webhook signing secrets are encrypted at rest. New ciphertext is written as `v1:<payload>`; legacy unprefixed ciphertext keeps decrypting. Rotating `AUTH_SECRET` no longer silently breaks those secrets if a dedicated master key is configured — and if it ever does, the re-encryption script restores access (it now covers `Webhook.encryptedSecret` too, and webhook secret writes take the same advisory lock):
 
 1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 2. Pick a maintenance window if your tables are large (the scan + rewrite happens in one long transaction). All in-app secret writers take the same Postgres advisory lock the re-encryption script uses (`pg_advisory_xact_lock`), so normal operation cannot interleave with a run; the script additionally snapshots a per-row ciphertext fingerprint and aborts with nothing committed if any row's ciphertext changed mid-run (including same-count in-place replacements).

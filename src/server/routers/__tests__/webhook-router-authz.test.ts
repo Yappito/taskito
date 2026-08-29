@@ -132,6 +132,103 @@ describe("webhook router authorization", () => {
     });
   });
 
+  describe("member with automation_manage but task_read denied (finding 8)", () => {
+    function denyTaskReadActor() {
+      // Manager-level automation access, but the tenant explicitly DENIED
+      // task read. Webhook endpoints receive task metadata, so this principal
+      // must not be able to register/enforce-delivery to one either.
+      return memberOf({
+        userId: "user-1",
+        projects: { [PROJECT_A]: "manager" },
+        grants: [{ projectId: PROJECT_A, permission: "task_read", allowed: false }],
+      });
+    }
+
+    it("create is FORBIDDEN and performs no write", async () => {
+      const actor = denyTaskReadActor();
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(
+        caller.create({ projectId: PROJECT_A, url: PUBLIC_URL, events: ["task.created"] }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhook.create).not.toHaveBeenCalled();
+    });
+
+    it("update (enable) is FORBIDDEN", async () => {
+      const actor = denyTaskReadActor();
+      actor.prisma.webhook.findUnique.mockResolvedValue(webhookRow({ projectId: PROJECT_A }));
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.update({ id: WEBHOOK_IN_B, isEnabled: true })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhook.update).not.toHaveBeenCalled();
+    });
+
+    it("delete is FORBIDDEN", async () => {
+      const actor = denyTaskReadActor();
+      actor.prisma.webhook.findUnique.mockResolvedValue(webhookRow({ projectId: PROJECT_A }));
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.delete({ id: WEBHOOK_IN_B })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhook.delete).not.toHaveBeenCalled();
+    });
+
+    it("testDelivery is FORBIDDEN and sends nothing", async () => {
+      const actor = denyTaskReadActor();
+      actor.prisma.webhook.findUnique.mockResolvedValue(webhookRow({ projectId: PROJECT_A }));
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.testDelivery({ id: WEBHOOK_IN_B })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhook.delete).not.toHaveBeenCalled();
+    });
+
+    it("redeliver is FORBIDDEN", async () => {
+      const actor = denyTaskReadActor();
+      actor.prisma.webhookDelivery.findUnique.mockResolvedValue({
+        id: DELIVERY_IN_B,
+        status: "failed",
+        webhook: { projectId: PROJECT_A, isEnabled: true },
+      });
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.redeliver({ id: DELIVERY_IN_B })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhookDelivery.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("per-project webhook count cap (finding 9)", () => {
+    it("rejects the (N+1)th webhook with BAD_REQUEST and performs no write", async () => {
+      vi.stubEnv("WEBHOOK_MAX_WEBHOOKS_PER_PROJECT", "1");
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      actor.prisma.webhook.count.mockResolvedValue(1);
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      await expect(
+        caller.create({ projectId: PROJECT_A, url: PUBLIC_URL, events: ["task.created"] }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST", message: /per-project limit of 1/ });
+      expect(actor.prisma.webhook.create).not.toHaveBeenCalled();
+    });
+
+    it("allows creation below the cap and writes the secret under the rotation lock", async () => {
+      vi.stubEnv("WEBHOOK_MAX_WEBHOOKS_PER_PROJECT", "1");
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      actor.prisma.webhook.count.mockResolvedValue(0);
+      actor.prisma.webhook.create.mockImplementation(async (args: { data: Record<string, unknown> }) => ({
+        id: "new-webhook-id",
+        url: args.data.url,
+        events: args.data.events,
+        isEnabled: args.data.isEnabled,
+        createdByUserId: args.data.createdByUserId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }));
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      const result = (await caller.create({
+        projectId: PROJECT_A,
+        url: PUBLIC_URL,
+        events: ["task.created"],
+      })) as { secret: string };
+      expect(result.secret.startsWith("whsec_")).toBe(true);
+      // withSecretRotationLock wraps the write in a transaction.
+      expect(actor.prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("manager with automation_manage", () => {
     it("create returns the plaintext secret exactly once and never persists it", async () => {
       const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });

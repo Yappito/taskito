@@ -1,24 +1,33 @@
 import crypto from "node:crypto";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import type { ProjectPermission } from "@prisma/client";
 
 import {
   assertOutboundUrlAllowed,
   OutboundUrlValidationError,
 } from "@/lib/ai-provider-validation";
 import { encryptSecret } from "@/lib/secret-crypto";
+import { maxWebhooksPerProject } from "@/lib/webhook-limits";
 import { WEBHOOK_EVENTS } from "@/lib/webhook-events";
 import { requireProjectAccess } from "@/server/authz";
+import { withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
 import { deliverWebhook, sendWebhookPing } from "@/server/services/webhooks/dispatcher";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 
 /**
- * Outbound webhook management. Every procedure requires the project-scoped
- * `automation_manage` permission — the same gate the automation settings use,
- * since webhook URLs are execution-bearing integration endpoints.
+ * Outbound webhook management. Webhook endpoints receive task metadata on
+ * every matching event, so every procedure requires the project-scoped
+ * `automation_manage` permission AND `task_read`: a principal that can manage
+ * automations but has been denied task read would otherwise register an
+ * endpoint and keep receiving task metadata it can no longer see itself
+ * (confused-deputy exfiltration, review finding 8). Delivery-time fan-out
+ * re-checks the creator in the dispatcher.
  */
+
+const WEBHOOK_MANAGE_PERMISSIONS: ProjectPermission[] = ["automation_manage", "task_read"];
 
 const webhookUrlSchema = z.string().trim().min(1).max(2048);
 
@@ -66,7 +75,7 @@ async function validateWebhookUrl(url: string) {
   }
 }
 
-/** Loads a webhook for the given id and requires `automation_manage` on its project. */
+/** Loads a webhook for the given id and requires webhook-manage permissions on its project. */
 async function requireWebhookAccess(
   prisma: PrismaClient,
   userId: string,
@@ -80,7 +89,7 @@ async function requireWebhookAccess(
     throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found" });
   }
   await requireProjectAccess(prisma, userId, webhook.projectId, {
-    permission: "automation_manage",
+    permissions: WEBHOOK_MANAGE_PERMISSIONS,
   });
   return webhook;
 }
@@ -108,21 +117,36 @@ export const webhookRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permissions: WEBHOOK_MANAGE_PERMISSIONS });
       await validateWebhookUrl(input.url);
 
+      // Resource cap: bound the per-project fan-out surface before adding one more.
+      const existingCount = Number((await ctx.prisma.webhook.count({ where: { projectId: input.projectId } })) ?? 0);
+      const limit = maxWebhooksPerProject();
+      if (existingCount >= limit) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `This project already has ${existingCount} webhook(s), which meets the per-project limit of ${limit}. Remove one before adding another.`,
+        });
+      }
+
       const secret = `whsec_${crypto.randomBytes(24).toString("hex")}`;
-      const webhook = await ctx.prisma.webhook.create({
-        data: {
-          projectId: input.projectId,
-          url: input.url,
-          events: input.events,
-          isEnabled: input.isEnabled,
-          createdByUserId: ctx.session.user.id,
-          encryptedSecret: encryptSecret(secret),
-        },
-        select: webhookSelect,
-      });
+      // The encryptedSecret is written under the shared rotation lock so a
+      // concurrent master-key rotation can neither miss this row nor stomp it
+      // with stale ciphertext (same guarantee as the AI/OIDC/S3 secret writers).
+      const webhook = await withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.webhook.create({
+          data: {
+            projectId: input.projectId,
+            url: input.url,
+            events: input.events,
+            isEnabled: input.isEnabled,
+            createdByUserId: ctx.session.user.id,
+            encryptedSecret: encryptSecret(secret),
+          },
+          select: webhookSelect,
+        }),
+      );
 
       return { ...webhook, secret };
     }),
@@ -173,7 +197,7 @@ export const webhookRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found" });
       }
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, webhook.projectId, {
-        permission: "automation_manage",
+        permissions: WEBHOOK_MANAGE_PERMISSIONS,
       });
 
       const result = await sendWebhookPing(ctx.prisma, {
@@ -221,7 +245,7 @@ export const webhookRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Delivery not found" });
       }
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, delivery.webhook.projectId, {
-        permission: "automation_manage",
+        permissions: WEBHOOK_MANAGE_PERMISSIONS,
       });
       if (!delivery.webhook.isEnabled) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Webhook is disabled" });
@@ -235,6 +259,7 @@ export const webhookRouter = createTRPCRouter({
           responseCode: null,
           lastError: null,
           nextAttemptAt: new Date(),
+          leaseExpiresAt: null,
         },
       });
 
