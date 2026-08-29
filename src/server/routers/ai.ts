@@ -33,7 +33,9 @@ import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 import { AiParseTaskError, parseTaskFromText } from "@/server/services/ai/parse-task";
 import {
   AiSummarizeError,
+  TASK_SUMMARY_CACHE_VERSION,
   buildTaskBreakdownUserMessage,
+  computeTaskSummaryContentHash,
   readStoredTaskAiSummary,
   summarizeTask as summarizeTaskWithProvider,
 } from "@/server/services/ai/summarize";
@@ -160,6 +162,44 @@ async function getEffectiveProjectAiPolicy(prisma: PrismaClient, projectId: stri
   };
 }
 
+/** Effective shape of getEffectiveProjectAiPolicy (avoids a forward type ref). */
+type EffectiveProjectAiPolicy = Awaited<ReturnType<typeof getEffectiveProjectAiPolicy>>;
+
+type PolicyScopeCheckProvider = {
+  scope: "user" | "project" | "shared";
+  ownerUserId: string | null;
+  projectId: string | null;
+  isEnabled: boolean;
+};
+
+/**
+ * CITADEL-amv (finding 12): the single policy clamp that decides whether a
+ * provider record may be used for one-shot AI features in a project. Enforces
+ * exactly the same semantics as the fallback scope scan below and
+ * getUsableProviderForProjectOrThrow: the provider must be enabled, its scope
+ * must be allowed by the project policy, and a project-scoped provider must
+ * belong to THIS project (a default pointing at another project's provider is
+ * never usable). A user-scoped provider additionally must be owned by the
+ * caller.
+ */
+function isProviderUsableUnderPolicy(
+  provider: PolicyScopeCheckProvider | null | undefined,
+  policy: Pick<EffectiveProjectAiPolicy, "allowUserProviders" | "allowProjectProviders" | "allowSharedProviders">,
+  userId: string,
+  projectId: string
+): boolean {
+  if (!provider || !provider.isEnabled) {
+    return false;
+  }
+  if (provider.scope === "user") {
+    return policy.allowUserProviders && provider.ownerUserId === userId;
+  }
+  if (provider.scope === "project") {
+    return policy.allowProjectProviders && provider.projectId === projectId;
+  }
+  return policy.allowSharedProviders;
+}
+
 // CITADEL-d77.32 (smart quick-add + task summaries): resolve a usable provider
 // for one-shot AI features — the project's default provider first, then any
 // enabled provider visible to the user under the project policy.
@@ -171,13 +211,12 @@ async function findDefaultOrFirstUsableAiProvider(
   const policy = await getEffectiveProjectAiPolicy(prisma, projectId);
   if (policy.defaultProviderId) {
     const provider = await prisma.aiProviderConnection.findUnique({ where: { id: policy.defaultProviderId } });
-    if (
-      provider
-      && provider.isEnabled
-      && (provider.scope === "project"
-        || provider.scope === "shared"
-        || (provider.scope === "user" && policy.allowUserProviders && provider.ownerUserId === userId))
-    ) {
+    // CITADEL-amv (finding 12): the default fast path previously accepted any
+    // enabled project/shared provider without checking the allow flags or the
+    // provider's project association. It now applies the exact same clamps as
+    // the fallback scan / getUsableProviderForProjectOrThrow; an unusable
+    // default falls through to the policy-filtered fallback scan.
+    if (isProviderUsableUnderPolicy(provider, policy, userId, projectId)) {
       return provider;
     }
   }
@@ -541,6 +580,16 @@ export const aiRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "ai_manage" });
 
+      // CITADEL-amv (finding 12): never install a project default provider
+      // while project providers are disallowed by the current policy — the
+      // default would be unusable (and is now also clamped at read time).
+      if (input.isDefault) {
+        const policy = await ctx.prisma.aiProjectPolicy.findUnique({ where: { projectId: input.projectId } });
+        if (policy && !policy.allowProjectProviders) {
+          throw new Error("Project providers must be allowed to use a project default provider");
+        }
+      }
+
       const normalizedBaseUrl = validateAiProviderBaseUrl(input.baseUrl);
       const normalizedHeaders = normalizeAiProviderHeaders(input.defaultHeaders);
       const model = normalizeAiProviderModel(input.model);
@@ -604,6 +653,16 @@ export const aiRouter = createTRPCRouter({
       const model = input.model ? normalizeAiProviderModel(input.model) : undefined;
       const defaultHeaders = input.defaultHeaders ? normalizeAiProviderHeaders(input.defaultHeaders) : undefined;
       const secret = input.secret?.trim();
+
+      // CITADEL-amv (finding 12): never flag a project provider as default
+      // while project providers are disallowed by the project's policy —
+      // mirror of the updateProjectPolicy rejection and the create path.
+      if (input.isDefault && provider.scope === "project" && provider.projectId) {
+        const policy = await ctx.prisma.aiProjectPolicy.findUnique({ where: { projectId: provider.projectId } });
+        if (policy && !policy.allowProjectProviders) {
+          throw new Error("Project providers must be allowed to use a project default provider");
+        }
+      }
 
       if (input.isDefault && provider.scope !== "shared") {
         await ctx.prisma.aiProviderConnection.updateMany({
@@ -1303,8 +1362,9 @@ export const aiRouter = createTRPCRouter({
       }
     }),
 
-  // Task/thread summary. Cached in Task.aiSummary keyed on the task's
-  // updatedAt and the newest comment time; `force: true` bypasses the cache.
+  // Task/thread summary. Cached in Task.aiSummary keyed on a hash of the
+  // exact serialized task snapshot (content-hash CAS, CITADEL-amv);
+  // `force: true` bypasses the cache.
   summarizeTask: protectedProcedure
     .input(z.object({ taskId: z.string().cuid(), force: z.boolean().optional() }))
     .mutation(async ({ ctx, input }) => {
@@ -1329,17 +1389,19 @@ export const aiRouter = createTRPCRouter({
         throw new Error("Task not found");
       }
 
-      const taskUpdatedAtIso = task.updatedAt.toISOString();
-      const latestCommentIso = task.comments[0] ? task.comments[0].createdAt.toISOString() : null;
+      // CITADEL-amv (finding 11): cache validity is keyed on a hash of the
+      // exact serialized snapshot the provider summarizes — not on
+      // task.updatedAt. The hash covers the comment thread (which does not
+      // bump updatedAt) and cannot be fooled by updatedAt restore tricks.
+      const contentHash = computeTaskSummaryContentHash(task);
 
       const stored = readStoredTaskAiSummary(task.aiSummary);
       if (
         !input.force
         && stored
-        && stored.forUpdatedAt === taskUpdatedAtIso
-        && stored.forLatestCommentAt === latestCommentIso
+        && stored.forContentHash === contentHash
       ) {
-        return { ...stored.result, generatedAt: stored.generatedAt, cached: true };
+        return { ...stored.result, generatedAt: stored.generatedAt, cached: true, persisted: true };
       }
 
       const rateLimit = consumeRateLimit("ai-chat", ctx.session.user.id, {
@@ -1367,24 +1429,51 @@ export const aiRouter = createTRPCRouter({
       }
 
       const generatedAt = new Date().toISOString();
-      await ctx.prisma.task.update({
-        where: { id: input.taskId },
+
+      // CITADEL-amv (finding 11): the provider call above can take a long
+      // time. Instead of unconditionally writing the summary and restoring
+      // the pre-call updatedAt (which rolled concurrent edits BACK and then
+      // served the stale summary off the restored cache key), the write is a
+      // compare-and-swap: it only lands while the task row still carries the
+      // exact updatedAt AND the exact newest comment observed at read time.
+      // On count 0 the task (or thread) changed under us — the just-computed
+      // summary is discarded without persisting and returned as uncached;
+      // the next request recomputes against the fresh content. updatedAt is
+      // set to its own current value to suppress the Prisma @updatedAt bump
+      // (storing a summary is not a task edit) — the CAS guarantees this is
+      // never a rollback. Content-hash keying means even a racing write
+      // could not serve a stale entry afterwards: validity is re-checked
+      // against current content on every read.
+      const latestComment = task.comments[0] ?? null;
+      const cacheWrite = await ctx.prisma.task.updateMany({
+        where: {
+          id: input.taskId,
+          updatedAt: task.updatedAt,
+          comments: latestComment
+            ? {
+                some: { createdAt: latestComment.createdAt },
+                none: { createdAt: { gt: latestComment.createdAt } },
+              }
+            : { none: {} },
+        },
         data: {
           aiSummary: {
+            v: TASK_SUMMARY_CACHE_VERSION,
             generatedAt,
-            forUpdatedAt: taskUpdatedAtIso,
-            forLatestCommentAt: latestCommentIso,
+            forContentHash: contentHash,
             result,
           } as unknown as Prisma.InputJsonValue,
-          // Storing the summary is not a task edit: keep updatedAt as-is
-          // (Prisma bumps @updatedAt on every update otherwise), both so the
-          // forUpdatedAt cache key can ever match again and so the task does
-          // not surface as freshly modified.
           updatedAt: task.updatedAt,
         },
       });
 
-      return { ...result, generatedAt, cached: false };
+      if (cacheWrite.count === 0) {
+        // The task was edited (or its thread changed) while the model ran:
+        // never persist the stale summary, never move updatedAt backward.
+        return { ...result, generatedAt, cached: false, persisted: false };
+      }
+
+      return { ...result, generatedAt, cached: false, persisted: true };
     }),
 
   // "Break down into subtasks": opens a task-scoped AI conversation seeded
