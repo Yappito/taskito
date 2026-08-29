@@ -93,9 +93,10 @@ describe("ai-provider-validation", () => {
     expect(validateAiProviderBaseUrl("http://localhost:11434")).toBe("http://localhost:11434");
   });
 
-  it("accepts private hosts that are present in the allowlist", () => {
-    process.env.AI_PROVIDER_HOST_ALLOWLIST = "10.0.0.5";
+  it("accepts private hosts when the allowlist contains an exact `host:port` entry", () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "10.0.0.5:443,localhost:11434";
     expect(validateAiProviderBaseUrl("https://10.0.0.5/v1")).toBe("https://10.0.0.5/v1");
+    expect(validateAiProviderBaseUrl("http://localhost:11434")).toBe("http://localhost:11434");
     // With a non-empty allowlist, non-allowlisted hosts are denied by the allowlist gate.
     expect(() => validateAiProviderBaseUrl("https://192.168.1.1/v1")).toThrow(/not present in the allowlist/);
   });
@@ -104,6 +105,36 @@ describe("ai-provider-validation", () => {
     process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com";
     expect(() => validateAiProviderBaseUrl("https://10.0.0.1/v1")).toThrow(/not present in the allowlist/);
     expect(validateAiProviderBaseUrl("https://api.example.com/v1")).toBe("https://api.example.com/v1");
+  });
+
+  it("rejects private hosts that only have a bare (port-less) allowlist entry", () => {
+    // A bare `localhost` entry used to open every TCP port on the host.
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost";
+    expect(() => validateAiProviderBaseUrl("http://localhost:11434/")).toThrow(/private, loopback, or link-local/);
+  });
+
+  it("still lets bare entries match any port on public hosts", () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com";
+    expect(validateAiProviderBaseUrl("http://api.example.com:9000/v1")).toBe("http://api.example.com:9000/v1");
+  });
+
+  it("matches allowlist `host:port` entries against the URL's effective port", () => {
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost:11434";
+    expect(validateAiProviderBaseUrl("http://localhost:11434")).toBe("http://localhost:11434");
+    expect(() => validateAiProviderBaseUrl("http://localhost:8080/v1")).toThrow(/not present in the allowlist/);
+    // https defaults to port 443, so a `:443` entry accepts it implicitly.
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com:443";
+    expect(validateAiProviderBaseUrl("https://api.example.com/v1")).toBe("https://api.example.com/v1");
+    expect(() => validateAiProviderBaseUrl("http://api.example.com/v1")).toThrow(/not present in the allowlist/);
+  });
+
+  it("drops malformed allowlist entries and still applies the valid ones", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.AI_PROVIDER_HOST_ALLOWLIST = "api.example.com:not-a-port,api.example.com";
+    expect(validateAiProviderBaseUrl("https://api.example.com/v1")).toBe("https://api.example.com/v1");
+    expect(() => validateAiProviderBaseUrl("https://other.example.com/v1")).toThrow(/not present in the allowlist/);
+    expect(warnSpy).toHaveBeenCalledOnce();
+    warnSpy.mockRestore();
   });
 
   it("accepts an https public host", () => {
@@ -174,11 +205,20 @@ describe("ai-provider-validation", () => {
       await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).resolves.toBe("http://localhost:11434");
     });
 
-    it("accepts a private host when the host is allowlisted", async () => {
-      process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost";
+    it("accepts a private host when the allowlist has an exact `host:port` entry", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost:11434";
       mockResolvedAddresses([{ address: "127.0.0.1", family: 4 }]);
 
       await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).resolves.toBe("http://localhost:11434");
+    });
+
+    it("no longer authorizes a private host via a bare allowlist entry", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost";
+      mockResolvedAddresses([{ address: "127.0.0.1", family: 4 }]);
+
+      await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).rejects.toThrow(
+        /private, loopback, or link-local/,
+      );
     });
 
     it("rejects a private host when the allowlist contains only other hosts", async () => {
@@ -212,6 +252,169 @@ describe("ai-provider-validation", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
 
       vi.unstubAllGlobals();
+    });
+  });
+
+  describe("fetchAiProvider redirects (manual hop-by-hop validation)", () => {
+    interface RecordedFetch {
+      url: string;
+      init: RequestInit | undefined;
+      method: string;
+      headers: Record<string, string>;
+      rawBody: string | undefined;
+    }
+
+    let restoreFake: (() => void) | undefined;
+
+    afterEach(() => {
+      if (restoreFake) {
+        restoreFake();
+        restoreFake = undefined;
+      }
+    });
+
+    function installRecordingFetch(handlers: Array<() => Response>) {
+      const requests: RecordedFetch[] = [];
+      const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        const headers: Record<string, string> = {};
+        if (init?.headers) {
+          new Headers(init.headers).forEach((value, key) => {
+            headers[key.toLowerCase()] = value;
+          });
+        }
+        const request: RecordedFetch = {
+          url,
+          init,
+          method: (init?.method ?? "GET").toUpperCase(),
+          headers,
+          rawBody: typeof init?.body === "string" ? init.body : undefined,
+        };
+        requests.push(request);
+        const handler = handlers[requests.length - 1];
+        if (!handler) {
+          throw new Error(`unexpected fetch #${requests.length} to ${url}`);
+        }
+        return handler();
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+      return { requests, fetchSpy, restore: () => vi.unstubAllGlobals() };
+    }
+
+    it("rejects a 307 redirect to a target outside the allowlist before the second fetch", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "127.0.0.1:8787";
+      mockResolvedAddresses([{ address: "127.0.0.1", family: 4 }]);
+
+      const fake = installRecordingFetch([
+        () => new Response(null, { status: 307, headers: { location: "http://redirect-target.example/v1" } }),
+        () => {
+          throw new Error("second hop must never be fetched");
+        },
+      ]);
+      restoreFake = fake.restore;
+
+      await expect(
+        fetchAiProvider("http://127.0.0.1:8787/v1", {
+          method: "POST",
+          headers: { "x-api-key": "sk-secret", "content-type": "application/json" },
+          body: JSON.stringify({ messages: [] }),
+        }),
+      ).rejects.toThrow(/redirected to a disallowed target/);
+      expect(fake.requests).toHaveLength(1);
+      expect(fake.requests[0].headers["x-api-key"]).toBe("sk-secret");
+    });
+
+    it("rejects a 307 redirect whose target resolves to a private address before the second fetch", async () => {
+      // A validated public URL must never be allowed to hand over (307 keeps
+      // the method and body) to a host that resolves into private address space.
+      lookupMock
+        .mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }])
+        .mockResolvedValue([{ address: "10.0.0.9", family: 4 }]);
+
+      const fake = installRecordingFetch([
+        () => new Response(null, { status: 307, headers: { location: "http://redirect-target.example/v1" } }),
+        () => {
+          throw new Error("second hop must never be fetched");
+        },
+      ]);
+      restoreFake = fake.restore;
+
+      await expect(
+        fetchAiProvider("http://api.example.com/v1", { method: "POST", body: "x" }),
+      ).rejects.toThrow(/redirected to a disallowed target/);
+      expect(fake.requests).toHaveLength(1);
+    });
+
+    it("follows a 302 to an allowlisted public origin as a GET without credential headers", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "127.0.0.1:8787,api.example.com";
+      mockResolvedAddresses([{ address: "93.184.216.34", family: 4 }]);
+
+      const fake = installRecordingFetch([
+        () => new Response(null, { status: 302, headers: { location: "http://api.example.com/v1" } }),
+        () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
+      ]);
+      restoreFake = fake.restore;
+
+      const response = await fetchAiProvider("http://127.0.0.1:8787/v1/test", {
+        method: "POST",
+        headers: { authorization: "Bearer sk-secret", "x-api-key": "sk-secret", "content-type": "application/json" },
+        body: JSON.stringify({ messages: [] }),
+      });
+      expect(response.ok).toBe(true);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+
+      expect(fake.requests).toHaveLength(2);
+      expect(fake.requests[0].method).toBe("POST");
+      expect(fake.requests[0].rawBody).toBe(JSON.stringify({ messages: [] }));
+      expect(fake.requests[1].method).toBe("GET");
+      expect(fake.requests[1].rawBody).toBeUndefined();
+      expect(fake.requests[1].headers["authorization"]).toBeUndefined();
+      expect(fake.requests[1].headers["x-api-key"]).toBeUndefined();
+    });
+
+    it("still re-sends the body for a 307 to an allowlisted target", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "127.0.0.1:8787,api.example.com";
+      mockResolvedAddresses([{ address: "93.184.216.34", family: 4 }]);
+
+      const fake = installRecordingFetch([
+        () => new Response(null, { status: 307, headers: { location: "http://api.example.com/v1" } }),
+        () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }),
+      ]);
+      restoreFake = fake.restore;
+
+      const response = await fetchAiProvider("http://127.0.0.1:8787/v1/test", {
+        method: "POST",
+        headers: { authorization: "Bearer sk-secret", "x-api-key": "sk-secret" },
+        body: JSON.stringify({ messages: [] }),
+      });
+      expect(response.ok).toBe(true);
+
+      expect(fake.requests).toHaveLength(2);
+      expect(fake.requests[1].method).toBe("POST");
+      expect(fake.requests[1].rawBody).toBe(JSON.stringify({ messages: [] }));
+      // Cross-origin: credentials are stripped even when the method/body survive.
+      expect(fake.requests[1].headers["authorization"]).toBeUndefined();
+      expect(fake.requests[1].headers["x-api-key"]).toBeUndefined();
+    });
+
+    it("rejects a redirect loop after the configured hop budget", async () => {
+      process.env.AI_PROVIDER_HOST_ALLOWLIST = "127.0.0.1:8787";
+      mockResolvedAddresses([{ address: "127.0.0.1", family: 4 }]);
+
+      const fake = installRecordingFetch([
+        () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8787/loop" } }),
+        () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8787/loop" } }),
+        () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8787/loop" } }),
+        () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8787/loop" } }),
+        () => {
+          throw new Error("fifth hop must never be fetched");
+        },
+      ]);
+      restoreFake = fake.restore;
+
+      await expect(fetchAiProvider("http://127.0.0.1:8787/v1/start")).rejects.toThrow(/redirected too many times/);
+      // Initial request + 3 followed redirects; the 5th hop is never attempted.
+      expect(fake.requests).toHaveLength(4);
     });
   });
 

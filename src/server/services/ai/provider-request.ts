@@ -149,8 +149,11 @@ export class AiProviderError extends Error {
   readonly code: string;
   readonly retryable: boolean;
 
-  constructor(message: string, options: { status?: number | null; code: string; retryable: boolean }) {
-    super(message);
+  constructor(
+    message: string,
+    options: { status?: number | null; code: string; retryable: boolean; cause?: unknown },
+  ) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "AiProviderError";
     this.status = options.status ?? null;
     this.code = options.code;
@@ -312,11 +315,97 @@ function isAbortLikeError(error: unknown) {
  * global fetch does not expose a public Agent/dispatcher API and the npm
  * `undici` package is not a dependency, so `new Agent({ connect: { lookup } })`
  * is unavailable here. Re-validating immediately before the request keeps the
- * DNS-rebinding window minimal.
+ * DNS-rebinding window minimal (and the same re-validation covers every hop of
+ * a redirect chain, see MAX_PROVIDER_REDIRECT_HOPS below).
+ */
+/**
+ * Maximum number of 3xx redirects `fetchAiProvider` will follow. Re-validating
+ * every hop is not free (DNS + policy checks per hop), so chains are bounded.
+ */
+const MAX_PROVIDER_REDIRECT_HOPS = 3;
+
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+
+/** Statuses that collapse the request into a plain GET without a body. */
+const REDIRECT_METHOD_RESET_STATUS_CODES = new Set([301, 302, 303]);
+
+/**
+ * Credential-bearing headers: they are never re-sent to a different origin.
+ * A redirect can otherwise be used to exfiltrate the provider API key to an
+ * attacker-controlled host (307/308 preserve the method, body, and headers).
+ */
+const SENSITIVE_REDIRECT_HEADERS = ["authorization", "proxy-authorization", "x-api-key", "cookie"] as const;
+
+/**
+ * Follows provider redirects manually so every hop is re-validated against the
+ * SSRF policy before it is requested:
+ *
+ * - `redirect: "manual"` (never the default `"follow"`, which would happily
+ *   take a validated public URL straight to `127.0.0.1`, RFC1918 space, or a
+ *   cloud metadata endpoint);
+ * - `assertAiProviderBaseUrlFetchAllowed` runs on every resolved hop;
+ * - at most {@link MAX_PROVIDER_REDIRECT_HOPS} redirects are followed;
+ * - Authorization / x-api-key / cookie / proxy-authorization are stripped when
+ *   the redirect crosses to a different origin;
+ * - only 307/308 re-send the request body (and method); 301/302/303 become a
+ *   plain GET, so the body can never be replayed elsewhere.
  */
 export async function fetchAiProvider(url: string, init?: RequestInit): Promise<Response> {
   const validatedUrl = await assertAiProviderBaseUrlFetchAllowed(url);
-  return fetch(validatedUrl, init);
+
+  let method = (init?.method ?? "GET").toUpperCase();
+  let currentUrl = validatedUrl;
+  let currentOrigin = new URL(validatedUrl).origin;
+  const headers = new Headers(init?.headers);
+  let body = init?.body;
+
+  for (let followedRedirects = 0; ; followedRedirects += 1) {
+    if (followedRedirects > MAX_PROVIDER_REDIRECT_HOPS) {
+      throw new AiProviderError(
+        `Provider redirected too many times (limit ${MAX_PROVIDER_REDIRECT_HOPS} redirects)`,
+        { code: "too_many_redirects", retryable: false },
+      );
+    }
+
+    const response = await fetch(currentUrl, { ...init, redirect: "manual", method, headers, body });
+
+    if (!REDIRECT_STATUS_CODES.has(response.status)) {
+      return response;
+    }
+
+    const locationHeader = response.headers.get("location");
+    if (!locationHeader) {
+      // A 3xx without Location is a terminal response, not a redirect.
+      return response;
+    }
+
+    const redirectUrl = new URL(locationHeader, currentUrl).toString();
+    let validatedRedirectUrl: string;
+    try {
+      validatedRedirectUrl = await assertAiProviderBaseUrlFetchAllowed(redirectUrl);
+    } catch (error) {
+      throw new AiProviderError("Provider redirected to a disallowed target", {
+        code: "redirect_disallowed",
+        retryable: false,
+        cause: error,
+      });
+    }
+
+    if (REDIRECT_METHOD_RESET_STATUS_CODES.has(response.status)) {
+      method = "GET";
+      body = undefined;
+    }
+
+    const nextOrigin = new URL(validatedRedirectUrl).origin;
+    if (nextOrigin !== currentOrigin) {
+      for (const headerName of SENSITIVE_REDIRECT_HEADERS) {
+        headers.delete(headerName);
+      }
+    }
+
+    currentOrigin = nextOrigin;
+    currentUrl = validatedRedirectUrl;
+  }
 }
 
 export function normalizeAiProviderRequestError(error: unknown, timeoutMs: number) {
@@ -326,13 +415,18 @@ export function normalizeAiProviderRequestError(error: unknown, timeoutMs: numbe
       error.name === "TimeoutError" ||
       /aborted due to timeout/i.test(error.message)
     ) {
-      return new Error(`AI provider request timed out after ${Math.ceil(timeoutMs / 1000)} seconds`);
+      // Typed so downstream consumers (e.g. the provider test summary) treat
+      // this fixed, Taskito-authored message as a known safe error class.
+      return new AiProviderError(`AI provider request timed out after ${Math.ceil(timeoutMs / 1000)} seconds`, {
+        code: "timeout",
+        retryable: false,
+      });
     }
 
     return error;
   }
 
-  return new Error("AI provider request failed");
+  return new AiProviderError("AI provider request failed", { code: "provider_request_failed", retryable: false });
 }
 
 /**
@@ -359,7 +453,12 @@ export async function fetchAiProviderWithRetry(
     try {
       response = await fetchAiProvider(url, init);
     } catch (error) {
-      const canRetry = attempt < maxAttempts && init?.signal?.aborted !== true && !isAbortLikeError(error);
+      const typedNonRetryable = error instanceof AiProviderError && !error.retryable;
+      const canRetry =
+        attempt < maxAttempts &&
+        init?.signal?.aborted !== true &&
+        !isAbortLikeError(error) &&
+        !typedNonRetryable;
       if (!canRetry) {
         throw error;
       }

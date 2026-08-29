@@ -169,7 +169,8 @@ const FAKE_PROVIDER_ENV_KEYS = [
 
 /**
  * Allows the numeric-literal fake provider host through the SSRF checks
- * (allowlisted literal IP: no DNS loop, no private-address rejection) and
+ * (allowlisted literal IP with an explicit `host:port` entry: no DNS loop, no
+ * private-address rejection) and clears the other AI provider env vars unless
  * clears the other AI provider env vars unless a value is supplied.
  * Returns a cleanup that restores the previous environment.
  */
@@ -179,7 +180,7 @@ export function stubFakeProviderEnv(overrides: Partial<Record<(typeof FAKE_PROVI
     saved.set(key, process.env[key]);
   }
 
-  vi.stubEnv("AI_PROVIDER_HOST_ALLOWLIST", "127.0.0.1");
+  vi.stubEnv("AI_PROVIDER_HOST_ALLOWLIST", overrides.AI_PROVIDER_HOST_ALLOWLIST ?? "127.0.0.1:8787");
   for (const key of FAKE_PROVIDER_ENV_KEYS) {
     if (key === "AI_PROVIDER_HOST_ALLOWLIST") continue;
     const override = overrides[key];

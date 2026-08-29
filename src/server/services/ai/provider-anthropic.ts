@@ -152,7 +152,18 @@ export async function completeWithAnthropicProviderStructured(
       throw await aiProviderErrorFromResponse(response);
     }
 
-    const payload = (await response.json()) as AnthropicMessageResponse;
+    let payload: AnthropicMessageResponse;
+    try {
+      payload = (await response.json()) as AnthropicMessageResponse;
+    } catch {
+      // JSON parse failures must never surface: V8's SyntaxError message embeds
+      // fragments of the response body, which could leak upstream secrets.
+      throw new AiProviderError("Provider returned a malformed response body", {
+        status: response.status,
+        code: "malformed_response_body",
+        retryable: false,
+      });
+    }
     return {
       content: payload.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n").trim() ?? "",
       toolCalls: payload.content?.flatMap((part) => part.type === "tool_use" && part.name
