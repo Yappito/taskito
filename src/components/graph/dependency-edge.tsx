@@ -9,12 +9,24 @@ interface DependencyEdgeProps {
   highlighted?: boolean;
 }
 
-/** Colour palette per link type — [main, light] */
+/** Token colours per link type — [main, lighter gradient stop derived with color-mix] */
 const linkTypeColors: Record<string, [string, string]> = {
-  blocks: ["#ef4444", "#fca5a5"],
-  relates: ["#6b7280", "#d1d5db"],
-  parent: ["#8b5cf6", "#c4b5fd"],
-  child: ["#6366f1", "#a5b4fc"],
+  blocks: [
+    "var(--color-edge-blocks)",
+    "color-mix(in srgb, var(--color-edge-blocks) 55%, transparent)",
+  ],
+  relates: [
+    "var(--color-edge-relates)",
+    "color-mix(in srgb, var(--color-edge-relates) 55%, transparent)",
+  ],
+  parent: [
+    "var(--color-edge-parent)",
+    "color-mix(in srgb, var(--color-edge-parent) 55%, transparent)",
+  ],
+  child: [
+    "var(--color-edge-child)",
+    "color-mix(in srgb, var(--color-edge-child) 55%, transparent)",
+  ],
 };
 
 /** Stroke width per link type */

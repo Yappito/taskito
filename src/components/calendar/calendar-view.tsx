@@ -3,7 +3,8 @@
 import { useMemo, useState } from "react";
 
 import { TaskDetail } from "@/components/task/task-detail";
-import { Button } from "@/components/ui/button";
+import { Alert, Button, EmptyState, Skeleton } from "@/components/ui";
+import { tagChipBackground } from "@/components/ui/tag-badge";
 import { trpc } from "@/lib/trpc-client";
 import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
@@ -34,7 +35,7 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
   const monthStart = useMemo(() => startOfMonth(cursorDate), [cursorDate]);
   const gridStart = useMemo(() => addDays(monthStart, -monthStart.getDay()), [monthStart]);
   const gridEnd = useMemo(() => addDays(gridStart, 42), [gridStart]);
-  const { data, isLoading } = trpc.task.list.useQuery({ projectId, dueDateFrom: addDays(gridStart, -1), dueDateTo: addDays(gridEnd, 1), includeArchived: true, limit: 100 });
+  const { data, isLoading, error } = trpc.task.list.useQuery({ projectId, dueDateFrom: addDays(gridStart, -1), dueDateTo: addDays(gridEnd, 1), includeArchived: true, limit: 100 });
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data]);
   const tasksByDate = useMemo(() => {
     const groups = new Map<string, TaskCardData[]>();
@@ -62,23 +63,37 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
           <Button size="sm" variant="outline" onClick={() => setCursorDate(new Date(cursorDate.getFullYear(), cursorDate.getMonth() + 1, 1))}>Next</Button>
         </div>
       </div>
-      <div className="grid grid-cols-7 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--color-border)" }}>
+      <div className="grid grid-cols-7 overflow-hidden rounded-2xl border" role="grid" aria-label={`Calendar of task due dates, ${cursorDate.toLocaleString(undefined, { month: "long", year: "numeric" })}`} style={{ borderColor: "var(--color-border)" }}>
         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
-          <div key={day} className="border-b px-3 py-2 text-xs font-semibold" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-muted)" }}>{day}</div>
+          <div key={day} role="columnheader" className="border-b px-3 py-2 text-xs font-semibold" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-muted)", color: "var(--color-text-muted)" }}>{day}</div>
         ))}
         {days.map((day) => {
           const key = dateKey(day);
           const dayTasks = tasksByDate.get(key) ?? [];
           const outside = day.getMonth() !== cursorDate.getMonth();
           return (
-            <div key={key} className="min-h-32 border-r border-b p-2" style={{ borderColor: "var(--color-border)", backgroundColor: outside ? "var(--color-bg-muted)" : "var(--color-surface)" }}>
+            <div
+              key={key}
+              role="gridcell"
+              aria-label={day.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+              className="min-h-32 border-r border-b p-2"
+              style={{ borderColor: "var(--color-border)", backgroundColor: outside ? "var(--color-bg-muted)" : "var(--color-surface)" }}
+            >
               <div className="text-xs font-medium" style={{ color: outside ? "var(--color-text-muted)" : "var(--color-text)" }}>{day.getDate()}</div>
               <div className="mt-2 space-y-1">
                 {dayTasks.slice(0, 5).map((task) => (
-                  <button key={task.id} onClick={() => setSelectedTaskId(task.id)} className="block w-full truncate rounded-lg px-2 py-1 text-left text-xs" style={{ backgroundColor: `${task.status.color}20`, color: "var(--color-text)" }}>
-                    <span className="mr-1 inline-block h-2 w-2 rounded-full" style={{ backgroundColor: task.status.color }} />
-                    {task.title}
-                  </button>
+                  <Button
+                    key={task.id}
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedTaskId(task.id)}
+                    aria-label={`Task due ${day.toLocaleDateString(undefined, { month: "short", day: "numeric" })}: ${task.title}`}
+                    className="h-auto block w-full justify-start truncate rounded-lg px-2 py-1 text-left text-xs"
+                    style={{ backgroundColor: tagChipBackground(task.status.color), color: "var(--color-text)" }}
+                  >
+                    <span className="mr-1 inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: task.status.color }} />
+                    <span className="block min-w-0 truncate">{task.title}</span>
+                  </Button>
                 ))}
                 {dayTasks.length > 5 && <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>+{dayTasks.length - 5} more</div>}
               </div>
@@ -86,7 +101,25 @@ export function CalendarView({ projectId, statuses }: CalendarViewProps) {
           );
         })}
       </div>
-      {isLoading && <p className="mt-4 text-sm" style={{ color: "var(--color-text-muted)" }}>Loading calendar...</p>}
+      {error ? (
+        <div className="mt-4">
+          <Alert variant="danger" title="Couldn't load tasks.">
+            {error.message || "Please try again later."}
+          </Alert>
+        </div>
+      ) : isLoading ? (
+        <div className="mt-4 flex flex-col gap-2" aria-label="Loading calendar">
+          <Skeleton className="h-6 w-48" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      ) : tasks.length === 0 ? (
+        <EmptyState
+          title="No tasks due in this month."
+          description="Tasks with a due date in the visible month appear on their day."
+          className="mt-4"
+        />
+      ) : null}
       {selectedTaskId && <TaskDetail taskId={selectedTaskId} statuses={statuses} onClose={() => setSelectedTaskId(null)} />}
     </div>
   );

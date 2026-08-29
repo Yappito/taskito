@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { TaskDetail } from "@/components/task/task-detail";
+import { Alert, Button, EmptyState, Skeleton } from "@/components/ui";
 import { trpc } from "@/lib/trpc-client";
 import type { TaskCardData, TaskFilterTagOption } from "@/lib/types";
 
@@ -25,7 +26,7 @@ function daysBetween(start: Date, end: Date) {
 
 export function GanttView({ projectId, statuses }: GanttViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const { data, isLoading } = trpc.task.list.useQuery({ projectId, includeArchived: false, limit: 100 });
+  const { data, isLoading, error } = trpc.task.list.useQuery({ projectId, includeArchived: false, limit: 100 });
   const tasks = useMemo(() => (data?.items ?? []) as unknown as TaskCardData[], [data?.items]);
   const range = useMemo(() => {
     const dates = tasks.flatMap((task) => [task.startDate ? new Date(task.startDate) : new Date(task.dueDate), new Date(task.dueDate)]);
@@ -70,28 +71,57 @@ export function GanttView({ projectId, statuses }: GanttViewProps) {
               const showBarTitle = barWidth >= 120;
               return (
                 <div key={task.id} className="grid items-center" style={{ gridTemplateColumns: `220px repeat(${range.days}, 44px)`, minHeight: 56 }}>
-                  <button onClick={() => setSelectedTaskId(task.id)} className="truncate border-r px-3 py-2 text-left text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text)" }}>{task.title}</button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedTaskId(task.id)}
+                    aria-label={`Open ${task.title}`}
+                    className="h-auto w-full justify-start rounded-none border-r px-3 py-2 text-left text-sm font-normal"
+                    style={{ borderColor: "var(--color-border)", color: "var(--color-text)" }}
+                  >
+                    <span className="block min-w-0 truncate">{task.title}</span>
+                  </Button>
                   <div className="relative col-span-full col-start-2 row-start-1 h-9">
-                    <button
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => setSelectedTaskId(task.id)}
-                      className="absolute top-1/2 flex h-7 -translate-y-1/2 items-center overflow-hidden rounded-full px-2 text-left text-xs font-medium whitespace-nowrap shadow-sm transition-transform hover:scale-[1.01]"
+                      className="absolute top-1/2 flex h-7 -translate-y-1/2 items-center overflow-hidden rounded-full px-2 text-left text-xs font-medium whitespace-nowrap shadow-sm transition-transform hover:scale-[1.01] motion-reduce:transition-none motion-reduce:hover:scale-100"
                       title={task.title}
                       aria-label={`Open ${task.title}`}
                       style={{
                         left: offset * 44 + 4,
                         width: barWidth,
                         backgroundColor: task.status.color,
-                        color: "white",
+                        color: "var(--color-on-accent)",
                       }}
                     >
-                      {showBarTitle ? <span className="block min-w-0 truncate">{task.title}</span> : <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-white/80" />}
-                    </button>
+                      {showBarTitle ? <span className="block min-w-0 truncate">{task.title}</span> : <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full opacity-80" style={{ backgroundColor: "var(--color-on-accent)" }} />}
+                    </Button>
                   </div>
                 </div>
               );
             })}
           </div>
-          {tasks.length === 0 && <div className="p-8 text-center text-sm" style={{ color: "var(--color-text-muted)" }}>{isLoading ? "Loading tasks..." : "No tasks to show."}</div>}
+          {error ? (
+            <div className="p-4">
+              <Alert variant="danger" title="Couldn't load tasks.">
+                {error.message || "Please try again later."}
+              </Alert>
+            </div>
+          ) : isLoading ? (
+            <div className="flex flex-col gap-3 p-4" aria-label="Loading gantt chart">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          ) : tasks.length === 0 ? (
+            <EmptyState
+              title="No tasks to show."
+              description="Tasks with start or due dates appear here as bars on the timeline."
+              className="p-8"
+            />
+          ) : null}
         </div>
       </div>
       {selectedTaskId && <TaskDetail taskId={selectedTaskId} statuses={statuses} onClose={() => setSelectedTaskId(null)} />}

@@ -34,9 +34,15 @@ interface PointerDragState {
   width: number;
   didDrag: boolean;
   element: HTMLDivElement;
+  pointerType: string;
+  /** Touch drags only start after a long-press so vertical page scroll keeps working */
+  longPressed: boolean;
+  longPressTimer: ReturnType<typeof setTimeout> | null;
+  touchMoveBlocker: ((event: TouchEvent) => void) | null;
 }
 
 const DRAG_START_DISTANCE = 6;
+const LONG_PRESS_START_MS = 250;
 
 function getSprintDropStatusIdFromPoint(clientX: number, clientY: number): string | null {
   const target = document.elementFromPoint(clientX, clientY);
@@ -219,7 +225,14 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
   }
 
   function clearDragState(preserveClickSuppression = false) {
-    releasePointerCapture(dragStateRef.current);
+    const dragState = dragStateRef.current;
+    releasePointerCapture(dragState);
+    if (dragState?.longPressTimer) {
+      clearTimeout(dragState.longPressTimer);
+    }
+    if (dragState?.touchMoveBlocker) {
+      dragState.element.removeEventListener("touchmove", dragState.touchMoveBlocker);
+    }
     dragStateRef.current = null;
     setDraggingTaskId(null);
     setDragOverStatusId(null);
@@ -239,8 +252,10 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>, taskId: string, statusId: string) {
     if (e.button !== 0) return;
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    dragStateRef.current = {
+    const element = e.currentTarget;
+    const rect = element.getBoundingClientRect();
+    const isTouch = e.pointerType === "touch";
+    const dragState: PointerDragState = {
       pointerId: e.pointerId,
       taskId,
       sourceStatusId: statusId,
@@ -250,15 +265,42 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
       offsetY: e.clientY - rect.top,
       width: rect.width,
       didDrag: false,
-      element: e.currentTarget,
+      element,
+      pointerType: e.pointerType,
+      longPressed: false,
+      longPressTimer: null,
+      touchMoveBlocker: null,
     };
+
+    if (isTouch) {
+      // Keep vertical page scroll available (touch-action: pan-y); a drag only
+      // starts after a ~250ms long-press. The non-passive blocker stops the
+      // browser from hijacking the gesture into a scroll once dragging begins.
+      dragState.touchMoveBlocker = (event: TouchEvent) => {
+        if (dragStateRef.current === dragState && dragState.longPressed) {
+          event.preventDefault();
+        }
+      };
+      element.addEventListener("touchmove", dragState.touchMoveBlocker, { passive: false });
+      dragState.longPressTimer = setTimeout(() => {
+        if (dragStateRef.current !== dragState || dragState.didDrag) return;
+        dragState.longPressed = true;
+        if (!element.hasPointerCapture(dragState.pointerId)) {
+          element.setPointerCapture(dragState.pointerId);
+        }
+      }, LONG_PRESS_START_MS);
+    }
+
+    dragStateRef.current = dragState;
     suppressClickRef.current = false;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    element.setPointerCapture(e.pointerId);
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== e.pointerId) return;
+    // Touch drags wait for the long-press; otherwise the browser handles scrolling
+    if (dragState.pointerType === "touch" && !dragState.longPressed) return;
 
     const dragDistance = Math.hypot(e.clientX - dragState.originX, e.clientY - dragState.originY);
     if (!dragState.didDrag) {
@@ -631,7 +673,7 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
                         opacity: draggingTaskId === task.id ? 0.35 : 1,
                         cursor: draggingTaskId === task.id ? "grabbing" : "grab",
                         transition: "opacity 150ms",
-                        touchAction: "none",
+                        touchAction: "pan-y",
                       }}
                     >
                       <button

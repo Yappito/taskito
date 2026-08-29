@@ -62,6 +62,8 @@ export function MiniMap({
         height={height}
         onClick={handleClick}
         className="cursor-crosshair"
+        role="img"
+        aria-label="Dependency graph mini-map: node overview with current viewport"
       >
         <rect
           width={width}

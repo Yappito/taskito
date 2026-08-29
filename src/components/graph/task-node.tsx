@@ -3,6 +3,7 @@
 import { memo } from "react";
 
 import type { AlertLevel } from "@/lib/alert-utils";
+import { tagChipBackground } from "@/components/ui/tag-badge";
 import { Avatar } from "@/components/ui/avatar";
 
 interface TaskNodeProps {
@@ -27,14 +28,15 @@ interface TaskNodeProps {
   selected?: boolean;
   highlighted?: boolean;
   alertLevel?: AlertLevel;
-  onClick?: () => void;
-  onInfoClick?: () => void;
-  onMouseEnter?: () => void;
-  onMouseLeave?: () => void;
-  /** Called when user starts dragging from the output port */
-  onPortDragStart?: (side: "left" | "right") => void;
+  /** Stable per-node dispatch handlers — the node passes its own id */
+  onNodeClick?: (nodeId: string) => void;
+  onNodeInfoClick?: (nodeId: string) => void;
+  onNodeHover?: (nodeId: string | null) => void;
+  onNodeKeyDown?: (nodeId: string, event: React.KeyboardEvent) => void;
+  /** Called when user starts dragging from an output port */
+  onPortDragStart?: (nodeId: string, side: "left" | "right") => void;
   /** Called when user drops on a port */
-  onPortDrop?: (event: React.MouseEvent) => void;
+  onPortDrop?: (nodeId: string, event: React.MouseEvent) => void;
   /** Whether this node is a valid drop target during linking */
   isLinkTarget?: boolean;
 }
@@ -56,11 +58,12 @@ function formatTimeLeft(dueDate: string | Date): string {
   return past ? `${months}mo ago` : `${months}mo left`;
 }
 
+/** One token per priority so the graph matches the board/list pills (low is green, not accent) */
 const priorityColors: Record<string, string> = {
-  urgent: "#ef4444",
-  high: "#f97316",
-  medium: "#eab308",
-  low: "#6366f1",
+  urgent: "var(--color-priority-urgent)",
+  high: "var(--color-priority-high)",
+  medium: "var(--color-priority-medium)",
+  low: "var(--color-priority-low)",
   none: "transparent",
 };
 
@@ -109,10 +112,10 @@ export const TaskNode = memo(function TaskNode({
   selected,
   highlighted,
   alertLevel,
-  onClick,
-  onInfoClick,
-  onMouseEnter,
-  onMouseLeave,
+  onNodeClick,
+  onNodeInfoClick,
+  onNodeHover,
+  onNodeKeyDown,
   onPortDragStart,
   onPortDrop,
   isLinkTarget,
@@ -134,24 +137,28 @@ export const TaskNode = memo(function TaskNode({
   return (
     <g
       transform={`translate(${x}, ${y})`}
-      onClick={onClick}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
+      onClick={() => onNodeClick?.(id)}
+      onMouseEnter={() => onNodeHover?.(id)}
+      onMouseLeave={() => onNodeHover?.(null)}
+      onKeyDown={(event) => onNodeKeyDown?.(id, event)}
       className="graph-node"
       data-task-id={id}
       data-task-title={title}
       data-task-tags={tags.map((tag) => tag.name).join(",")}
       data-filter-match={highlighted ? "true" : "false"}
+      tabIndex={0}
+      role="button"
+      aria-label={`${id} ${title}`}
       onMouseUp={
         isLinkTarget
           ? (e) => {
               e.stopPropagation();
-              onPortDrop?.(e);
+              onPortDrop?.(id, e);
             }
           : undefined
       }
     >
-      {/* Pulsating glow rect for due-date alerts */}
+      {/* Pulsating glow rect for due-date alerts (CSS animation so prefers-reduced-motion disables it) */}
       {showAlertPulse && (
         <rect
           x={-4}
@@ -160,23 +167,15 @@ export const TaskNode = memo(function TaskNode({
           height={height + 8}
           rx={14}
           fill="none"
-          stroke={alertLevel === "critical" ? "#ef4444" : "#f59e0b"}
+          stroke={alertLevel === "critical" ? "var(--color-danger)" : "var(--color-warning)"}
           strokeWidth={2}
           opacity={0.6}
-        >
-          <animate
-            attributeName="opacity"
-            values="0.6;0.15;0.6"
-            dur={alertLevel === "critical" ? "1.5s" : "2s"}
-            repeatCount="indefinite"
-          />
-          <animate
-            attributeName="stroke-width"
-            values="2;5;2"
-            dur={alertLevel === "critical" ? "1.5s" : "2s"}
-            repeatCount="indefinite"
-          />
-        </rect>
+          className={
+            alertLevel === "critical"
+              ? "graph-alert-ring graph-alert-ring-critical"
+              : "graph-alert-ring"
+          }
+        />
       )}
 
       {/* Drop shadow (theme-aware via filter) */}
@@ -238,9 +237,9 @@ export const TaskNode = memo(function TaskNode({
           aria-label="Open task details"
           onClick={(e) => {
             e.stopPropagation();
-            onInfoClick?.();
+            onNodeInfoClick?.(id);
           }}
-          className="flex h-4 w-4 items-center justify-center rounded-full border text-[9px] font-bold leading-none"
+          className="flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-bold leading-none"
           style={{
             backgroundColor: "var(--color-surface)",
             borderColor: "var(--color-border)",
@@ -278,7 +277,7 @@ export const TaskNode = memo(function TaskNode({
           {dependencyMessages.map((message) => (
             <span
               key={message}
-              className="rounded-full px-1.5 py-0.5 text-[8px] font-semibold"
+              className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
               style={{
                 backgroundColor: "color-mix(in srgb, var(--color-danger) 12%, transparent)",
                 color: "var(--color-danger)",
@@ -291,8 +290,8 @@ export const TaskNode = memo(function TaskNode({
             </span>
           ))}
           <span
-            className="ml-auto shrink-0 text-[9px] font-medium"
-            style={{ color: isPast ? "var(--color-danger, #ef4444)" : "var(--color-text-muted)" }}
+            className="ml-auto shrink-0 text-[10px] font-medium"
+            style={{ color: isPast ? "var(--color-danger)" : "var(--color-text-muted)" }}
           >
             {timeLeft}
           </span>
@@ -306,9 +305,9 @@ export const TaskNode = memo(function TaskNode({
             {tags.slice(0, 2).map((tag, i) => (
               <span
                 key={i}
-                className="inline-block rounded-full px-1.5 py-0.5 text-[9px] font-medium"
+                className="inline-block rounded-full px-1.5 py-0.5 text-[10px] font-medium"
                 style={{
-                  backgroundColor: `${tag.color}18`,
+                  backgroundColor: tagChipBackground(tag.color),
                   color: tag.color,
                 }}
               >
@@ -321,7 +320,7 @@ export const TaskNode = memo(function TaskNode({
               <Avatar name={assigneeName} email={assigneeEmail} image={assigneeImage} size="xs" />
             )}
             <span
-              className="max-w-[4.8rem] truncate text-right text-[9px]"
+              className="max-w-[4.8rem] truncate text-right text-[10px]"
               style={{ color: "var(--color-text-muted)" }}
             >
               {assigneeLabel}
@@ -330,17 +329,18 @@ export const TaskNode = memo(function TaskNode({
         </div>
       </foreignObject>
 
-      {/* ─── Connection Ports ──────────────────── */}
+      {/* ─── Connection Ports (mouse-only affordance, hidden from assistive tech) ─────────── */}
       {/* Left (input) port */}
       <g
         className="connection-port"
+        aria-hidden="true"
         onMouseDown={(e) => {
           e.stopPropagation();
-          onPortDragStart?.("left");
+          onPortDragStart?.(id, "left");
         }}
         onMouseUp={(e) => {
           e.stopPropagation();
-          onPortDrop?.(e);
+          onPortDrop?.(id, e);
         }}
       >
         {/* Large invisible hit area when this node is a valid link target */}
@@ -379,9 +379,10 @@ export const TaskNode = memo(function TaskNode({
       {/* Right (output) port */}
       <g
         className="connection-port"
+        aria-hidden="true"
         onMouseDown={(e) => {
           e.stopPropagation();
-          onPortDragStart?.("right");
+          onPortDragStart?.(id, "right");
         }}
       >
         <circle
