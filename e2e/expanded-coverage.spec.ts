@@ -211,6 +211,11 @@ test.describe("Expanded Playwright coverage", () => {
     const sprintPicker = await createSprint(page, sprintName, "Collapse workflow");
     await sprintPicker.selectOption({ label: `${sprintName} (planning)` });
     await page.getByRole("button", { name: "Complete" }).click();
+    // Completing goes through the carry-over dialog now; keep the default
+    // target and confirm.
+    const completeDialog = page.getByRole("dialog", { name: "Complete sprint" });
+    await completeDialog.getByRole("button", { name: "Complete sprint" }).click();
+    await expect(completeDialog).not.toBeVisible({ timeout: 10_000 });
 
     await expect(page.getByText(`${sprintName} is completed`)).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole("button", { name: "Expand sprint" })).toBeVisible();

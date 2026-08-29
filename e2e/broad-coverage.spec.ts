@@ -183,11 +183,13 @@ test.describe("Broader application coverage", () => {
     await assigneeSelect.selectOption({ label: adminOption! });
     await page.getByRole("button", { name: "Apply assignee" }).click();
 
-    await expect(page.getByText(adminOption!).first()).toBeVisible();
-
     // A successful bulk update clears the selection on purpose, which unmounts
-    // the action bar (its "Clear selection" control disappears with it) — so
-    // re-select the batch before exercising the manual clear.
+    // the action bar. Wait for that before re-selecting: a page-level text
+    // match on the assignee name would be satisfied by the header avatar
+    // immediately, and a late onSuccess would then wipe the selection re-made
+    // below (the count never shows, or "Clear selection" detaches mid-click).
+    await expect(selectedCount).not.toBeVisible({ timeout: 10_000 });
+
     await page.getByLabel(`Select ${firstTitle}`).check();
     await page.getByLabel(`Select ${secondTitle}`).check();
     await expect(selectedCount).toBeVisible({ timeout: 10_000 });

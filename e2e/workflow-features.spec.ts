@@ -106,6 +106,10 @@ test.describe("Workflow feature coverage", () => {
     await expect(sprintPicker).toContainText(`${sprintName} (active)`, { timeout: 10_000 });
     await expect(page.getByRole("button", { name: "Start" })).toBeDisabled();
     await page.getByRole("button", { name: "Complete" }).click();
+    // Completing goes through the carry-over dialog now; keep the default
+    // target and confirm.
+    const completeDialog = page.getByRole("dialog", { name: "Complete sprint" });
+    await completeDialog.getByRole("button", { name: "Complete sprint" }).click();
     await expect(sprintPicker).toContainText(`${sprintName} (completed)`, { timeout: 10_000 });
     await expect(page.getByRole("button", { name: "Complete" })).toBeDisabled();
   });

@@ -285,11 +285,23 @@ test.describe("Graph view", () => {
     await expectTaskDetailOpen(page);
   });
 
-  test("graph title filter highlights matches without removing other tasks", async ({ page }) => {
+  test("graph title filter narrows the graph to matching tasks", async ({ page }) => {
     await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
     const initialNodeCount = await page.locator(".graph-node").count();
-    const matchingTitle = await page.locator(".graph-node").first().getAttribute("data-task-title");
-    const otherTitle = await page.locator(".graph-node").nth(1).getAttribute("data-task-title");
+    // Read every title in one evaluate: hover/focus reorders graph nodes in
+    // the DOM, so two positional reads can land on the same node. Pick a
+    // comparison title that cannot substring-match the filter in either
+    // direction (related tasks share title prefixes).
+    const titles = (
+      await page.locator(".graph-node").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-task-title")))
+    ).filter((title): title is string => Boolean(title));
+    const matchingTitle = titles[0];
+    const otherTitle = titles.find(
+      (title) =>
+        title !== matchingTitle &&
+        !title.toLowerCase().includes(matchingTitle.toLowerCase()) &&
+        !matchingTitle.toLowerCase().includes(title.toLowerCase())
+    );
 
     expect(matchingTitle).toBeTruthy();
 
@@ -299,11 +311,11 @@ test.describe("Graph view", () => {
 
     await expect(matchingNode).toHaveAttribute("data-filter-match", "true");
 
-    if (otherTitle && otherTitle !== matchingTitle) {
-      const otherNode = page.locator(`.graph-node[data-task-title="${otherTitle}"]`);
-      if (await otherNode.count()) {
-        await expect(otherNode.first()).toHaveAttribute("data-filter-match", "false");
-      }
+    if (otherTitle) {
+      // The title search is applied server-side and narrows the graph (see
+      // the filter helper text): non-matching tasks are removed from the
+      // result rather than rendered dimmed.
+      await expect(page.locator(`.graph-node[data-task-title="${otherTitle}"]`)).toHaveCount(0, { timeout: 10_000 });
     }
 
     const finalNodeCount = await page.locator(".graph-node").count();
