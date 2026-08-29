@@ -29,6 +29,14 @@ import { AiProviderError } from "@/server/services/ai/provider-request";
 import { withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
 import { getRequiredPermissionsForActionPayload, resolveAiActionPayload } from "@/server/services/ai/tools";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
+// CITADEL-d77.32 (smart quick-add + task summaries): one-shot provider services.
+import { AiParseTaskError, parseTaskFromText } from "@/server/services/ai/parse-task";
+import {
+  AiSummarizeError,
+  buildTaskBreakdownUserMessage,
+  readStoredTaskAiSummary,
+  summarizeTask as summarizeTaskWithProvider,
+} from "@/server/services/ai/summarize";
 
 const providerInputSchema = z.object({
   label: z.string().trim().min(1).max(100),
@@ -150,6 +158,48 @@ async function getEffectiveProjectAiPolicy(prisma: PrismaClient, projectId: stri
     defaultPermissions,
     maxPermissions,
   };
+}
+
+// CITADEL-d77.32 (smart quick-add + task summaries): resolve a usable provider
+// for one-shot AI features — the project's default provider first, then any
+// enabled provider visible to the user under the project policy.
+async function findDefaultOrFirstUsableAiProvider(
+  prisma: PrismaClient,
+  userId: string,
+  projectId: string
+) {
+  const policy = await getEffectiveProjectAiPolicy(prisma, projectId);
+  if (policy.defaultProviderId) {
+    const provider = await prisma.aiProviderConnection.findUnique({ where: { id: policy.defaultProviderId } });
+    if (
+      provider
+      && provider.isEnabled
+      && (provider.scope === "project"
+        || provider.scope === "shared"
+        || (provider.scope === "user" && policy.allowUserProviders && provider.ownerUserId === userId))
+    ) {
+      return provider;
+    }
+  }
+
+  const scopeClauses: Prisma.AiProviderConnectionWhereInput[] = [];
+  if (policy.allowProjectProviders) {
+    scopeClauses.push({ scope: "project", projectId });
+  }
+  if (policy.allowUserProviders) {
+    scopeClauses.push({ scope: "user", ownerUserId: userId });
+  }
+  if (policy.allowSharedProviders) {
+    scopeClauses.push({ scope: "shared" });
+  }
+  if (scopeClauses.length === 0) {
+    return null;
+  }
+
+  return prisma.aiProviderConnection.findFirst({
+    where: { isEnabled: true, OR: scopeClauses },
+    orderBy: [{ scope: "asc" }, { updatedAt: "desc" }],
+  });
 }
 
 async function normalizeSelectedTaskIdsOrThrow(prisma: PrismaClient, projectId: string, selectedTaskIds: string[] | undefined) {
@@ -1176,6 +1226,244 @@ export const aiRouter = createTRPCRouter({
         where: { conversationId: input.conversationId },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       }).then((executions) => executions.map(mapExecutionForClient));
+    }),
+
+  // ── CITADEL-d77.32 (smart quick-add + task summaries) ────────────────────
+
+  // Whether any AI provider is usable for the project (default provider, then
+  // project/user/shared scope per policy). UI hides AI entry points when not.
+  hasUsableProvider: protectedProcedure
+    .input(z.object({ projectId: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+      const provider = await findDefaultOrFirstUsableAiProvider(ctx.prisma, ctx.session.user.id, input.projectId);
+      return { hasUsableProvider: Boolean(provider) };
+    }),
+
+  // Smart quick-add: parse a natural-language request into a prefilled task
+  // draft. Nothing is written; unresolved candidate references are reported.
+  parseTask: protectedProcedure
+    .input(z.object({ projectId: z.string().cuid(), text: z.string().trim().min(1).max(2000) }))
+    .mutation(async ({ ctx, input }) => {
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId);
+
+      const rateLimit = consumeRateLimit("ai-chat", ctx.session.user.id, {
+        maxAttempts: 20,
+        windowMs: 60 * 1000,
+      });
+      if (!rateLimit.allowed) {
+        throw new Error("AI chat rate limit exceeded");
+      }
+
+      const providerRecord = await findDefaultOrFirstUsableAiProvider(ctx.prisma, ctx.session.user.id, input.projectId);
+      if (!providerRecord) {
+        throw new Error("No AI provider is available for this project");
+      }
+
+      const projectId = input.projectId;
+      const [statuses, people, tags] = await Promise.all([
+        ctx.prisma.workflowStatus.findMany({
+          where: { projectId },
+          orderBy: { order: "asc" },
+          select: { id: true, name: true },
+        }),
+        ctx.prisma.user.findMany({
+          where: {
+            disabledAt: null,
+            OR: [
+              { role: "admin" },
+              { projectMemberships: { some: { projectId } } },
+              { groupMemberships: { some: { group: { projectMemberships: { some: { projectId } } } } } },
+            ],
+          },
+          orderBy: [{ name: "asc" }, { email: "asc" }],
+          select: { id: true, name: true, email: true },
+        }),
+        ctx.prisma.tag.findMany({
+          where: { projectId },
+          orderBy: { name: "asc" },
+          select: { id: true, name: true },
+        }),
+      ]);
+
+      try {
+        return await parseTaskFromText(resolveAiProvider(providerRecord), {
+          text: input.text,
+          statuses,
+          people,
+          tags,
+          now: new Date(),
+        });
+      } catch (error) {
+        if (error instanceof AiParseTaskError) {
+          // Typed, fixed client-safe message — never raw model output.
+          throw error;
+        }
+        throw new Error("AI quick-add parsing failed. Try again or fill the form manually.");
+      }
+    }),
+
+  // Task/thread summary. Cached in Task.aiSummary keyed on the task's
+  // updatedAt and the newest comment time; `force: true` bypasses the cache.
+  summarizeTask: protectedProcedure
+    .input(z.object({ taskId: z.string().cuid(), force: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+
+      const task = await ctx.prisma.task.findUnique({
+        where: { id: input.taskId },
+        include: {
+          project: { select: { key: true } },
+          status: true,
+          creator: { select: { id: true, name: true, email: true, image: true } },
+          assignee: { select: { id: true, name: true, email: true, image: true } },
+          tags: { include: { tag: true } },
+          comments: {
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: 50,
+            include: { author: { select: { id: true, name: true, email: true, image: true } } },
+          },
+        },
+      });
+      if (!task) {
+        throw new Error("Task not found");
+      }
+
+      const taskUpdatedAtIso = task.updatedAt.toISOString();
+      const latestCommentIso = task.comments[0] ? task.comments[0].createdAt.toISOString() : null;
+
+      const stored = readStoredTaskAiSummary(task.aiSummary);
+      if (
+        !input.force
+        && stored
+        && stored.forUpdatedAt === taskUpdatedAtIso
+        && stored.forLatestCommentAt === latestCommentIso
+      ) {
+        return { ...stored.result, generatedAt: stored.generatedAt, cached: true };
+      }
+
+      const rateLimit = consumeRateLimit("ai-chat", ctx.session.user.id, {
+        maxAttempts: 20,
+        windowMs: 60 * 1000,
+      });
+      if (!rateLimit.allowed) {
+        throw new Error("AI chat rate limit exceeded");
+      }
+
+      const providerRecord = await findDefaultOrFirstUsableAiProvider(ctx.prisma, ctx.session.user.id, task.projectId);
+      if (!providerRecord) {
+        throw new Error("No AI provider is available for this project");
+      }
+
+      let result;
+      try {
+        result = await summarizeTaskWithProvider(resolveAiProvider(providerRecord), task);
+      } catch (error) {
+        if (error instanceof AiSummarizeError) {
+          // Typed, fixed client-safe message — never raw model output.
+          throw error;
+        }
+        throw new Error("AI task summarization failed. Try again later.");
+      }
+
+      const generatedAt = new Date().toISOString();
+      await ctx.prisma.task.update({
+        where: { id: input.taskId },
+        data: {
+          aiSummary: {
+            generatedAt,
+            forUpdatedAt: taskUpdatedAtIso,
+            forLatestCommentAt: latestCommentIso,
+            result,
+          } as unknown as Prisma.InputJsonValue,
+          // Storing the summary is not a task edit: keep updatedAt as-is
+          // (Prisma bumps @updatedAt on every update otherwise), both so the
+          // forUpdatedAt cache key can ever match again and so the task does
+          // not surface as freshly modified.
+          updatedAt: task.updatedAt,
+        },
+      });
+
+      return { ...result, generatedAt, cached: false };
+    }),
+
+  // "Break down into subtasks": opens a task-scoped AI conversation seeded
+  // with a breakdown request. The assistant turn proposes createTask/addLink
+  // actions that flow through the normal approval cards — nothing is executed
+  // automatically (conversation is always approval mode).
+  startBreakdown: protectedProcedure
+    .input(z.object({ taskId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.taskId);
+
+      const task = await ctx.prisma.task.findUniqueOrThrow({
+        where: { id: input.taskId },
+        include: { project: { select: { key: true } } },
+      });
+
+      const rateLimit = consumeRateLimit("ai-chat", ctx.session.user.id, {
+        maxAttempts: 20,
+        windowMs: 60 * 1000,
+      });
+      if (!rateLimit.allowed) {
+        throw new Error("AI chat rate limit exceeded");
+      }
+
+      const providerRecord = await findDefaultOrFirstUsableAiProvider(ctx.prisma, ctx.session.user.id, task.projectId);
+      if (!providerRecord) {
+        throw new Error("No AI provider is available for this project");
+      }
+
+      const policy = await getEffectiveProjectAiPolicy(ctx.prisma, task.projectId);
+      const requestedPermissions = normalizeAiPermissions([
+        "read_current_task",
+        "read_selected_tasks",
+        "search_project",
+        "create_task",
+        "link_tasks",
+      ]);
+      const effectivePermissions = requestedPermissions.filter((permission) => policy.maxPermissions.includes(permission));
+
+      const taskKey = task.project.key ? `${task.project.key}-${task.taskNumber}` : String(task.taskNumber);
+      const conversation = await ctx.prisma.aiConversation.create({
+        data: {
+          projectId: task.projectId,
+          taskId: task.id,
+          createdByUserId: ctx.session.user.id,
+          providerId: providerRecord.id,
+          title: `Break down ${taskKey}`.slice(0, 200),
+          mode: "approval",
+          grantedPermissions: effectivePermissions as Prisma.InputJsonValue,
+          selectedTaskIds: [task.id] as Prisma.InputJsonValue,
+        },
+      });
+
+      await ctx.prisma.aiMessage.create({
+        data: {
+          conversationId: conversation.id,
+          role: "user",
+          content: buildTaskBreakdownUserMessage(taskKey),
+        },
+      });
+
+      const turn = await appendAiAssistantTurn(ctx.prisma, {
+        conversation: {
+          id: conversation.id,
+          projectId: task.projectId,
+          taskId: task.id,
+          providerId: providerRecord.id,
+          mode: "approval",
+          grantedPermissions: effectivePermissions as unknown as Prisma.JsonValue,
+          selectedTaskIds: [task.id] as unknown as Prisma.JsonValue,
+        },
+        requestedByUserId: ctx.session.user.id,
+      });
+
+      return {
+        conversationId: conversation.id,
+        message: turn.message,
+        proposals: turn.proposals.map(mapExecutionForClient),
+      };
     }),
 
   listPermissions: protectedProcedure.query(() => AI_PERMISSION_VALUES),

@@ -41,6 +41,8 @@ import { useModalBehavior } from "@/hooks/use-modal-behavior";
 import { TaskSearchInput } from "@/components/ui/task-search-input";
 import { Avatar } from "@/components/ui/avatar";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
+// CITADEL-d77.32 (task summaries + breakdown): AI actions next to the launcher.
+import { TaskAiActions } from "@/components/ai/task-ai-actions";
 import { TimeTrackingControls } from "@/components/time/time-tracking-controls";
 import { RecurrenceControls } from "@/components/recurrence/recurrence-controls";
 
@@ -1676,6 +1678,15 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               taskId={taskId}
               title={`AI chat for ${task.title}`}
               buttonLabel="Ask AI"
+            />
+          )}
+          {/* CITADEL-d77.32: Summarize / Break down — hidden when no provider */}
+          {!editing && (
+            <TaskAiActions
+              projectId={task.projectId}
+              taskId={taskId}
+              taskKey={taskKey ?? "Task"}
+              taskTitle={task.title}
             />
           )}
           {canArchiveNow && !editing && (
