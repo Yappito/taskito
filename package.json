@@ -12,6 +12,7 @@
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:bootstrap-admin": "tsx prisma/bootstrap-admin.ts",
+    "db:reencrypt-ai-secrets": "tsx scripts/reencrypt-ai-secrets.ts",
     "db:studio": "prisma studio",
     "postinstall": "prisma generate",
     "test": "vitest run",
