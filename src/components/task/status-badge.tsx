@@ -1,6 +1,8 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { getTagChipStyle } from "@/components/ui/tag-badge";
 
 interface StatusBadgeProps {
   name: string;
@@ -8,24 +10,27 @@ interface StatusBadgeProps {
   className?: string;
 }
 
-/** Colored badge showing workflow status */
+/**
+ * Colored badge showing workflow status.
+ * Thin wrapper over the shared Badge primitive; the status color is blended
+ * via color-mix instead of the old hex-alpha suffix hack.
+ */
 export function StatusBadge({ name, color, className }: StatusBadgeProps) {
+  const chipStyle = getTagChipStyle(color);
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium",
-        className
-      )}
+    <Badge
+      className={cn("gap-1.5", className)}
       style={{
-        backgroundColor: `${color}20`,
-        color: color,
+        backgroundColor: chipStyle.backgroundColor,
+        color: chipStyle.color,
       }}
     >
       <span
+        aria-hidden="true"
         className="h-1.5 w-1.5 rounded-full"
         style={{ backgroundColor: color }}
       />
       {name}
-    </span>
+    </Badge>
   );
 }

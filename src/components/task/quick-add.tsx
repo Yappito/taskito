@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { CustomFieldInputs, type TaskCustomFieldValueMap } from "@/components/task/custom-field-inputs";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { Alert } from "@/components/ui/alert";
 import { Dialog } from "@/components/ui/dialog";
 
 interface ProjectTaskTemplate {
@@ -41,6 +43,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
   const [templateName, setTemplateName] = useState("");
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
@@ -62,6 +65,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     setCustomFieldValues({});
     setSaveAsTemplate(false);
     setTemplateName("");
+    setSubmitError(null);
   }, [statuses, today]);
 
   const createTask = trpc.task.create.useMutation({
@@ -70,6 +74,9 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       setOpen(false);
       resetForm();
     },
+    onError: (error) => {
+      setSubmitError(error.message || "Unable to create task.");
+    },
   });
 
   const saveTemplateMutation = trpc.project.saveTemplate.useMutation({
@@ -77,6 +84,9 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       utils.project.templates.invalidate({ projectId });
       setSaveAsTemplate(false);
       setTemplateName("");
+    },
+    onError: (error) => {
+      setSubmitError(error.message || "Unable to save template.");
     },
   });
 
@@ -196,7 +206,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       {/* FAB for mobile */}
       <button
         onClick={() => setOpen(true)}
-        className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full text-2xl text-white shadow-lg md:hidden"
+        className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full text-2xl text-[var(--color-on-accent)] shadow-lg md:hidden"
         style={{ backgroundColor: "var(--color-accent)" }}
         aria-label="Add task"
       >
@@ -214,9 +224,14 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
-        panelClassName="max-h-[min(88vh,56rem)] max-w-[min(92vw,72rem)]"
+        panelClassName="max-h-[min(88vh,56rem)] max-w-2xl"
       >
         <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>New Task</h2>
+        {submitError && (
+          <Alert variant="danger" className="mb-4">
+            {submitError}
+          </Alert>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
             ref={titleRef}
@@ -248,20 +263,17 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
               <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
                 Description
               </label>
-              <textarea
+              <Textarea
                 name="body"
                 rows={5}
                 placeholder="Add task details..."
                 value={body}
                 onChange={(event) => setBody(event.target.value)}
-              className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2"
-              style={{
-                backgroundColor: "var(--color-surface)",
-                borderColor: "var(--color-border)",
-                color: "var(--color-text)",
-                resize: "vertical",
-              }}
-            />
+                className="w-full"
+                style={{
+                  resize: "vertical",
+                }}
+              />
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
