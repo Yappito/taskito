@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { GripVertical } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { trpc } from "@/lib/trpc-client";
 import { getCommentBody } from "@/lib/comment-content";
 import {
@@ -15,12 +15,26 @@ import {
   type TaskDetailSectionId,
 } from "@/lib/task-detail-section-order";
 import { cn } from "@/lib/utils";
+import { toDateInputValue, fromDateInputValue } from "@/lib/date-utils";
+import {
+  describeActivityEvent,
+  formatBytes,
+  getDependencyMessages,
+  getMutationErrorMessage,
+} from "@/lib/task-format";
 import { Button } from "@/components/ui/button";
 import { CustomFieldInputs, type TaskCustomFieldValueMap } from "@/components/task/custom-field-inputs";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { StatusBadge } from "./status-badge";
-import { Badge } from "@/components/ui/badge";
+import { Alert } from "@/components/ui/alert";
+import { Field } from "@/components/ui/field";
+import { PriorityBadge } from "@/components/ui/priority-badge";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
+import { TagBadgeList, tagChipBackground } from "@/components/ui/tag-badge";
+import { Textarea } from "@/components/ui/textarea";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { useModalBehavior } from "@/hooks/use-modal-behavior";
 import { TaskSearchInput } from "@/components/ui/task-search-input";
 import { Avatar } from "@/components/ui/avatar";
 import { AiChatLauncher } from "@/components/ai/ai-chat-launcher";
@@ -144,62 +158,6 @@ interface TaskDetailProps {
   onClose: () => void;
 }
 
-function describeActivityEvent(event: { action: string; details?: Record<string, unknown> | null }) {
-  switch (event.action) {
-    case "created":
-      return "created this task";
-    case "updated": {
-      const changedFields = Array.isArray(event.details?.changedFields)
-        ? event.details.changedFields.filter((field): field is string => typeof field === "string")
-        : [];
-      return changedFields.length > 0
-        ? `updated ${changedFields.join(", ")}`
-        : "updated this task";
-    }
-    case "bulkUpdated":
-      return "applied a bulk update";
-    case "commented":
-      return "added a comment";
-    case "archived":
-      return "archived this task";
-    case "unarchived":
-      return "restored this task";
-    case "duplicated":
-      return "created this task by duplicating another one";
-    default:
-      return event.action;
-  }
-}
-
-function getDependencyMessages(task: {
-  dependencyState?: {
-    blockingTaskCount: number;
-    openChildCount: number;
-  };
-}) {
-  const messages: string[] = [];
-
-  if ((task.dependencyState?.blockingTaskCount ?? 0) > 0) {
-    messages.push(`Blocked by ${task.dependencyState!.blockingTaskCount} incomplete prerequisite${task.dependencyState!.blockingTaskCount === 1 ? "" : "s"}`);
-  }
-
-  if ((task.dependencyState?.openChildCount ?? 0) > 0) {
-    messages.push(`${task.dependencyState!.openChildCount} child task${task.dependencyState!.openChildCount === 1 ? " is" : "s are"} still open`);
-  }
-
-  return messages;
-}
-
-function getMutationErrorMessage(error: { message?: string } | null) {
-  return error?.message || "Unable to save task changes.";
-}
-
-function formatBytes(sizeBytes: number) {
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
-  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 interface TaskDetailSectionDescriptor {
   id: TaskDetailSectionId;
   label: string;
@@ -208,11 +166,81 @@ interface TaskDetailSectionDescriptor {
 
 const SECTION_DRAG_START_DISTANCE = 6;
 
+/**
+ * Side-panel shell shared by the loading, error and main detail states:
+ * fixed right sheet with scrim, dialog semantics and the panel classes the
+ * e2e suite locates (`.fixed.inset-y-0.right-0`).
+ */
+function TaskDetailPanelShell({
+  panelRef,
+  onClose,
+  titleId,
+  children,
+}: {
+  panelRef: React.RefObject<HTMLDivElement | null>;
+  onClose: () => void;
+  titleId: string;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      {/* Scrim: click to dismiss the panel */}
+      <div
+        className="fixed inset-0 z-30 bg-[var(--color-overlay)] backdrop-blur-sm"
+        aria-hidden="true"
+        onClick={onClose}
+      />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="fixed inset-y-0 right-0 z-40 flex w-full sm:max-w-xl lg:max-w-2xl flex-col border-l shadow-xl backdrop-blur-md"
+        style={{
+          backgroundColor: "var(--color-surface)",
+          borderColor: "var(--color-border)",
+          color: "var(--color-text)",
+        }}
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
+function TaskDetailPanelHeader({
+  titleId,
+  onClose,
+}: {
+  titleId: string;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="border-b"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      <div className="flex items-start justify-between gap-4 p-5">
+        <div className="min-w-0">
+          <p id={titleId} className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+            Task Detail
+          </p>
+        </div>
+        <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close task detail">
+          ✕
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** Side panel showing full task details with editing */
 export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [editing, setEditing] = useState(false);
   const [showLinkForm, setShowLinkForm] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
+  const [panelError, setPanelError] = useState<string | null>(null);
   const [linkTargetId, setLinkTargetId] = useState("");
   const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -240,6 +268,19 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     element: HTMLButtonElement;
   } | null>(null);
   const utils = trpc.useUtils();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const linkFormId = `task-detail-link-form-${useId()}`;
+  const activityBodyId = `task-detail-activity-${useId()}`;
+  const { confirm, confirmElement } = useConfirm();
+
+  // Panel-sheet modal behaviour: focus trap, Escape-to-close, focus restore,
+  // body scroll lock and a scrim that clicks to close.
+  useModalBehavior(panelRef, { open: true, onClose });
+
+  useEffect(() => {
+    setPanelError(null);
+  }, [taskId]);
 
   const { data: taskData, isLoading } = trpc.task.byId.useQuery({ id: taskId });
   const task = taskData as TaskDetailData | undefined;
@@ -320,6 +361,9 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   });
 
   const deleteTask = trpc.task.delete.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.list.invalidate();
       onClose();
@@ -327,6 +371,9 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   });
 
   const archiveTask = trpc.task.archive.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
       utils.task.list.invalidate();
@@ -335,12 +382,18 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   });
 
   const duplicateTask = trpc.task.duplicate.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.list.invalidate();
     },
   });
 
   const addLink = trpc.task.addLink.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
       utils.task.links.invalidate();
@@ -349,6 +402,9 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   });
 
   const removeLink = trpc.task.removeLink.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
       utils.task.links.invalidate();
@@ -356,12 +412,18 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   });
 
   const watchTask = trpc.task.watch.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
     },
   });
 
   const unwatchTask = trpc.task.unwatch.useMutation({
+    onError: (error) => {
+      setPanelError(getMutationErrorMessage(error));
+    },
     onSuccess: () => {
       utils.task.byId.invalidate({ id: taskId });
     },
@@ -426,28 +488,36 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
   if (isLoading) {
     return (
-      <div
-        className="fixed inset-y-0 right-0 z-40 w-full max-w-2xl border-l p-6 shadow-xl"
-        style={{
-          backgroundColor: "var(--color-surface)",
-          borderColor: "var(--color-border)",
-        }}
-      >
-        <div className="animate-pulse space-y-4">
-          <div
-            className="h-6 w-3/4 rounded"
-            style={{ backgroundColor: "var(--color-border)" }}
-          />
-          <div
-            className="h-4 w-1/2 rounded"
-            style={{ backgroundColor: "var(--color-border)" }}
-          />
+      <TaskDetailPanelShell panelRef={panelRef} onClose={onClose} titleId={titleId}>
+        <TaskDetailPanelHeader titleId={titleId} onClose={onClose} />
+        <div className="flex-1 p-6">
+          <SkeletonGroup>
+            <Skeleton className="h-6 w-3/4" />
+            <Skeleton className="h-4 w-1/2" />
+            <Skeleton className="h-24 w-full" />
+          </SkeletonGroup>
         </div>
-      </div>
+      </TaskDetailPanelShell>
     );
   }
 
-  if (!task) return null;
+  if (!task) {
+    return (
+      <TaskDetailPanelShell panelRef={panelRef} onClose={onClose} titleId={titleId}>
+        <TaskDetailPanelHeader titleId={titleId} onClose={onClose} />
+        <div className="flex-1 overflow-y-auto p-6">
+          <Alert variant="danger" title="Task unavailable.">
+            This task could not be loaded — it may have been deleted or you may no longer have access to it.
+          </Alert>
+          <div className="mt-4">
+            <Button variant="outline" size="sm" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </div>
+      </TaskDetailPanelShell>
+    );
+  }
 
   const dependencyMessages = getDependencyMessages(task);
   const isTerminalTask = task.status.category === "done" || task.status.category === "cancelled";
@@ -632,16 +702,20 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       value,
     }));
 
+    // Date inputs are YYYY-MM-DD; parse as LOCAL midnight (never UTC) to avoid
+    // off-by-one dates west of UTC.
+    const dueDateValue = form.get("dueDate") as string;
+    const startDateRaw = form.get("startDate") as string;
+    const startDateValue = startDateRaw ? fromDateInputValue(startDateRaw) : null;
+
     updateTask.mutate({
       id: taskId,
       title: form.get("title") as string,
       body: (form.get("body") as string) || null,
       statusId: form.get("statusId") as string,
       priority: form.get("priority") as "none" | "low" | "medium" | "high" | "urgent",
-      dueDate: new Date(form.get("dueDate") as string),
-      startDate: form.get("startDate")
-        ? new Date(form.get("startDate") as string)
-        : null,
+      dueDate: fromDateInputValue(dueDateValue) ?? new Date(),
+      startDate: startDateRaw ? startDateValue : null,
       sprintId: ((form.get("sprintId") as string) || null),
       tagIds: form.getAll("tags") as string[],
       customFieldValues: effectiveCustomFieldValues,
@@ -1015,28 +1089,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                           {isEditingComment ? (
                             <div className="mt-2 space-y-2">
                               {editingCommentError && (
-                                <div
-                                  className="rounded-lg border px-3 py-2 text-sm"
-                                  style={{
-                                    backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                                    borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                                    color: "var(--color-danger)",
-                                  }}
-                                >
-                                  {editingCommentError}
-                                </div>
+                                <Alert variant="danger">{editingCommentError}</Alert>
                               )}
-                              <textarea
+                              <Textarea
                                 value={editingCommentContent}
                                 onChange={(event) => setEditingCommentContent(event.target.value)}
                                 rows={3}
                                 maxLength={5000}
-                                className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                                style={{
-                                  backgroundColor: "var(--color-surface)",
-                                  borderColor: "var(--color-border)",
-                                  color: "var(--color-text)",
-                                }}
+                                aria-label="Edit comment text"
                               />
                               <div className="flex justify-end gap-2">
                                 <Button
@@ -1114,35 +1174,21 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </div>
                 <form onSubmit={handleAddComment} className="mt-3 space-y-2">
                   {commentError && (
-                    <div
-                      className="rounded-lg border px-3 py-2 text-sm"
-                      style={{
-                        backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                        borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                        color: "var(--color-danger)",
-                      }}
-                    >
-                      {commentError}
-                    </div>
+                    <Alert variant="danger">{commentError}</Alert>
                   )}
-                  <textarea
+                  <Textarea
                     name="content"
                     value={commentContent}
                     onChange={(event) => setCommentContent(event.target.value)}
                     placeholder="Add a comment..."
                     maxLength={5000}
                     rows={3}
-                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
                   />
                   <div>
                     <input
                       type="file"
                       multiple
+                      aria-label="Attach files"
                       onChange={(event) => setCommentFiles(Array.from(event.target.files ?? []))}
                       className="block w-full text-xs"
                     />
@@ -1198,21 +1244,10 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                           <div className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
                             Tags
                           </div>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {task.tags.map(({ tag }: { tag: { id: string; name: string; color: string } }) => (
-                              <Badge
-                                key={tag.id}
-                                style={
-                                  {
-                                    backgroundColor: `${tag.color}20`,
-                                    color: tag.color,
-                                  } as React.CSSProperties
-                                }
-                              >
-                                {tag.name}
-                              </Badge>
-                            ))}
-                          </div>
+                          <TagBadgeList
+                            className="mt-2"
+                            tags={task.tags.map(({ tag }) => tag)}
+                          />
                         </div>
                       )}
                       {task.customFieldValues.length > 0 && (
@@ -1306,6 +1341,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                     type="button"
                     variant="outline"
                     size="sm"
+                    aria-expanded={showLinkForm}
+                    aria-controls={linkFormId}
                     onClick={() => setShowLinkForm(!showLinkForm)}
                   >
                     {showLinkForm ? "Cancel" : "Add link"}
@@ -1314,6 +1351,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
                 {showLinkForm && (
                   <form
+                    id={linkFormId}
                     onSubmit={handleAddLink}
                     className="mb-3 space-y-2 rounded-2xl border p-3"
                     style={{
@@ -1456,6 +1494,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 <button
                   type="button"
                   onClick={() => setShowActivity((current) => !current)}
+                  aria-expanded={showActivity}
+                  aria-controls={activityBodyId}
                   className="flex w-full items-center justify-between gap-3 text-left"
                 >
                   <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
@@ -1464,7 +1504,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   <span className="text-xs" style={{ color: "var(--color-text-muted)" }}>{showActivity ? "Hide" : "Show"}</span>
                 </button>
                 {showActivity && (
-                  <div className="mt-3 space-y-2">
+                  <div className="mt-3 space-y-2" id={activityBodyId}>
                     {activityEvents.map((event) => (
                       <div
                         key={event.id}
@@ -1566,14 +1606,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   })();
 
   return (
-    <div
-      className="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l shadow-xl backdrop-blur-md"
-      style={{
-        backgroundColor: "var(--color-surface)",
-        borderColor: "var(--color-border)",
-        color: "var(--color-text)",
-      }}
-    >
+    <TaskDetailPanelShell panelRef={panelRef} onClose={onClose} titleId={titleId}>
       {/* Header */}
       <div
         className="border-b"
@@ -1581,7 +1614,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
       >
         <div className="flex items-start justify-between gap-4 p-5">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
+            <p id={titleId} className="text-xs font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--color-text-muted)" }}>
               Task Detail
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1591,9 +1624,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </span>
               )}
               <StatusBadge name={task.status.name} color={task.status.color} />
-              <Badge variant="outline" className="capitalize">
-                {task.priority}
-              </Badge>
+              <PriorityBadge priority={task.priority} showNone />
             </div>
             <h2 className="mt-3 text-2xl font-semibold leading-tight tracking-tight" style={{ color: "var(--color-text)" }}>
               {editing ? "Edit task" : task.title}
@@ -1644,7 +1675,17 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
               type="button"
               size="sm"
               variant="ghost"
-              onClick={() => archiveTask.mutate({ id: taskId })}
+              onClick={() => {
+                void confirm({
+                  title: "Archive this task?",
+                  description: "The task will be moved to the archive. You can restore it later.",
+                  confirmLabel: "Archive",
+                }).then((confirmed) => {
+                  if (confirmed) {
+                    archiveTask.mutate({ id: taskId });
+                  }
+                });
+              }}
               disabled={archiveTask.isPending}
             >
               {archiveTask.isPending ? "Archiving..." : "Archive now"}
@@ -1655,159 +1696,132 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
+        {panelError && (
+          <div className="mb-3">
+            <Alert variant="danger" title="Something went wrong." className="flex items-start justify-between gap-3">
+              <span className="min-w-0 flex-1">{panelError}</span>
+              <button
+                type="button"
+                onClick={() => setPanelError(null)}
+                aria-label="Dismiss error"
+                className="shrink-0 opacity-70 hover:opacity-100"
+              >
+                ✕
+              </button>
+            </Alert>
+          </div>
+        )}
         {editing ? (
           <form onSubmit={handleSave} className="space-y-3">
             {formError && (
-              <div
-                className="rounded-lg border px-3 py-2 text-sm"
-                style={{
-                  backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)",
-                  borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))",
-                  color: "var(--color-danger)",
-                }}
-              >
-                {formError}
-              </div>
+              <Alert variant="danger">{formError}</Alert>
             )}
-            <Input
-              name="title"
-              defaultValue={task.title}
-              required
-              maxLength={200}
-            />
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label
-                  className="mb-1 block text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Status
-                </label>
-                <Select name="statusId" defaultValue={task.statusId}>
-                  {statuses.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <div>
-                <label
-                  className="mb-1 block text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Priority
-                </label>
-                <Select name="priority" defaultValue={task.priority}>
-                  <option value="none">None</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="urgent">Urgent</option>
-                </Select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label
-                  className="mb-1 block text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Due Date
-                </label>
+            <Field label="Title">
+              {(ids) => (
                 <Input
-                  name="dueDate"
-                  type="date"
+                  id={ids.id}
+                  name="title"
+                  defaultValue={task.title}
                   required
-                  defaultValue={
-                    new Date(task.dueDate).toISOString().split("T")[0]
-                  }
+                  maxLength={200}
                 />
-              </div>
-              <div>
-                <label
-                  className="mb-1 block text-xs font-medium"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  Start Date
-                </label>
-                <Input
-                  name="startDate"
-                  type="date"
-                  defaultValue={
-                    task.startDate
-                      ? new Date(task.startDate).toISOString().split("T")[0]
-                      : ""
-                  }
-                />
-              </div>
-            </div>
-            <div>
-              <label
-                className="mb-1 block text-xs font-medium"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Sprint
-              </label>
-              <Select name="sprintId" defaultValue={task.sprintId ?? ""}>
-                <option value="">No sprint</option>
-                {sprints.map((sprint) => (
-                  <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <label
-                className="mb-1 block text-xs font-medium"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Description
-              </label>
-              <textarea
-                name="body"
-                  defaultValue={task.body ?? ""}
-                rows={5}
-                placeholder="Add task details..."
-                className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2"
-                style={{
-                  backgroundColor: "var(--color-surface)",
-                  borderColor: "var(--color-border)",
-                  color: "var(--color-text)",
-                  resize: "vertical",
-                }}
-              />
-            </div>
-            <div>
-              <label
-                className="mb-1 block text-xs font-medium"
-                style={{ color: "var(--color-text-secondary)" }}
-              >
-                Assignee
-              </label>
-              <Select
-                name={canEditPeopleFields ? "assigneeId" : undefined}
-                defaultValue={task.assignee?.id ?? ""}
-                disabled={!canEditPeopleFields}
-              >
-                {canEditPeopleFields ? (
-                  <>
-                    <option value="">Unassigned</option>
-                    {peopleOptions.map((person) => (
-                      <option key={person.id} value={person.id}>
-                        {person.name?.trim() || person.email}
+              )}
+            </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Status">
+                {(ids) => (
+                  <Select id={ids.id} name="statusId" defaultValue={task.statusId}>
+                    {statuses.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
                       </option>
                     ))}
-                  </>
-                ) : (
-                  <option value={task.assignee?.id ?? ""}>{assigneeLabel}</option>
+                  </Select>
                 )}
-              </Select>
-              {!canEditPeopleFields && (
-                <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
-                  {peopleFieldMessage}
-                </p>
-              )}
+              </Field>
+              <Field label="Priority">
+                {(ids) => (
+                  <Select id={ids.id} name="priority" defaultValue={task.priority}>
+                    <option value="none">None</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="urgent">Urgent</option>
+                  </Select>
+                )}
+              </Field>
             </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Due Date">
+                {(ids) => (
+                  <Input
+                    id={ids.id}
+                    name="dueDate"
+                    type="date"
+                    required
+                    defaultValue={toDateInputValue(task.dueDate)}
+                  />
+                )}
+              </Field>
+              <Field label="Start Date">
+                {(ids) => (
+                  <Input
+                    id={ids.id}
+                    name="startDate"
+                    type="date"
+                    defaultValue={task.startDate ? toDateInputValue(task.startDate) : ""}
+                  />
+                )}
+              </Field>
+            </div>
+            <Field label="Sprint">
+              {(ids) => (
+                <Select id={ids.id} name="sprintId" defaultValue={task.sprintId ?? ""}>
+                  <option value="">No sprint</option>
+                  {sprints.map((sprint) => (
+                    <option key={sprint.id} value={sprint.id}>{sprint.name}</option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Description">
+              {(ids) => (
+                <Textarea
+                  id={ids.id}
+                  name="body"
+                  defaultValue={task.body ?? ""}
+                  rows={5}
+                  placeholder="Add task details..."
+                  className="resize-y"
+                />
+              )}
+            </Field>
+            <Field
+              label="Assignee"
+              hint={canEditPeopleFields ? undefined : peopleFieldMessage}
+            >
+              {(ids) => (
+                <Select
+                  id={ids.id}
+                  name={canEditPeopleFields ? "assigneeId" : undefined}
+                  defaultValue={task.assignee?.id ?? ""}
+                  disabled={!canEditPeopleFields}
+                >
+                  {canEditPeopleFields ? (
+                    <>
+                      <option value="">Unassigned</option>
+                      {peopleOptions.map((person) => (
+                        <option key={person.id} value={person.id}>
+                          {person.name?.trim() || person.email}
+                        </option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value={task.assignee?.id ?? ""}>{assigneeLabel}</option>
+                  )}
+                </Select>
+              )}
+            </Field>
             <div>
               <label
                 className="mb-1 block text-xs font-medium"
@@ -1907,7 +1921,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                         key={tag.id}
                         className="flex items-center gap-2 rounded-md px-2 py-1 text-xs"
                         style={{
-                          backgroundColor: `${tag.color}14`,
+                          backgroundColor: tagChipBackground(tag.color),
                           color: "var(--color-text-secondary)",
                         }}
                       >
@@ -1954,9 +1968,16 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 variant="destructive"
                 size="sm"
                 onClick={() => {
-                  if (confirm("Delete this task?")) {
-                    deleteTask.mutate({ id: taskId });
-                  }
+                  void confirm({
+                    title: "Delete this task?",
+                    description: "This permanently removes the task, its comments and its attachments.",
+                    confirmLabel: "Delete",
+                    destructive: true,
+                  }).then((confirmed) => {
+                    if (confirmed) {
+                      deleteTask.mutate({ id: taskId });
+                    }
+                  });
                 }}
               >
                 Delete
@@ -1969,6 +1990,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
           </div>
         )}
       </div>
-    </div>
+      {confirmElement}
+    </TaskDetailPanelShell>
   );
 }

@@ -119,6 +119,8 @@ test.describe("Expanded Playwright coverage", () => {
     await createTask(page, { title, dueDate: todayPlus(5), status: "Done" });
     await openBoardTaskDetail(page, title);
     await page.getByRole("button", { name: "Archive now" }).click();
+    // Archiving is confirm-gated (in-app ConfirmDialog, no native confirm())
+    await page.getByRole("dialog").getByRole("button", { name: "Archive", exact: true }).click();
 
     await switchToView(page, "archive");
     const archivedTitle = page.locator("h3", { hasText: title }).first();
