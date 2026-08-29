@@ -1,11 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 // NOTE: authz is intentionally NOT mocked — this suite pins the real
 // authorization behavior of the sprint router via the actor fixtures.
 import { createCallerFactory } from "@/server/trpc";
 import { sprintRouter } from "@/server/routers/sprint";
 import { memberOf } from "@/test/actors";
-import { createPrismaMock } from "@/test/prisma-mock";
 
 const createCaller = createCallerFactory(sprintRouter);
 
