@@ -15,6 +15,12 @@ import { requireGlobalAdmin, requireProjectAccess, requireTaskAccess } from "@/s
 import { appendAiAssistantTurn } from "@/server/services/ai/orchestrator";
 import { executeAiAction } from "@/server/services/ai/action-executor";
 import { rollbackAiActionCheckpoint } from "@/server/services/ai/checkpoints";
+import {
+  buildAiToolMessageContent,
+  createAiToolResultMessage,
+  getAiToolNameForActionType,
+  serializeAiActionExecutionOutcome,
+} from "@/server/services/ai/tool-results";
 import { normalizeAiConversationTitle } from "@/server/services/ai/presenter";
 import { completeWithAnthropicProvider } from "@/server/services/ai/provider-anthropic";
 import { completeWithOpenAiCompatibleProvider } from "@/server/services/ai/provider-openai-compatible";
@@ -1002,7 +1008,7 @@ export const aiRouter = createTRPCRouter({
             selectedTaskIds,
           });
 
-          return ctx.prisma.aiActionExecution.update({
+          const executed = await ctx.prisma.aiActionExecution.update({
             where: { id: input.id },
             data: {
               status: "executed",
@@ -1011,14 +1017,35 @@ export const aiRouter = createTRPCRouter({
               result: (result ?? null) as Prisma.InputJsonValue,
             },
           }).then(mapExecutionForClient);
+
+          // Tool-result loop: answer the model's tool call so the next turn
+          // learns the proposal was executed.
+          await createAiToolResultMessage(ctx.prisma, {
+            conversationId: execution.conversationId,
+            toolCallId: approved.toolCallId ?? null,
+            toolName: getAiToolNameForActionType(approved.actionType),
+            content: buildAiToolMessageContent(serializeAiActionExecutionOutcome({ status: "executed", result: approved.result ?? null })),
+          });
+
+          return executed;
         } catch (error) {
-          return ctx.prisma.aiActionExecution.update({
+          const errorMessage = error instanceof Error ? error.message : "AI action execution failed";
+          const failed = await ctx.prisma.aiActionExecution.update({
             where: { id: input.id },
             data: {
               status: "failed",
-              errorMessage: error instanceof Error ? error.message : "AI action execution failed",
+              errorMessage,
             },
           }).then(mapExecutionForClient);
+
+          await createAiToolResultMessage(ctx.prisma, {
+            conversationId: execution.conversationId,
+            toolCallId: approved.toolCallId ?? null,
+            toolName: getAiToolNameForActionType(approved.actionType),
+            content: buildAiToolMessageContent(serializeAiActionExecutionOutcome({ status: "failed", errorMessage })),
+          });
+
+          return failed;
         }
       });
     }),
@@ -1043,7 +1070,17 @@ export const aiRouter = createTRPCRouter({
         throw new Error("This AI action is no longer pending rejection");
       }
 
-      return ctx.prisma.aiActionExecution.findUniqueOrThrow({ where: { id: input.id } }).then(mapExecutionForClient);
+      const updated = await ctx.prisma.aiActionExecution.findUniqueOrThrow({ where: { id: input.id } });
+
+      // Tool-result loop: the model must learn its proposal was rejected.
+      await createAiToolResultMessage(ctx.prisma, {
+        conversationId: updated.conversationId,
+        toolCallId: updated.toolCallId ?? null,
+        toolName: getAiToolNameForActionType(updated.actionType),
+        content: buildAiToolMessageContent(serializeAiActionExecutionOutcome({ status: "rejected", errorMessage: "proposal rejected by the user" })),
+      });
+
+      return mapExecutionForClient(updated);
     }),
 
   rollbackAction: protectedProcedure
@@ -1072,7 +1109,7 @@ export const aiRouter = createTRPCRouter({
           actorId: ctx.session.user.id,
         });
 
-        return ctx.prisma.aiActionExecution.update({
+        const rolledBack = await ctx.prisma.aiActionExecution.update({
           where: { id: input.id },
           data: {
             rollbackStatus: "rolledBack",
@@ -1081,14 +1118,32 @@ export const aiRouter = createTRPCRouter({
             rolledBackByUserId: ctx.session.user.id,
           },
         }).then(mapExecutionForClient);
+
+        await createAiToolResultMessage(ctx.prisma, {
+          conversationId: execution.conversationId,
+          toolCallId: execution.toolCallId ?? null,
+          toolName: getAiToolNameForActionType(execution.actionType),
+          content: buildAiToolMessageContent(serializeAiActionExecutionOutcome({ status: "rolled_back" })),
+        });
+
+        return rolledBack;
       } catch (error) {
-        return ctx.prisma.aiActionExecution.update({
+        const rolledBackFailed = await ctx.prisma.aiActionExecution.update({
           where: { id: input.id },
           data: {
             rollbackStatus: "failed",
             rollbackErrorMessage: error instanceof Error ? error.message : "AI rollback failed",
           },
         }).then(mapExecutionForClient);
+
+        await createAiToolResultMessage(ctx.prisma, {
+          conversationId: execution.conversationId,
+          toolCallId: execution.toolCallId ?? null,
+          toolName: getAiToolNameForActionType(execution.actionType),
+          content: buildAiToolMessageContent(serializeAiActionExecutionOutcome({ status: "failed", errorMessage: error instanceof Error ? error.message : "AI rollback failed" })),
+        });
+
+        return rolledBackFailed;
       }
     }),
 

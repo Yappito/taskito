@@ -986,6 +986,9 @@ model AiActionExecution {
   id                String             @id @default(cuid())
   conversationId    String
   messageId         String?
+  // Native provider tool-call id this execution was created from (null for
+  // markdown-fallback proposals). Used to replay role:"tool" result rows.
+  toolCallId        String?
   projectId         String
   taskId            String?
   requestedByUserId String

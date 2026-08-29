@@ -287,7 +287,11 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
     role: item.role,
     content: item.content,
     createdAt: item.createdAt,
-  })));
+  })))
+    // role:"tool" rows are protocol artifacts of the AI tool-result loop,
+    // and empty assistant rows are read-tool round markers; neither is chat
+    // content for the timeline.
+    .filter((item) => item.role !== "tool" && !(item.role === "assistant" && !item.content.trim()));
   const visiblePendingMessages = dedupePendingMessages(persistedMessages, pendingMessages);
   const messages = sortProposals([
     ...persistedMessages,

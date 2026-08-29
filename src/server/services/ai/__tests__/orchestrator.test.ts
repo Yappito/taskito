@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/server/authz", () => ({
+  requireProjectAccess: vi.fn().mockResolvedValue({ membershipRole: "owner" }),
+  requireTaskAccess: vi.fn().mockResolvedValue({ id: "task" }),
+}));
 
 vi.mock("@/server/services/ai/provider-registry", () => ({
   resolveAiProvider: vi.fn(() => ({
@@ -38,9 +43,10 @@ const state = vi.hoisted(() => ({
   contextSnapshot: null as unknown,
 }));
 
-import { buildAiAssistantTurnRequest, persistAiAssistantCompletion } from "@/server/services/ai/orchestrator";
+import { buildAiAssistantTurnRequest, persistAiAssistantCompletion, runAiAssistantTurn } from "@/server/services/ai/orchestrator";
 import { extractAiProposals } from "@/server/services/ai/presenter";
 import type { AiProviderCompletion } from "@/server/services/ai/provider-request";
+import { installFakeFetch, jsonResponse, stubFakeProviderEnv } from "./helpers/fake-provider";
 import type { AiNativeToolCall } from "@/server/services/ai/tools";
 
 const projectId = "clxproject00000000000000000";
@@ -122,6 +128,8 @@ function createPersistPrismaMock(options: { allowYoloDestructive?: boolean; with
   let executionCounter = 0;
   const createdExecutions: Array<Record<string, unknown>> = [];
   const executionUpdates: Array<Record<string, unknown>> = [];
+  const createdMessages: Array<Record<string, unknown>> = [];
+  let messageCounter = 0;
   const prisma = {
     aiProjectPolicy: {
       findUnique: vi.fn().mockResolvedValue(
@@ -129,8 +137,13 @@ function createPersistPrismaMock(options: { allowYoloDestructive?: boolean; with
       ),
     },
     aiMessage: {
-      create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-        Promise.resolve({ id: "assistant-message-1", createdAt: new Date(), ...data })),
+      create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => {
+        messageCounter += 1;
+        const row = { id: data.role === "tool" ? `tool-message-${messageCounter}` : "assistant-message-1", createdAt: new Date(), toolCallId: null, ...data };
+        createdMessages.push(row);
+        return Promise.resolve(row);
+      }),
+      findMany: vi.fn().mockResolvedValue([]),
     },
     aiActionExecution: {
       create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => {
@@ -146,7 +159,8 @@ function createPersistPrismaMock(options: { allowYoloDestructive?: boolean; with
     },
     createdExecutions,
     executionUpdates,
-  } as unknown as PrismaClient & { createdExecutions: Array<Record<string, unknown>>; executionUpdates: Array<Record<string, unknown>> };
+    createdMessages,
+  } as unknown as PrismaClient & { createdExecutions: Array<Record<string, unknown>>; executionUpdates: Array<Record<string, unknown>>; createdMessages: Array<Record<string, unknown>> };
   return { prisma };
 }
 
@@ -321,5 +335,307 @@ describe("ai orchestrator sequential execution", () => {
     // The executor records completion order with reversed delays — only strict
     // sequential execution in proposal order reproduces this order.
     expect(state.executionOrder).toEqual(["execution-1", "execution-2", "execution-3"]);
+  });
+
+  it("writes role tool result messages in the yolo path for executed and failed proposals", async () => {
+    const yoloConversation = { ...baseConversation, mode: "yolo" as const };
+    const { prisma } = createPersistPrismaMock({ allowYoloDestructive: false });
+    const completion: AiProviderCompletion = {
+      content: "",
+      toolCalls: [
+        { id: "call_ok", name: "taskito_addComment", arguments: { title: "Note", summary: "Executes.", taskId, content: "note one" } },
+      ],
+      truncated: false,
+      stopReason: null,
+      usage: null,
+    };
+
+    await persistAiAssistantCompletion(prisma, {
+      conversation: yoloConversation,
+      requestedByUserId: "user-1",
+      completion,
+      selectedTaskIds: [taskId, otherTaskId],
+      toolsAvailable: true,
+    });
+
+    const toolRows = (prisma as unknown as { createdMessages: Array<Record<string, unknown>> }).createdMessages
+      .filter((row) => row.role === "tool");
+    expect(toolRows).toHaveLength(1);
+    expect(toolRows[0]).toMatchObject({ role: "tool", toolCallId: "call_ok", toolName: "taskito_addComment" });
+    const outcome = JSON.parse(String(toolRows[0].content)) as { status: string };
+    expect(outcome.status).toBe("executed");
+  });
+});
+
+
+function messageMockRow(data: Record<string, unknown>) {
+  return {
+    id: "row",
+    conversationId,
+    role: "user",
+    content: "",
+    toolName: null,
+    toolPayload: null,
+    toolCalls: null,
+    toolCallId: null,
+    usage: null,
+    isStreaming: false,
+    createdAt: new Date(0),
+    ...data,
+  };
+}
+
+function createLoopPrismaMock(history: Array<Record<string, unknown>> = []) {
+  let messageCounter = 0;
+  const createdMessages: Array<Record<string, unknown>> = [];
+  const prisma = {
+    aiProviderConnection: {
+      findUniqueOrThrow: vi.fn().mockResolvedValue({
+        id: "provider-1",
+        adapter: "openai_compatible",
+        baseUrl: "http://localhost:1234/v1",
+        model: "test-model",
+        encryptedSecret: "enc",
+        defaultHeaders: {},
+      }),
+    },
+    aiConversation: {
+      update: vi.fn().mockResolvedValue({}),
+    },
+    project: {
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ id: projectId, name: "Taskito" }),
+    },
+    aiMessage: {
+      findMany: vi.fn().mockResolvedValue(history),
+      create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => {
+        messageCounter += 1;
+        const row = messageMockRow({ ...data, id: `created-${messageCounter}`, createdAt: new Date() });
+        createdMessages.push(row);
+        return Promise.resolve(row);
+      }),
+    },
+    aiProjectPolicy: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
+    aiActionExecution: {
+      create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: "execution-1", createdAt: new Date(), ...data })),
+      update: vi.fn().mockImplementation(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
+        Promise.resolve({ id: where.id, createdAt: new Date(), ...data })),
+    },
+    createdMessages,
+  } as unknown as PrismaClient & { createdMessages: Array<Record<string, unknown>> };
+  return { prisma };
+}
+
+describe("ai orchestrator tool-result persistence", () => {
+  it("writes a paired tool-result row when a native proposal is dropped by permission", async () => {
+    const { prisma } = createPersistPrismaMock();
+    const completion: AiProviderCompletion = {
+      content: "Trying to archive.",
+      toolCalls: [
+        { id: "call_403", name: "taskito_moveStatus", arguments: { title: "Move", summary: "No permission.", taskId, statusId: "clxstatus0000000000000000" } },
+      ],
+      truncated: false,
+      stopReason: null,
+      usage: null,
+    };
+
+    const result = await persistAiAssistantCompletion(prisma, {
+      conversation: baseConversation,
+      requestedByUserId: "user-1",
+      completion,
+      selectedTaskIds: [taskId, otherTaskId],
+      toolsAvailable: true,
+    });
+
+    expect(result.proposals).toHaveLength(0);
+    const toolRows = (prisma as unknown as { createdMessages: Array<Record<string, unknown>> }).createdMessages
+      .filter((row) => row.role === "tool");
+    expect(toolRows).toHaveLength(1);
+    expect(toolRows[0]).toMatchObject({ role: "tool", toolCallId: "call_403", toolName: "taskito_moveStatus" });
+    const outcome = JSON.parse(String(toolRows[0].content)) as { status: string; reason: string };
+    expect(outcome.status).toBe("rejected");
+    expect(outcome.reason).toContain("move_status");
+  });
+
+  it("mines fenced-JSON proposals ONLY when the provider returned no tool calls and no tools were available", async () => {
+    const content = 'Please.\n```proposal\n[{"actionType":"addComment","title":"Note","summary":"Adds context.","payload":{"taskId":"' + taskId + '","content":"from fallback"}}]\n```';
+    const completion: AiProviderCompletion = { content, toolCalls: [], truncated: false, stopReason: null, usage: null };
+
+    // No tools available -> fallback parses proposals.
+    const { prisma } = createPersistPrismaMock();
+    const withFallback = await persistAiAssistantCompletion(prisma, {
+      conversation: baseConversation,
+      requestedByUserId: "user-1",
+      completion,
+      selectedTaskIds: [taskId, otherTaskId],
+      toolsAvailable: false,
+    });
+    expect(withFallback.proposals).toHaveLength(1);
+    expect(withFallback.proposals[0].actionType).toBe("addComment");
+
+    // Tools were available -> prose is never mined for proposals.
+    const { prisma: prismaWithTools } = createPersistPrismaMock();
+    const withoutFallback = await persistAiAssistantCompletion(prismaWithTools, {
+      conversation: baseConversation,
+      requestedByUserId: "user-1",
+      completion,
+      selectedTaskIds: [taskId, otherTaskId],
+      toolsAvailable: true,
+    });
+    expect(withoutFallback.proposals).toHaveLength(0);
+    expect((prismaWithTools as unknown as { createdExecutions: unknown[] }).createdExecutions).toHaveLength(0);
+
+    // Provider returned native tool calls (even with tools unavailable) -> no fallback.
+    const { prisma: prismaWithToolCalls } = createPersistPrismaMock();
+    const withNativeCalls = await persistAiAssistantCompletion(prismaWithToolCalls, {
+      conversation: baseConversation,
+      requestedByUserId: "user-1",
+      completion: { ...completion, toolCalls: [{ id: "c1", name: "taskito_addComment", arguments: { title: "T", summary: "S", taskId, content: "x" } }] },
+      selectedTaskIds: [taskId, otherTaskId],
+      toolsAvailable: false,
+    });
+    expect(withNativeCalls.proposals).toHaveLength(1);
+    expect(withNativeCalls.proposals[0].toolCallId).toBe("c1");
+  });
+});
+
+describe("ai orchestrator history replay", () => {
+  it("replays assistant toolCalls followed by their paired tool rows and drops dangling rows", async () => {
+    const assistantMessage = messageMockRow({
+      id: "assistant-1",
+      role: "assistant",
+      content: "Proposed.",
+      toolCalls: [{ id: "call_1", name: "taskito_addComment", arguments: { taskId, content: "x" } }],
+    });
+    const pairedToolRow = messageMockRow({
+      id: "tool-1",
+      role: "tool",
+      toolCallId: "call_1",
+      toolName: "taskito_addComment",
+      content: '{"status":"executed"}',
+    });
+    const danglingToolRow = messageMockRow({
+      id: "tool-2",
+      role: "tool",
+      toolCallId: "call_never_announced",
+      toolName: "taskito_archiveTask",
+      content: '{"status":"rejected"}',
+    });
+    const trailingUser = messageMockRow({ id: "user-2", role: "user", content: "and now?" });
+
+    const { prisma } = createLoopPrismaMock([assistantMessage, pairedToolRow, danglingToolRow, trailingUser]);
+
+    const request = await buildAiAssistantTurnRequest(prisma, {
+      conversation: baseConversation,
+      requestedByUserId: "user-1",
+    });
+
+    const roles = request.syntheticMessages.map((message) => [message.id, message.role]);
+    expect(roles).toEqual([
+      ["system-prompt", "system"],
+      ["context", "user"],
+      ["assistant-1", "assistant"],
+      ["tool-1", "tool"],
+      ["user-2", "user"],
+    ]);
+    // baseConversation grants 5 write permissions -> 7 write tools (archive
+    // covers archive+unarchive, link covers add+remove), no read permissions.
+    expect(buildAiToolDefinitionsRowCount(request.tools)).toBe(7);
+  });
+});
+
+function buildAiToolDefinitionsRowCount(tools: Array<{ name: string }>) {
+  return tools.length;
+}
+
+describe("ai orchestrator read-tool loop", () => {
+  let restoreEnv: (() => void) | undefined;
+  let restoreFake: (() => void) | undefined;
+
+  afterEach(() => {
+    if (restoreFake) {
+      restoreFake();
+      restoreFake = undefined;
+    }
+    if (restoreEnv) {
+      restoreEnv();
+      restoreEnv = undefined;
+    }
+  });
+
+  function readToolResponse(id: string) {
+    return jsonResponse({
+      choices: [{
+        message: {
+          content: null,
+          tool_calls: [{ id, function: { name: "taskito_search_tasks", arguments: "{\"query\":\"login\"}" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 5, completion_tokens: 5 },
+    });
+  }
+
+  it("terminates after at most 3 server-side read-tool rounds per user turn", async () => {
+    restoreEnv = stubFakeProviderEnv({ AI_PROVIDER_HOST_ALLOWLIST: "localhost:1234" });
+    const fake = installFakeFetch([
+      readToolResponse("call_r1"),
+      readToolResponse("call_r2"),
+      readToolResponse("call_r3"),
+      readToolResponse("call_r4"),
+    ]);
+    restoreFake = fake.restore;
+
+    const { prisma } = createLoopPrismaMock();
+
+    const result = await runAiAssistantTurn(prisma, {
+      conversation: { ...baseConversation, grantedPermissions: ["search_project"] },
+      requestedByUserId: "user-1",
+    });
+
+    expect(result.readToolRounds).toBe(3);
+    expect(fake.requests).toHaveLength(4);
+
+    // The capped 4th call is answered with a rejection tool result.
+    const cappedRejections = (prisma as unknown as { createdMessages: Array<Record<string, unknown>> }).createdMessages
+      .filter((row) => row.role === "tool" && String(row.toolCallId) === "call_r4");
+    expect(cappedRejections).toHaveLength(1);
+    expect(String(cappedRejections[0].content)).toContain("tool round limit reached");
+  });
+
+  it("replays tool_use/tool_result pairs in the provider request after approvals", async () => {
+    restoreEnv = stubFakeProviderEnv({ AI_PROVIDER_HOST_ALLOWLIST: "localhost:1234" });
+    const fake = installFakeFetch([
+      jsonResponse({
+        choices: [{ message: { content: "All done." }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 5 },
+      }),
+    ]);
+    restoreFake = fake.restore;
+
+    const history = [
+      messageMockRow({ id: "assistant-1", role: "assistant", content: "Proposed a comment.", toolCalls: [{ id: "call_1", name: "taskito_addComment", arguments: { taskId, content: "x" } }] }),
+      messageMockRow({ id: "tool-1", role: "tool", toolCallId: "call_1", toolName: "taskito_addComment", content: '{"status":"executed"}' }),
+      messageMockRow({ id: "user-2", role: "user", content: "and now?" }),
+    ];
+    const { prisma } = createLoopPrismaMock(history);
+
+    await runAiAssistantTurn(prisma, {
+      conversation: { ...baseConversation, grantedPermissions: ["add_comment", "search_project"] },
+      requestedByUserId: "user-1",
+    });
+
+    expect(fake.requests).toHaveLength(1);
+    const body = fake.requests[0].body as { messages: Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: unknown[] }> };
+    const toolMessages = body.messages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    // OpenAI mapping: role "tool" + tool_call_id + content.
+    expect(toolMessages[0]).toEqual({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: '{"status":"executed"}',
+    });
   });
 });
