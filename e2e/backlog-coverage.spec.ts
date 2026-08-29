@@ -1,130 +1,26 @@
 import { test, expect, type Page } from "@playwright/test";
 
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function uniqueName(prefix: string) {
-  return `${prefix} ${Date.now()}-${Math.floor(Math.random() * 10_000)}`;
-}
-
-function todayPlus(days: number) {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return date.toISOString().split("T")[0];
-}
-
-async function login(page: Page, email = "admin@taskito.local", password = "taskito-demo-2026") {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    await page.goto("/login");
-    await page.waitForLoadState("networkidle");
-    await page.fill('input[name="email"]', email);
-    await page.fill('input[name="password"]', password);
-    await page.click('button[type="submit"]');
-
-    try {
-      await page.waitForURL((url) => !url.pathname.includes("/login"), {
-        timeout: 15_000,
-      });
-      return;
-    } catch (error) {
-      const hasInvalidCredentials = await page.getByText("Invalid email or password").isVisible().catch(() => false);
-      if (!hasInvalidCredentials || attempt === 1) {
-        throw error;
-      }
-    }
-  }
-}
+import {
+  closeTaskDetail,
+  createTask,
+  escapeRegex,
+  goToDefaultProject,
+  login,
+  openBoardTaskDetail,
+  switchToView,
+  todayPlus,
+  uniqueName,
+  waitForAppShell,
+} from "./helpers";
 
 async function logout(page: Page) {
   await page.getByRole("button", { name: "Log out" }).click();
   await page.waitForURL("**/login", { timeout: 15_000 });
 }
 
-async function goToDefaultProject(page: Page) {
-  await page.goto("/default", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
-}
-
-async function switchToView(page: Page, view: "list" | "board" | "graph" | "archive") {
-  await page.getByRole("button", { name: view, exact: true }).click();
-}
-
 async function openNewTaskDialog(page: Page) {
   await page.getByRole("button", { name: /New Task/ }).click();
   await expect(page.getByRole("heading", { name: "New Task" })).toBeVisible();
-}
-
-async function createTask(page: Page, options: {
-  title: string;
-  description?: string;
-  dueDate?: string;
-  status?: string;
-  priority?: "none" | "low" | "medium" | "high" | "urgent";
-  assignee?: string;
-  tagNames?: string[];
-  saveAsTemplate?: string;
-  templateToUse?: string;
-  customFieldValues?: Record<string, string>;
-}) {
-  await openNewTaskDialog(page);
-
-  if (options.templateToUse) {
-    await page.locator('select').first().selectOption({ label: options.templateToUse });
-    await page.waitForTimeout(200);
-  }
-
-  await page.getByPlaceholder("Task title...").fill(options.title);
-
-  if (options.description !== undefined) {
-    await page.getByPlaceholder("Add task details...").fill(options.description);
-  }
-
-  if (options.dueDate) {
-    await page.locator('input[name="dueDate"]').fill(options.dueDate);
-  }
-
-  if (options.priority) {
-    await page.locator('select[name="priority"]').selectOption(options.priority);
-  }
-
-  if (options.status) {
-    await page.locator('select[name="statusId"]').selectOption({ label: options.status });
-  }
-
-  if (options.assignee) {
-    await page.locator('select[name="assigneeId"]').selectOption({ label: options.assignee });
-  }
-
-  for (const tagName of options.tagNames ?? []) {
-    await page.locator("label", { hasText: tagName }).locator('input[type="checkbox"]').check();
-  }
-
-  for (const [fieldName, value] of Object.entries(options.customFieldValues ?? {})) {
-    const fieldLabel = page.locator("label", {
-      hasText: new RegExp(`^${escapeRegex(fieldName)}(?:\\s*\\*)?$`),
-    }).first();
-    const input = fieldLabel
-      .locator("xpath=..")
-      .locator("input:not([type=hidden]), select")
-      .first();
-    await input.fill(value);
-  }
-
-  if (options.saveAsTemplate) {
-    await page.locator("label", { hasText: "Save this draft as a reusable template" }).locator('input[type="checkbox"]').check();
-    await page.getByPlaceholder("Template name").fill(options.saveAsTemplate);
-  }
-
-  await page.getByRole("button", { name: "Create Task" }).click();
-  await page.waitForTimeout(1000);
-
-  const dialogHeading = page.getByRole("heading", { name: "New Task" });
-  if (await dialogHeading.isVisible().catch(() => false)) {
-    await page.getByRole("button", { name: "Cancel" }).click();
-  }
-
-  await expect(dialogHeading).not.toBeVisible({ timeout: 10_000 });
 }
 
 async function filterBoardByTitle(page: Page, title: string) {
@@ -134,22 +30,10 @@ async function filterBoardByTitle(page: Page, title: string) {
   await page.waitForTimeout(400);
 }
 
-async function openBoardTaskDetail(page: Page, title: string) {
-  await filterBoardByTitle(page, title);
-  await page.getByRole("heading", { name: title }).first().click();
-  await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10_000 });
-}
-
 async function openTaskLinkForm(page: Page) {
   const detailPanel = page.locator(".fixed.inset-y-0.right-0");
   await detailPanel.getByRole("button", { name: "Add link" }).click();
   await expect(detailPanel.getByRole("button", { name: "Create Link" })).toBeVisible();
-}
-
-async function closeTaskDetail(page: Page) {
-  const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-  await detailPanel.getByRole("button", { name: "Close task detail" }).click();
-  await expect(page.getByText("Task Detail")).not.toBeVisible({ timeout: 10_000 });
 }
 
 async function addTaskLink(page: Page, sourceTitle: string, linkType: "parent" | "child" | "blocks", targetTitle: string) {
@@ -416,7 +300,7 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
+    await waitForAppShell(page);
 
     await addTaskLink(page, blockerTitle, "blocks", blockedTitle);
     await updateTaskStatusToDoneExpectingError(page, blockedTitle, /blocking tasks are still open/i);
@@ -440,7 +324,7 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
+    await waitForAppShell(page);
 
     await addTaskLink(page, parentTitle, "parent", childTitle);
     await updateTaskStatusToDoneExpectingError(page, parentTitle, /child tasks are still open/i);
@@ -464,7 +348,7 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.locator("h1").first()).toBeVisible({ timeout: 15_000 });
+    await waitForAppShell(page);
 
     await addTaskLink(page, childTitle, "child", parentTitle);
     await updateTaskStatusToDoneExpectingError(page, parentTitle, /child tasks are still open/i);

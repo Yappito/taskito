@@ -1,12 +1,12 @@
 import { test, expect, Page } from "@playwright/test";
 
-import { goToDefaultProject, login, switchToView } from "./helpers";
+import { goToDefaultProject, login, switchToView, waitForAppShell } from "./helpers";
 
 /** Navigate to the default project page */
 async function goToProject(page: Page) {
   await goToDefaultProject(page);
-  // Wait for the project page to load (h1 with any project name)
-  await expect(page.locator("h1")).toBeVisible();
+  // Wait for the project workspace shell to be ready (QuickAdd "+ New Task" button)
+  await waitForAppShell(page);
 }
 
 test.describe("Board view drag-and-drop", () => {
