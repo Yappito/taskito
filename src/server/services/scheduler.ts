@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { runDailyDigestJob } from "@/server/services/email/digest";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
+import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatcher";
 import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
 
 /**
@@ -14,6 +15,7 @@ import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
  *  - due-date automation rules (`dueDatePassed` trigger)
  *  - the daily due-soon digest email (from SCHEDULER_DIGEST_HOUR_UTC onwards)
  *  - the daily sprint snapshot series (remaining work per active sprint)
+ *  - pending webhook deliveries whose `nextAttemptAt` came due (retries)
  *
  * Multi-replica safety: every tick opens one interactive transaction and takes
  * a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`)
@@ -187,6 +189,14 @@ async function runSprintSnapshotJob() {
   }
 }
 
+
+async function runWebhookDeliveryJob() {
+  const result = await processDueWebhookDeliveries(prisma, new Date());
+  if (result.processed > 0) {
+    console.info(`${SCHEDULER_LOG_PREFIX} webhook delivery job processed ${result.processed} delivery(ies) (${result.succeeded} succeeded)`);
+  }
+}
+
 /**
  * One scheduler tick: open a transaction, take the transaction-scoped advisory
  * lock inside it, and run all three jobs while the transaction (and therefore
@@ -205,7 +215,7 @@ export async function runScheduledJobs() {
           return { ran: false };
         }
 
-        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob, runSprintSnapshotJob]) {
+        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob, runSprintSnapshotJob, runWebhookDeliveryJob]) {
           try {
             await job();
           } catch (error) {

@@ -148,6 +148,7 @@ export function SearchModal() {
       { id: "graph", label: "Open dependency graph", href: `/${activeProjectSlug}?view=graph`, group: "Views" },
       { id: "archive", label: "Open archive", href: `/${activeProjectSlug}?view=archive`, group: "Views" },
       { id: "automation", label: "Automation settings", href: `/${activeProjectSlug}/settings/automation`, group: "Settings" },
+      { id: "webhooks", label: "Webhook settings", href: `/${activeProjectSlug}/settings/webhooks`, group: "Settings" },
       { id: "workflow", label: "Workflow settings", href: `/${activeProjectSlug}/settings/workflow`, group: "Settings" },
       { id: "ai", label: "AI settings", href: `/${activeProjectSlug}/settings/ai`, group: "Settings" },
     ];

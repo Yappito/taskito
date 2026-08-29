@@ -1,5 +1,6 @@
 import { createTaskActivity } from "@/server/services/task-activity";
 import { dispatchNotification, notifyTaskWatchers, resolveMentionedUserIds } from "@/server/services/notifications";
+import { emitTaskWebhookEvent } from "@/server/services/webhooks/dispatcher";
 import { requireTaskAccess } from "@/server/authz";
 import { getCommentBody, normalizeCommentContent } from "@/lib/comment-content";
 
@@ -76,6 +77,16 @@ export async function createTaskComment(
     actorId: input.authorId,
     type: "commented",
     payload: { commentId: comment.id },
+  }).catch(() => {});
+
+  // Fire-and-forget outbound webhook; never fails the mutation (and never
+  // carries the comment body — only its id).
+  emitTaskWebhookEvent(prisma, {
+    projectId: task.projectId,
+    event: "comment.created",
+    taskId: input.taskId,
+    actorId: input.authorId,
+    commentId: comment.id,
   }).catch(() => {});
 
   resolveMentionedUserIds(task.projectId, finalContent)
@@ -178,6 +189,16 @@ export async function updateTaskComment(
         })
       )
   );
+
+  // Fire-and-forget outbound webhook; never fails the mutation (and never
+  // carries the comment body — only its id).
+  emitTaskWebhookEvent(prisma, {
+    projectId: task.projectId,
+    event: "comment.updated",
+    taskId: input.taskId,
+    actorId: input.actorId,
+    commentId: input.commentId,
+  }).catch(() => {});
 
   return updatedComment;
 }

@@ -15,6 +15,7 @@ import { dashboardRouter } from "./dashboard";
 import { sprintRouter } from "./sprint";
 import { timeLogRouter } from "./time-log";
 import { automationRouter } from "./automation";
+import { webhookRouter } from "./webhook";
 import { recurrenceRouter } from "./recurrence";
 import { storageRouter } from "./storage";
 import { importExportRouter } from "./import-export";
@@ -37,6 +38,7 @@ export const appRouter = createTRPCRouter({
   sprint: sprintRouter,
   timeLog: timeLogRouter,
   automation: automationRouter,
+  webhook: webhookRouter,
   recurrence: recurrenceRouter,
   storage: storageRouter,
   import: importExportRouter,

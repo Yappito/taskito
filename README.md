@@ -302,6 +302,74 @@ Notes:
 - Tokens never grant admin. v1 decision: token-authenticated requests can call any non-admin API as the user, but every `adminProcedure` — including for admin users — plus `user.changePassword`, `user.updateProfile`, the global-admin checks (e.g. shared AI provider management), and the token management procedures themselves (`user.createApiToken`, `user.listApiTokens`, `user.revokeApiToken`) are rejected and require an interactive browser session. Tokens also cannot be used to change your password or email, and are not accepted by `/api/auth/*` (NextAuth) endpoints.
 - Token requests may not list or modify other users; failed bearer attempts are rate limited per client IP.
 
+## Webhooks
+
+Outbound, project-scoped webhooks are the generic integration path into Slack, n8n, Matrix, Zaps, and any other endpoint without Taskito shipping per-target connectors. Owners/managers (users with the project-wide `automation_manage` permission) create them under `Project settings → Webhooks`.
+
+### Delivery envelope
+
+Every delivery POSTs a single JSON object with only whitelisted metadata — never comment bodies, task bodies/descriptions, emails, or secrets:
+
+```json
+{
+  "id": "<webhookDeliveryId>",
+  "event": "task.status_changed",
+  "occurredAt": "2026-05-21T12:00:00.000Z",
+  "project": { "id": "…", "key": "OPS", "slug": "operations", "name": "Operations" },
+  "actor": { "id": "…", "name": "Ada Lovelace" },
+  "task": { "id": "…", "key": "OPS-17", "title": "Order new keyboards", "statusId": "…", "assigneeId": "…", "priority": "high", "dueDate": "2026-06-01T12:00:00.000Z" },
+  "changes": { "statusId": { "from": "…", "to": "…" } }
+}
+```
+
+Subscribable events: `task.created`, `task.updated`, `task.status_changed`, `task.assigned`, `task.archived`, `task.deleted`, `comment.created`, `comment.updated`. A synchronous `ping` event is sent by the settings page's "Send test" button and by the webhook router's `testDelivery` procedure.
+
+### Signature verification
+
+Each request is a `POST` with `Content-Type: application/json` and four extra headers:
+
+- `X-Taskito-Event` — subscribed event name (or `ping`)
+- `X-Taskito-Delivery` — delivery id (matches the envelope's `id`)
+- `X-Taskito-Timestamp` — Unix seconds when Taskito signed the request
+- `X-Taskito-Signature` — `sha256=<hex>` HMAC-SHA256 signature of `"<X-Taskito-Timestamp>.<body>"` keyed with the webhook's plaintext signing secret
+
+Verify against the RAW request body before any JSON parsing (reserialization changes bytes):
+
+```js
+import crypto from "node:crypto";
+
+function verifyWebhook(req, rawBody, secret, toleranceSeconds = 300) {
+  const timestamp = req.get("X-Taskito-Timestamp");
+  const signature = req.get("X-Taskito-Signature");
+  if (!timestamp || Number.isNaN(Number(timestamp))) return false;
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false; // replay guard
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex");
+  const provided = String(signature ?? "").replace(/^sha256=/, "");
+  const a = Buffer.from(expected);
+  const b = Buffer.from(provided);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+```
+
+The signing secret is generated at create time, encrypted at rest with the same key material as other Taskito secrets (`AI_SECRET_MASTER_KEY`), and shown once in the settings page after creation.
+
+### Delivery & retry policy
+
+- Deliveries are attempted up to **3 times**: the initial POST (fired inline, fire-and-forget — it can never block or fail the originating mutation) plus scheduled retries on a 1m / 5m backoff ladder.
+- Failed attempts are recorded in the per-project delivery log (event, status, HTTP response code, attempts, time) visible in project settings with a one-click **Redeliver**.
+- Outbound requests use a 10-second timeout, HTTP redirects are **never** followed, and response bodies are never reflected into errors or logs.
+- The target URL is re-validated at send time against the same SSRF policy used at create time, so a webhook created before a policy change (or whose DNS changed later) cannot reach newly-forbidden targets.
+- The in-process scheduler (see Scheduling) sweeps pending deliveries whose `nextAttemptAt` is due — enabling it with `SCHEDULER_ENABLED=true` (default) also guarantees eventual delivery after restarts.
+
+### Environment variable
+
+| Variable | Default | Notes |
+|---|---|---|
+| `WEBHOOK_ALLOW_PRIVATE_HOSTS` | `false` | Set `true` only to allow webhook URLs that point at loopback/private/link-local addresses (e.g. an n8n instance on the same host); rejected by default to prevent SSRF |
+
 ## Operations
 
 Useful commands from the repository root:

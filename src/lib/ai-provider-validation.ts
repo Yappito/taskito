@@ -344,6 +344,103 @@ export function validateAiProviderBaseUrl(rawUrl: string) {
   return normalizeBaseUrl(rawUrl);
 }
 
+/** Same class as {@link AiProviderUrlValidationError}; generic alias for non-AI egress paths. */
+export { AiProviderUrlValidationError as OutboundUrlValidationError };
+
+export interface OutboundUrlPolicy {
+  /** Noun used in error messages (e.g. "Webhook URL"). Defaults to "Outbound URL". */
+  label?: string;
+  /** When true, loopback/private/link-local targets are permitted (documented self-hosted opt-in). */
+  allowPrivateHosts?: boolean;
+  /** Hint appended to the private-host rejection (the caller's env-var name). */
+  privateHostsHint?: string;
+}
+
+/** True for IPv4 dotted-quad / bare-number literals and IPv6 literals (containing a colon). */
+function isIpLiteralHostname(hostname: string) {
+  if (normalizeHostname(hostname).includes(":")) {
+    return true;
+  }
+  return /^[0-9.]+$/.test(hostname) && hostname.includes(".");
+}
+
+/**
+ * Generic outbound-URL gate shared by every Taskito egress path that does not
+ * need the AI provider allowlist (webhooks, and future integrations).
+ *
+ * Validates that `rawUrl` is an absolute HTTP(S) URL without embedded
+ * credentials and that its host is (or resolves to) a public address:
+ *
+ * - private/reserved IP literals are rejected up front (unless the caller's
+ *   `allowPrivateHosts` opt-in is set — e.g. `WEBHOOK_ALLOW_PRIVATE_HOSTS=true`);
+ * - hostnames are resolved (all A and AAAA records) and every resolved
+ *   address is checked, so public-looking DNS names cannot tunnel to private
+ *   space (DNS rebinding / SSRF);
+ * - the same checks re-run at send time in callers that dispatch later, since
+ *   DNS answers can change between validation and delivery.
+ *
+ * Returns the normalized URL (hash stripped). Does not apply any allowlist —
+ * callers that need one should keep using the AI-provider helpers above.
+ */
+export async function assertOutboundUrlAllowed(rawUrl: string, policy: OutboundUrlPolicy = {}): Promise<string> {
+  const label = policy.label ?? "Outbound URL";
+  const trimmedUrl = rawUrl.trim();
+  if (!trimmedUrl) {
+    throw new AiProviderUrlValidationError(`${label} is required`);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmedUrl);
+  } catch {
+    throw new AiProviderUrlValidationError(`${label} must be a valid absolute URL`);
+  }
+
+  if (!httpOrHttps(parsed.protocol)) {
+    throw new AiProviderUrlValidationError(`${label} must use HTTP or HTTPS`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new AiProviderUrlValidationError(`${label} must not include credentials`);
+  }
+
+  const hostname = normalizeHostname(parsed.hostname);
+  const allowPrivateHosts = policy.allowPrivateHosts === true;
+
+  if (!allowPrivateHosts && isPrivateOrReservedHostname(hostname)) {
+    throw new AiProviderUrlValidationError(
+      `${label} points at a private, loopback, or link-local address${
+        policy.privateHostsHint ? `. ${policy.privateHostsHint}` : ""
+      }`,
+    );
+  }
+
+  // Only hostnames need resolving: IP literals (and the private-host case
+  // above) have already been checked against the reserved ranges.
+  if (!allowPrivateHosts && !isIpLiteralHostname(hostname)) {
+    const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+    if (addresses.length === 0) {
+      throw new AiProviderUrlValidationError(`${label} host could not be resolved`);
+    }
+    for (const { address } of addresses) {
+      if (isPrivateIpv4Address(address) || isPrivateIpv6Address(address)) {
+        throw new AiProviderUrlValidationError(
+          `${label} host resolves to a private, loopback, or link-local address (${address})${
+            policy.privateHostsHint ? `. ${policy.privateHostsHint}` : ""
+          }`,
+        );
+      }
+    }
+  }
+
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function httpOrHttps(protocol: string) {
+  return protocol === "http:" || protocol === "https:";
+}
+
 export async function assertAiProviderBaseUrlFetchAllowed(rawUrl: string) {
   const normalizedUrl = normalizeBaseUrl(rawUrl);
   const parsed = new URL(normalizedUrl);

@@ -137,6 +137,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
     { href: `/${projectSlug}/settings/import-export`, label: "Import / Export" },
     { href: `/${projectSlug}/settings/ai`, label: "AI" },
     { href: `/${projectSlug}/settings/automation`, label: "Automation" },
+    { href: `/${projectSlug}/settings/webhooks`, label: "Webhooks" },
   ];
 
   return (

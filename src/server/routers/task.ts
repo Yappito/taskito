@@ -5,6 +5,7 @@ import { autoTagTask } from "../services/auto-tagger";
 import { createTaskActivity } from "../services/task-activity";
 import { dispatchNotification, notifyTaskWatchers } from "../services/notifications";
 import { createTaskComment } from "../services/comment-service";
+import { emitTaskWebhookEvent, emitWebhookEvent } from "../services/webhooks/dispatcher";
 import { evaluateAutomationRules, isAutomationExecutionActive } from "../services/automation-evaluator";
 import {
   canAccessProject,
@@ -720,6 +721,14 @@ export const taskRouter = createTRPCRouter({
         }).catch(() => {});
       }
 
+      // Fire-and-forget outbound webhook; never fails the mutation.
+      emitTaskWebhookEvent(ctx.prisma, {
+        projectId: task.projectId,
+        event: "task.created",
+        taskId: task.id,
+        actorId: ctx.session.user.id,
+      }).catch(() => {});
+
       return task;
     }),
 
@@ -755,6 +764,8 @@ export const taskRouter = createTRPCRouter({
           statusId: true,
           priority: true,
           sprintId: true,
+          title: true,
+          dueDate: true,
           participants: { select: { userId: true } },
         },
       });
@@ -1012,6 +1023,56 @@ export const taskRouter = createTRPCRouter({
             actorId: ctx.session.user.id,
             before: { statusId: currentTaskSnapshot.statusId, assigneeId: currentTaskSnapshot.assigneeId, priority: currentTaskSnapshot.priority },
             after: { statusId: updated.statusId, assigneeId: updated.assigneeId, priority: updated.priority },
+          }).catch(() => {});
+        }
+      }
+
+      // Fire-and-forget outbound webhooks; never fail the mutation. Changes
+      // are compared against the pre-update snapshot (Dates normalized to ISO).
+      const webhookChanges: Record<string, { from: unknown; to: unknown }> = {};
+      if (title !== undefined && title !== currentTaskSnapshot.title) {
+        webhookChanges.title = { from: currentTaskSnapshot.title, to: title };
+      }
+      if (priority !== undefined && priority !== currentTaskSnapshot.priority) {
+        webhookChanges.priority = { from: currentTaskSnapshot.priority, to: priority };
+      }
+      if (dueDate !== undefined) {
+        const previousDueDate = currentTaskSnapshot.dueDate instanceof Date ? currentTaskSnapshot.dueDate : null;
+        if (!previousDueDate || dueDate.getTime() !== previousDueDate.getTime()) {
+          webhookChanges.dueDate = { from: previousDueDate ? previousDueDate.toISOString() : null, to: dueDate.toISOString() };
+        }
+      }
+      if (sprintId !== undefined && sprintId !== currentTaskSnapshot.sprintId) {
+        webhookChanges.sprintId = { from: currentTaskSnapshot.sprintId, to: sprintId };
+      }
+      if (statusId !== undefined && statusId !== currentTaskSnapshot.statusId) {
+        webhookChanges.statusId = { from: currentTaskSnapshot.statusId, to: statusId };
+      }
+      if (assigneeId !== undefined && assigneeId !== currentTaskSnapshot.assigneeId) {
+        webhookChanges.assigneeId = { from: currentTaskSnapshot.assigneeId, to: assigneeId };
+      }
+
+      if (Object.keys(webhookChanges).length > 0) {
+        emitWebhookEvent(ctx.prisma, {
+          projectId: currentTask.projectId,
+          event: "task.updated",
+          actorId: ctx.session.user.id,
+          payload: { task: updated, changes: webhookChanges },
+        }).catch(() => {});
+        if (webhookChanges.statusId) {
+          emitWebhookEvent(ctx.prisma, {
+            projectId: currentTask.projectId,
+            event: "task.status_changed",
+            actorId: ctx.session.user.id,
+            payload: { task: updated, changes: { statusId: webhookChanges.statusId } },
+          }).catch(() => {});
+        }
+        if (webhookChanges.assigneeId) {
+          emitWebhookEvent(ctx.prisma, {
+            projectId: currentTask.projectId,
+            event: "task.assigned",
+            actorId: ctx.session.user.id,
+            payload: { task: updated, changes: { assigneeId: webhookChanges.assigneeId } },
           }).catch(() => {});
         }
       }
@@ -1315,7 +1376,26 @@ export const taskRouter = createTRPCRouter({
     .input(z.object({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
       await requireTaskAccess(ctx.prisma, ctx.session.user.id, input.id, { permission: "task_delete" });
-      await ctx.prisma.task.delete({ where: { id: input.id } });
+      const deleted = await ctx.prisma.task.delete({ where: { id: input.id } });
+
+      // Fire-and-forget outbound webhook with the deleted task's last state.
+      emitWebhookEvent(ctx.prisma, {
+        projectId: deleted.projectId,
+        event: "task.deleted",
+        actorId: ctx.session.user.id,
+        payload: {
+          task: {
+            id: deleted.id,
+            taskNumber: deleted.taskNumber,
+            title: deleted.title,
+            statusId: deleted.statusId,
+            assigneeId: deleted.assigneeId,
+            priority: deleted.priority,
+            dueDate: deleted.dueDate,
+          },
+        },
+      }).catch(() => {});
+
       return { success: true };
     }),
 
@@ -1499,6 +1579,14 @@ export const taskRouter = createTRPCRouter({
         taskId: task.id,
         actorId: ctx.session.user.id,
         action: "archived",
+      }).catch(() => {});
+
+      // Fire-and-forget outbound webhook; never fails the mutation.
+      emitTaskWebhookEvent(ctx.prisma, {
+        projectId: task.projectId,
+        event: "task.archived",
+        taskId: task.id,
+        actorId: ctx.session.user.id,
       }).catch(() => {});
 
       return task;
