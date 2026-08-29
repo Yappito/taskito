@@ -30,7 +30,8 @@ function createPrismaMock() {
   return {
     recurrenceRule: {
       findMany: vi.fn().mockResolvedValue([]),
-      // M8: occurrences are claimed with a compare-and-swap on nextDueDate.
+      // Standalone advances (endDate retirement only, since finding 5):
+      // claim+create runs inside the task-creation transaction instead.
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   };
@@ -72,7 +73,10 @@ function createRule(overrides: Record<string, unknown> = {}) {
 }
 
 describe("recurrence processor", () => {
-  let tx: { task: { create: ReturnType<typeof vi.fn> } };
+  let tx: {
+    task: { create: ReturnType<typeof vi.fn> };
+    recurrenceRule: { updateMany: ReturnType<typeof vi.fn> };
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -83,10 +87,16 @@ describe("recurrence processor", () => {
       task: {
         create: vi.fn().mockResolvedValue({ id: CREATED_TASK_ID }),
       },
+      // Finding 5: the occurrence claim runs on the SAME transaction client
+      // the task is created on (the interactive transaction opened by
+      // createTaskWithNextNumber), so a failure rolls both back together.
+      recurrenceRule: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
     };
     createTaskWithNextNumber.mockImplementation(async (_client: unknown, _projectId: string, factory: (tx: unknown, taskNumber: number) => Promise<unknown>) => {
       const created = await factory(tx, 42);
-      return (created as { id: string }) ?? { id: CREATED_TASK_ID };
+      return created;
     });
     createTaskActivity.mockResolvedValue(undefined);
   });
@@ -95,7 +105,7 @@ describe("recurrence processor", () => {
     vi.useRealTimers();
   });
 
-  it("claims the occurrence with a compare-and-swap and advances by frequency x interval", async () => {
+  it("claims the occurrence with a compare-and-swap inside the task-creation transaction (finding 5)", async () => {
     const prisma = createPrismaMock();
     const current = new Date("2026-05-19T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
@@ -105,13 +115,16 @@ describe("recurrence processor", () => {
     const result = await processDueRecurrences(prisma as never);
 
     expect(result.processed).toBe(1);
-    // M8: the CAS where-clause pins the value that was read, so only one of
-    // two concurrent callers can win the occurrence.
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    // The CAS where-clause pins the value that was read, so only one of two
+    // concurrent callers can win the occurrence — and it now runs on the tx
+    // client, i.e. in the same transaction that creates the task.
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-05-22T09:00:00.000Z") },
     });
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
+    // No standalone advance outside the transaction was committed.
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
   });
 
   it("advances yearly rules by the interval in years", async () => {
@@ -123,7 +136,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2028-05-19T09:00:00.000Z") },
     });
@@ -138,7 +151,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-06-01T09:00:00.000Z") },
     });
@@ -155,7 +168,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-05-25T09:00:00.000Z") },
     });
@@ -171,7 +184,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-05-25T09:00:00.000Z") },
     });
@@ -186,7 +199,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-02-15T09:00:00.000Z") },
     });
@@ -201,7 +214,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-02-15T09:30:00.000Z") },
     });
@@ -217,7 +230,7 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-02-28T09:30:00.000Z") },
     });
@@ -234,13 +247,13 @@ describe("recurrence processor", () => {
 
     await processDueRecurrences(prisma as never);
 
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2024-02-29T08:00:00.000Z") },
     });
   });
 
-  it("claims the occurrence but creates no task when the next occurrence exceeds endDate", async () => {
+  it("retires an occurrence past the end date with a standalone advance and no task", async () => {
     const prisma = createPrismaMock();
     const current = new Date("2026-05-19T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
@@ -256,6 +269,8 @@ describe("recurrence processor", () => {
 
     expect(result.createdTaskIds).toEqual([]);
     expect(createTaskWithNextNumber).not.toHaveBeenCalled();
+    // Retirement advances the rule on the global client (no task creation
+    // follows, so there is no claim/create gap to protect).
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
@@ -285,7 +300,7 @@ describe("recurrence processor", () => {
       tags: { create: [{ tagId: TAG_ID }] },
       customFieldValues: { create: [{ customFieldId: CUSTOM_FIELD_ID, value: "weekly" }] },
     });
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: ruleNextDueDate },
       data: { nextDueDate: new Date("2026-05-20T09:00:00.000Z") },
     });
@@ -297,9 +312,11 @@ describe("recurrence processor", () => {
     prisma.recurrenceRule.findMany.mockResolvedValue([
       createRule({ frequency: "daily", interval: 1, nextDueDate: current }),
     ]);
-    // The compare-and-swap: only the first caller's updateMany matches
-    // nextDueDate; the loser reads count 0 because the advance already happened.
-    prisma.recurrenceRule.updateMany
+    // The compare-and-swap inside the creation transaction: the first
+    // caller's claim matches (count 1); the loser's CAS already ran against
+    // the advanced value and matches nothing (count 0), so it returns null
+    // before ever writing a task row.
+    tx.recurrenceRule.updateMany
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 0 });
 
@@ -310,7 +327,7 @@ describe("recurrence processor", () => {
 
     expect(first.createdTaskIds).toEqual([CREATED_TASK_ID]);
     expect(second.createdTaskIds).toEqual([]);
-    expect(createTaskWithNextNumber).toHaveBeenCalledTimes(1);
+    expect(tx.task.create).toHaveBeenCalledTimes(1);
   });
 
   it("does not create a task when the compare-and-swap claim is lost", async () => {
@@ -318,15 +335,70 @@ describe("recurrence processor", () => {
     prisma.recurrenceRule.findMany.mockResolvedValue([
       createRule({ frequency: "daily", interval: 1 }),
     ]);
-    prisma.recurrenceRule.updateMany.mockResolvedValue({ count: 0 });
+    tx.recurrenceRule.updateMany.mockResolvedValue({ count: 0 });
 
     const result = await processDueRecurrences(prisma as never);
 
     expect(result.createdTaskIds).toEqual([]);
-    expect(createTaskWithNextNumber).not.toHaveBeenCalled();
+    expect(createTaskWithNextNumber).toHaveBeenCalledTimes(1);
+    expect(tx.task.create).not.toHaveBeenCalled();
   });
 
-  it("does not abort the batch when one rule throws, and rolls the claim back for retry", async () => {
+  it("recovers an occurrence when task creation fails between claim and create (finding 5)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-19T09:00:00.000Z");
+
+    // First run: the claim (CAS) runs inside the transaction, then the task
+    // creation itself blows up — the model for a crash between claim and
+    // create (same transaction, so both roll back together).
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({ frequency: "weekly", interval: 1, nextDueDate: current }),
+    ]);
+    tx.task.create.mockRejectedValueOnce(new Error("db write failed mid-transaction"));
+    const committedCreates: number[] = [];
+    tx.task.create.mockImplementation(async () => {
+      committedCreates.push(1);
+      return { id: CREATED_TASK_ID };
+    });
+    createTaskWithNextNumber.mockImplementationOnce(async (_client: unknown, _projectId: string, factory: (tx: unknown, taskNumber: number) => Promise<unknown>) => {
+      return await factory(tx, 42);
+    });
+
+    const first = await processDueRecurrences(prisma as never, { now: new Date("2026-05-19T10:00:00.000Z") });
+    expect(first.createdTaskIds).toEqual([]);
+
+    // Nothing about the occurrence was consumed: the claim shared the
+    // transaction with the failed task creation, so it rolled back with it —
+    // no committed advance and no compensating restore write on the global
+    // client (the old code had to attempt one after the fact).
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
+
+    // Simulate recovery: the next tick re-reads the same rule (still due —
+    // nextDueDate was never advanced) and tries again.
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({ frequency: "weekly", interval: 1, nextDueDate: current }),
+    ]);
+    createTaskWithNextNumber.mockImplementationOnce(async (_client: unknown, _projectId: string, factory: (tx: unknown, taskNumber: number) => Promise<unknown>) => {
+      const created = await factory(tx, 43);
+      return created;
+    });
+
+    const second = await processDueRecurrences(prisma as never, { now: new Date("2026-05-19T11:00:00.000Z") });
+
+    // No lost occurrence AND no duplicate: exactly one task row survives —
+    // the failed attempt's create rolled back with the claim, and only the
+    // recovery run's claim + create committed.
+    expect(second.createdTaskIds).toEqual([CREATED_TASK_ID]);
+    expect(committedCreates).toHaveLength(1);
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledTimes(2);
+    expect(tx.recurrenceRule.updateMany).toHaveBeenLastCalledWith({
+      where: { id: RULE_ID, nextDueDate: current },
+      data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
+    });
+  });
+
+  it("does not abort the batch when one rule throws, and recovers the failed occurrence on the next run (finding 5)", async () => {
     const prisma = createPrismaMock();
     const ruleOneNext = new Date("2026-05-19T09:00:00.000Z");
     const ruleTwoNext = new Date("2026-05-19T08:00:00.000Z");
@@ -340,7 +412,7 @@ describe("recurrence processor", () => {
       .mockRejectedValueOnce(new Error("task number allocation exploded"))
       .mockImplementationOnce(async (_client: unknown, _projectId: string, factory: (tx: unknown, taskNumber: number) => Promise<unknown>) => {
         const created = await factory(tx, 43);
-        return (created as { id: string }) ?? { id: CREATED_TASK_ID };
+        return created;
       });
 
     const result = await processDueRecurrences(prisma as never);
@@ -348,15 +420,11 @@ describe("recurrence processor", () => {
     expect(createTaskWithNextNumber).toHaveBeenCalledTimes(2);
     expect(result.createdTaskIds).toEqual([CREATED_TASK_ID]);
     expect(result.processed).toBe(2);
-    // Rule one: claim succeeded, the create failed — the advance is rolled
-    // back so the occurrence is retried on the next tick instead of being
-    // silently skipped.
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
-      where: { id: "cmab8yxxp0009i7p4k8n2v3qc", nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
-      data: { nextDueDate: ruleOneNext },
-    });
-    // Rule two: claimed and created exactly once.
-    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+    // Rule one: claim + failed create rolled back together inside the same
+    // transaction — no standalone restore write needed.
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
+    // Rule two: claimed and created exactly once, on the tx client.
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: "cmab8yxxp000ai7p4k8n2v3qc", nextDueDate: ruleTwoNext },
       data: { nextDueDate: new Date("2026-05-26T08:00:00.000Z") },
     });

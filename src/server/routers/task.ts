@@ -129,7 +129,9 @@ async function validateSprintAccess(
 }
 
 type TaskNumberClient = Pick<typeof import("@/lib/prisma").prisma, "$transaction" | "task">;
-type TaskNumberTransactionClient = Pick<typeof import("@/lib/prisma").prisma, "task">;
+// recurrenceRule: the recurrence processor's factory claims its occurrence
+// (CAS on nextDueDate) inside the same transaction that creates the task.
+type TaskNumberTransactionClient = Pick<typeof import("@/lib/prisma").prisma, "task" | "recurrenceRule">;
 
 async function getNextTaskNumber(client: Pick<typeof import("@/lib/prisma").prisma, "task">, projectId: string) {
   const lastTask = await client.task.findFirst({

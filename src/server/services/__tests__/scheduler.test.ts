@@ -56,7 +56,7 @@ import { TickDeadlineExceededError } from "@/server/services/scheduler-deadline"
 
 const NOW = new Date("2026-05-19T09:00:00.000Z");
 const INTERVAL_MS = 60_000;
-const DEFAULT_TICK_TIMEOUT_MS = 600_000;
+const DEFAULT_LOCK_TX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 // Stand-in for the interactive-transaction client Prisma hands to the callback.
 // The advisory lock query runs on the tx connection; the jobs keep using the
@@ -85,6 +85,7 @@ describe("scheduler", () => {
     process.env.SCHEDULER_ENABLED = "true";
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
     delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
 
     txMock = { $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) };
@@ -102,6 +103,7 @@ describe("scheduler", () => {
     delete process.env.SCHEDULER_ENABLED;
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
     delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
     vi.useRealTimers();
   });
@@ -140,21 +142,108 @@ describe("scheduler", () => {
       expect(processDueWebhookDeliveries).toHaveBeenCalledTimes(1);
     });
 
-    it("passes the transaction options with the tick timeout", async () => {
+    it("runs the sprint snapshot and webhook delivery jobs on each tick", async () => {
       await runScheduledJobs();
 
-      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), {
-        maxWait: 5000,
-        timeout: DEFAULT_TICK_TIMEOUT_MS,
-      });
+      expect(recordSprintSnapshots).toHaveBeenCalledTimes(1);
+      expect(processDueWebhookDeliveries).toHaveBeenCalledTimes(1);
+      // M9: the webhook sweep receives the tick deadline signal too.
+      expect(processDueWebhookDeliveries.mock.calls[0][0]).toBe(prismaMock);
+      expect(processDueWebhookDeliveries.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
     });
 
-    it("honours SCHEDULER_TICK_TIMEOUT_MS for the transaction timeout", async () => {
+    it("keeps the lock transaction independent of the tick timeout (M9)", async () => {
+      await runScheduledJobs();
+
+      // The lock tx is not the deadline: it holds exactly one query and stays
+      // open for the whole run, so it must never expire at the tick timeout.
+      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: DEFAULT_LOCK_TX_TIMEOUT_MS });
+    });
+
+    it("honours SCHEDULER_LOCK_TX_TIMEOUT_MS for the lock transaction", async () => {
       process.env.SCHEDULER_TICK_TIMEOUT_MS = "30000";
+      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "7200000";
 
       await runScheduledJobs();
 
-      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: 30000 });
+      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: 7200000 });
+    });
+
+    it("does not allow a second lock acquisition until a job that outlives the tick deadline finishes (M9)", async () => {
+      const tickTimeoutMs = 1_000;
+      const lockTxTimeoutMs = 1_500;
+      process.env.SCHEDULER_TICK_TIMEOUT_MS = String(tickTimeoutMs);
+      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = String(lockTxTimeoutMs);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      // Simulate real Prisma semantics: the interactive lock transaction is
+      // expired (rejected by a timer) while the job keeps running on the
+      // global client — the tx cannot cancel the job.
+      let pendingJobs = 0;
+      let releaseFirstJob: () => void = () => {};
+      processDueRecurrences.mockImplementation(() => {
+        pendingJobs += 1;
+        if (pendingJobs === 1) {
+          // The first run's job outlives the tick deadline (nobody resolves
+          // it until the test does).
+          return new Promise<void>((resolve) => {
+            releaseFirstJob = resolve;
+          });
+        }
+        // Later runs' jobs complete normally.
+        return Promise.resolve({ processed: 0, createdTaskIds: [] });
+      });
+      prismaMock.$transaction.mockImplementation(
+        (callback: (tx: typeof txMock) => Promise<unknown>, options?: { timeout?: number }) =>
+          new Promise((resolve, reject) => {
+            const expiry = setTimeout(
+              () => reject(new Error("Transactions are timed out")),
+              options?.timeout ?? 5_000,
+            );
+            void callback(txMock).then(
+              (value) => {
+                clearTimeout(expiry);
+                resolve(value);
+              },
+              (error) => {
+                clearTimeout(expiry);
+                reject(error);
+              },
+            );
+          }),
+      );
+
+      const firstTick = runScheduledJobs();
+      // Advance past both the tick deadline and the lock tx expiry, so the
+      // job has outlived SCHEDULER_TICK_TIMEOUT_MS and the lock tx expired.
+      await vi.advanceTimersByTimeAsync(lockTxTimeoutMs + 100);
+
+      // The first tick must still be in flight: withSchedulerLock awaits the
+      // outstanding work even though the lock tx itself already expired.
+      let firstSettled = false;
+      void firstTick.then(() => {
+        firstSettled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(firstSettled).toBe(false);
+      expect(pendingJobs).toBe(1);
+
+      // A second tick cannot acquire the lock while the first run is live.
+      const secondResult = await runScheduledJobs();
+      expect(secondResult).toEqual({ ran: false });
+      expect(pendingJobs).toBe(1);
+
+      // Only when the long-running job actually finishes does the first tick
+      // settle (fail-safe skip) and the next tick run again.
+      releaseFirstJob();
+      await firstTick;
+      await vi.advanceTimersByTimeAsync(0);
+
+      const thirdResult = await runScheduledJobs();
+      expect(thirdResult).toEqual({ ran: true });
+      expect(pendingJobs).toBe(2);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
+      errorSpy.mockRestore();
     });
 
     it("skips the tick when another instance holds the lock", async () => {

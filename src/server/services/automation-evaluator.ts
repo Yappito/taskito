@@ -57,6 +57,8 @@ interface AutomationRuleRef {
   actionPayload: unknown;
   triggerCondition: unknown;
   createdByUserId: string | null;
+  /** Execution principal: the user who last edited the rule (finding 4). */
+  lastEditedByUserId: string | null;
 }
 
 interface AutomationEvent {
@@ -377,45 +379,59 @@ export async function evaluateAutomationRules(prisma: PrismaClient, event: Autom
 }
 
 /**
- * Resolves the scheduled actor for a rule: its creator — never the project
- * owner, and never an arbitrary "earliest member" fallback. Returns null
- * (with a warning) when the creator is missing, disabled, or no longer holds
- * `automation_manage` or the action's project permission; the rule is then
- * skipped at execution time.
+ * Resolves the scheduled execution principal for a rule: the LAST EDITOR
+ * (AutomationRule.lastEditedByUserId, falling back to the creator for rules
+ * that predate the column — they still run as their creator until the first
+ * edit back-fills the attribution). Never the project owner, and never an
+ * arbitrary "earliest member" fallback.
+ *
+ * Finding 4 (editor impersonation): attributing scheduled executions to the
+ * original creator regardless of later edits let ANY editor with
+ * automation_manage + the action permission rewrite a rule's payload (e.g.
+ * repoint addComment at arbitrary text) while the generated content was still
+ * authored AS the original creator. Running as the last editor means the
+ * generated content is always attributed to whoever last shaped the rule —
+ * and if that principal is missing, disabled, or no longer holds
+ * `automation_manage` or the action's project permission, the rule is skipped
+ * (with a warning), never executed as the project owner or another member on
+ * their behalf.
  */
 export async function resolveAutomationRuleActorId(
   prisma: PrismaClient,
-  rule: Pick<AutomationRuleRef, "id" | "projectId" | "action" | "createdByUserId">
+  rule: Pick<AutomationRuleRef, "id" | "projectId" | "action" | "createdByUserId" | "lastEditedByUserId">
 ): Promise<string | null> {
   const prefix = `[automation] rule ${rule.id}`;
+  // The execution principal is the last editor; un-edited legacy rules keep
+  // running as their creator until someone edits them.
+  const principalId = rule.lastEditedByUserId ?? rule.createdByUserId;
 
-  if (!rule.createdByUserId) {
-    console.warn(`${prefix} has no creator; skipping scheduled execution (rules created before creator attribution are never run by the scheduler)`);
+  if (!principalId) {
+    console.warn(`${prefix} has no creator or last editor; skipping scheduled execution (rules created before creator attribution are never run by the scheduler)`);
     return null;
   }
 
-  const creator = await prisma.user.findUnique({
-    where: { id: rule.createdByUserId },
+  const principal = await prisma.user.findUnique({
+    where: { id: principalId },
     select: { id: true, disabledAt: true },
   });
-  if (!creator || creator.disabledAt) {
-    console.warn(`${prefix} creator ${rule.createdByUserId} is missing or disabled; skipping scheduled execution`);
+  if (!principal || principal.disabledAt) {
+    console.warn(`${prefix} execution principal ${principalId} (last editor) is missing or disabled; skipping scheduled execution`);
     return null;
   }
 
-  const permissions = await getActorProjectPermissions(prisma, creator.id, rule.projectId);
+  const permissions = await getActorProjectPermissions(prisma, principal.id, rule.projectId);
   const canManage = permissions.has("automation_manage");
   const canExecute = permissions.has(AUTOMATION_ACTION_PERMISSIONS[rule.action]);
   if (!canManage || !canExecute) {
     console.warn(
-      `${prefix} creator ${rule.createdByUserId} no longer holds the required project permissions ` +
+      `${prefix} execution principal ${principalId} (last editor) no longer holds the required project permissions ` +
         `(missing: ${[!canManage ? "automation_manage" : null, !canExecute ? AUTOMATION_ACTION_PERMISSIONS[rule.action] : null].filter(Boolean).join(", ")}); ` +
         "skipping scheduled execution",
     );
     return null;
   }
 
-  return creator.id;
+  return principal.id;
 }
 
 /**
@@ -490,10 +506,14 @@ async function claimDueDateFiring(
 /**
  * Processes `dueDatePassed` rules for every project that has them.
  *
- * - Each rule runs **as its creator** (AutomationRule.createdByUserId). When
- *   the creator is missing, disabled, or lost the required project
- *   permissions, the rule is skipped with a warning — it is never executed as
- *   the project owner or any other member on their behalf.
+ * - Each rule runs as its **last editor** (AutomationRule.lastEditedByUserId);
+ *   the creator is only used as a fallback for rules never edited after the
+ *   column was introduced. When that principal is missing, disabled, or lost
+ *   the required project permissions, the rule is skipped with a warning — it
+ *   is never executed as the project owner or any other member on their behalf.
+ *   This keeps generated content (comments, assignments, moves) attributed to
+ *   whoever last shaped the rule instead of letting a second editor create
+ *   content that looks like it came from the original author (finding 4).
  * - The transition to "overdue" is processed exactly once per (rule, task,
  *   due-date occurrence) via the AutomationRuleFiring claim table, so a
  *   long-overdue task can no longer produce a comment (or any other action)

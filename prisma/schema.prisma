@@ -13,50 +13,51 @@ datasource db {
 // ─── Auth.js models ─────────────────────────────────────
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String    @unique
-  emailVerified DateTime?
-  image         String?
-  profileImageStorageProvider StorageProvider @default(local)
-  profileImageStorageBucket   String?
-  profileImageStorageKey      String?
-  password      String?
-  role          String    @default("member")
-  authSource    String    @default("local")
-  disabledAt    DateTime?
-  lastLoginAt   DateTime?
-  settings      Json      @default("{}")
-  accounts      Account[]
-  sessions      Session[]
-  groupMemberships GroupMember[]
-  projectPermissionGrants UserProjectPermissionGrant[]
-  comments      Comment[]
-  activityEvents ActivityEvent[]
-  watchingTasks TaskWatcher[]
-  notifications Notification[] @relation("NotificationRecipient")
-  notificationActors Notification[] @relation("NotificationActor")
-  createdTasks  Task[]    @relation("TaskCreator")
-  assignedTasks Task[]    @relation("TaskAssignee")
-  participantTasks TaskParticipant[]
-  sprintAssignments SprintMember[]
-  projectMemberships ProjectMember[]
-  ownedDashboards Dashboard[] @relation("OwnedDashboards")
-  dashboardShares DashboardUserShare[]
-  ownedSavedFilters SavedFilter[] @relation("OwnedSavedFilters")
-  savedFilterShares SavedFilterUserShare[]
-  ownedAiProviders AiProviderConnection[] @relation("OwnedAiProviders")
-  aiConversations AiConversation[] @relation("CreatedAiConversations")
-  requestedAiActionExecutions AiActionExecution[] @relation("RequestedAiActions")
-  executedAiActionExecutions AiActionExecution[] @relation("ExecutedAiActions")
-  rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
-  createdWebhooks Webhook[]
-  timeLogs      TimeLog[]
-  apiTokens     ApiToken[]
-  digestClaims  EmailDigestClaim[]
-  createdAutomationRules AutomationRule[] @relation("AutomationRuleCreator")
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id                           String                       @id @default(cuid())
+  name                         String?
+  email                        String                       @unique
+  emailVerified                DateTime?
+  image                        String?
+  profileImageStorageProvider  StorageProvider              @default(local)
+  profileImageStorageBucket    String?
+  profileImageStorageKey       String?
+  password                     String?
+  role                         String                       @default("member")
+  authSource                   String                       @default("local")
+  disabledAt                   DateTime?
+  lastLoginAt                  DateTime?
+  settings                     Json                         @default("{}")
+  accounts                     Account[]
+  sessions                     Session[]
+  groupMemberships             GroupMember[]
+  projectPermissionGrants      UserProjectPermissionGrant[]
+  comments                     Comment[]
+  activityEvents               ActivityEvent[]
+  watchingTasks                TaskWatcher[]
+  notifications                Notification[]               @relation("NotificationRecipient")
+  notificationActors           Notification[]               @relation("NotificationActor")
+  createdTasks                 Task[]                       @relation("TaskCreator")
+  assignedTasks                Task[]                       @relation("TaskAssignee")
+  participantTasks             TaskParticipant[]
+  sprintAssignments            SprintMember[]
+  projectMemberships           ProjectMember[]
+  ownedDashboards              Dashboard[]                  @relation("OwnedDashboards")
+  dashboardShares              DashboardUserShare[]
+  ownedSavedFilters            SavedFilter[]                @relation("OwnedSavedFilters")
+  savedFilterShares            SavedFilterUserShare[]
+  ownedAiProviders             AiProviderConnection[]       @relation("OwnedAiProviders")
+  aiConversations              AiConversation[]             @relation("CreatedAiConversations")
+  requestedAiActionExecutions  AiActionExecution[]          @relation("RequestedAiActions")
+  executedAiActionExecutions   AiActionExecution[]          @relation("ExecutedAiActions")
+  rolledBackAiActionExecutions AiActionExecution[]          @relation("RolledBackAiActions")
+  createdWebhooks              Webhook[]
+  timeLogs                     TimeLog[]
+  apiTokens                    ApiToken[]
+  digestClaims                 EmailDigestClaim[]
+  createdAutomationRules       AutomationRule[]             @relation("AutomationRuleCreator")
+  lastEditedAutomationRules    AutomationRule[]             @relation("AutomationRuleLastEditor")
+  createdAt                    DateTime                     @default(now())
+  updatedAt                    DateTime                     @updatedAt
 }
 
 model Account {
@@ -99,22 +100,22 @@ model VerificationToken {
 }
 
 model OidcProviderConnection {
-  id                         String   @id @default(cuid())
-  providerId                 String   @unique
-  name                       String
-  issuer                     String
-  clientId                   String
-  encryptedClientSecret      String
-  scope                      String   @default("openid email profile")
-  groupsClaim                String   @default("groups")
-  defaultRole                String   @default("member")
-  allowSignup                Boolean  @default(true)
-  allowEmailAccountLinking   Boolean  @default(false)
-  requireEmailVerified       Boolean  @default(false)
-  adminEmails                Json     @default("[]")
-  isEnabled                  Boolean  @default(true)
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  id                       String   @id @default(cuid())
+  providerId               String   @unique
+  name                     String
+  issuer                   String
+  clientId                 String
+  encryptedClientSecret    String
+  scope                    String   @default("openid email profile")
+  groupsClaim              String   @default("groups")
+  defaultRole              String   @default("member")
+  allowSignup              Boolean  @default(true)
+  allowEmailAccountLinking Boolean  @default(false)
+  requireEmailVerified     Boolean  @default(false)
+  adminEmails              Json     @default("[]")
+  isEnabled                Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
   @@index([isEnabled])
 }
@@ -151,25 +152,25 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  statuses    WorkflowStatus[]
-  transitions WorkflowTransition[]
-  tasks       Task[]
-  tags        Tag[]
-  customFields CustomField[]
-  members     ProjectMember[]
-  groupMemberships ProjectGroup[]
-  userPermissionGrants UserProjectPermissionGrant[]
+  statuses              WorkflowStatus[]
+  transitions           WorkflowTransition[]
+  tasks                 Task[]
+  tags                  Tag[]
+  customFields          CustomField[]
+  members               ProjectMember[]
+  groupMemberships      ProjectGroup[]
+  userPermissionGrants  UserProjectPermissionGrant[]
   groupPermissionGrants GroupProjectPermissionGrant[]
-  aiProviders AiProviderConnection[]
-  aiPolicy    AiProjectPolicy?
-  aiConversations AiConversation[]
-  aiActionExecutions AiActionExecution[]
-  dashboards  Dashboard[]
-  savedFilters SavedFilter[]
-  sprints     Sprint[]
-  automationRules AutomationRule[]
-  automationRuns AutomationRun[]
-  webhooks Webhook[]
+  aiProviders           AiProviderConnection[]
+  aiPolicy              AiProjectPolicy?
+  aiConversations       AiConversation[]
+  aiActionExecutions    AiActionExecution[]
+  dashboards            Dashboard[]
+  savedFilters          SavedFilter[]
+  sprints               Sprint[]
+  automationRules       AutomationRule[]
+  automationRuns        AutomationRun[]
+  webhooks              Webhook[]
 }
 
 enum SprintStatus {
@@ -218,9 +219,9 @@ model SprintSnapshot {
 }
 
 model SprintMember {
-  sprintId   String
-  userId     String
-  createdAt  DateTime @default(now())
+  sprintId  String
+  userId    String
+  createdAt DateTime @default(now())
 
   sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -262,11 +263,11 @@ enum ProjectPermission {
 }
 
 model ProjectMember {
-  projectId  String
-  userId     String
-  role       ProjectMemberRole @default(member)
-  createdAt  DateTime          @default(now())
-  updatedAt  DateTime          @updatedAt
+  projectId String
+  userId    String
+  role      ProjectMemberRole @default(member)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -276,19 +277,19 @@ model ProjectMember {
 }
 
 model Group {
-  id          String   @id @default(cuid())
-  name        String
-  slug        String   @unique
-  description String?
-  source      String   @default("local")
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  description  String?
+  source       String   @default("local")
   oidcProvider String?
-  externalId  String?
-  isSystem    Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  externalId   String?
+  isSystem     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  members GroupMember[]
-  projectMemberships ProjectGroup[]
+  members                 GroupMember[]
+  projectMemberships      ProjectGroup[]
   projectPermissionGrants GroupProjectPermissionGrant[]
 
   @@unique([source, oidcProvider, externalId])
@@ -407,46 +408,46 @@ enum TaskPriority {
 }
 
 model Task {
-  id          String       @id @default(cuid())
-  projectId   String
-  taskNumber  Int
-  creatorId   String?
-  assigneeId  String?
-  title       String
-  description Json?
-  body        String?      @db.Text
-  statusId    String
-  sprintId    String?
-  priority    TaskPriority @default(none)
-  dueDate     DateTime
-  startDate   DateTime?
-  closedAt    DateTime?
-  archivedAt  DateTime?
-  alertAcknowledged Boolean @default(false)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id                String       @id @default(cuid())
+  projectId         String
+  taskNumber        Int
+  creatorId         String?
+  assigneeId        String?
+  title             String
+  description       Json?
+  body              String?      @db.Text
+  statusId          String
+  sprintId          String?
+  priority          TaskPriority @default(none)
+  dueDate           DateTime
+  startDate         DateTime?
+  closedAt          DateTime?
+  archivedAt        DateTime?
+  alertAcknowledged Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
   // CITADEL-d77.32: cached AI task summary — { generatedAt, forUpdatedAt, forLatestCommentAt, result }
-  aiSummary   Json?
+  aiSummary         Json?
 
-  project          Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  creator          User?              @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: SetNull)
-  assignee         User?              @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
-  status           WorkflowStatus     @relation(fields: [statusId], references: [id])
-  sprint           Sprint?            @relation(fields: [sprintId], references: [id], onDelete: SetNull)
-  tags             TaskTag[]
-  sourceLinks      TaskLink[]         @relation("SourceTask")
-  targetLinks      TaskLink[]         @relation("TargetTask")
-  comments         Comment[]
-  activityEvents   ActivityEvent[]
-  watchers         TaskWatcher[]
-  participants     TaskParticipant[]
-  notifications    Notification[]
-  customFieldValues CustomFieldValue[]
-  aiConversations  AiConversation[]
-  aiActionExecutions AiActionExecution[]
-  timeLogs         TimeLog[]
-  recurrenceRule   RecurrenceRule?
-  automationRuns   AutomationRun[]
+  project               Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator               User?                  @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+  assignee              User?                  @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  status                WorkflowStatus         @relation(fields: [statusId], references: [id])
+  sprint                Sprint?                @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+  tags                  TaskTag[]
+  sourceLinks           TaskLink[]             @relation("SourceTask")
+  targetLinks           TaskLink[]             @relation("TargetTask")
+  comments              Comment[]
+  activityEvents        ActivityEvent[]
+  watchers              TaskWatcher[]
+  participants          TaskParticipant[]
+  notifications         Notification[]
+  customFieldValues     CustomFieldValue[]
+  aiConversations       AiConversation[]
+  aiActionExecutions    AiActionExecution[]
+  timeLogs              TimeLog[]
+  recurrenceRule        RecurrenceRule?
+  automationRuns        AutomationRun[]
   automationRuleFirings AutomationRuleFiring[]
 
   @@unique([projectId, taskNumber])
@@ -525,27 +526,34 @@ enum AutomationRunStatus {
 }
 
 model AutomationRule {
-  id               String            @id @default(cuid())
-  projectId        String
-  createdByUserId  String?
-  name             String
-  isEnabled        Boolean           @default(true)
-  trigger          AutomationTrigger
-  triggerCondition Json?
-  action           AutomationAction
-  actionPayload    Json
-  lastRunAt        DateTime?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  id                 String            @id @default(cuid())
+  projectId          String
+  createdByUserId    String?
+  // Identity of the user who last edited the rule. Scheduled executions run
+  // as this user (the execution principal), so a second editor can never
+  // rewrite a rule into generating content attributed to the original
+  // creator (non-repudiation/integrity, finding 4).
+  lastEditedByUserId String?
+  name               String
+  isEnabled          Boolean           @default(true)
+  trigger            AutomationTrigger
+  triggerCondition   Json?
+  action             AutomationAction
+  actionPayload      Json
+  lastRunAt          DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-  project   Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  createdBy User?                   @relation("AutomationRuleCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  runs      AutomationRun[]
-  firings   AutomationRuleFiring[]
+  project      Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy    User?                  @relation("AutomationRuleCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lastEditedBy User?                  @relation("AutomationRuleLastEditor", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
+  runs         AutomationRun[]
+  firings      AutomationRuleFiring[]
 
   @@index([projectId, isEnabled])
   @@index([projectId, trigger])
   @@index([createdByUserId])
+  @@index([lastEditedByUserId])
 }
 
 // One row per executed (rule, task, due-date occurrence) for `dueDatePassed`
@@ -553,11 +561,11 @@ model AutomationRule {
 // rule fires at most once per overdue occurrence — an addComment rule cannot
 // re-fire on every scheduler tick while a task stays overdue.
 model AutomationRuleFiring {
-  id        String   @id @default(cuid())
-  ruleId    String
-  taskId    String
-  dueDate   DateTime
-  firedAt   DateTime @default(now())
+  id      String   @id @default(cuid())
+  ruleId  String
+  taskId  String
+  dueDate DateTime
+  firedAt DateTime @default(now())
 
   rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
   task Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -614,21 +622,21 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id            String                @id @default(cuid())
-  webhookId     String
-  event         String
-  payload       Json
-  status        WebhookDeliveryStatus @default(pending)
-  responseCode  Int?
-  attempts      Int                   @default(0)
-  lastError     String?               @db.Text
-  nextAttemptAt DateTime
+  id             String                @id @default(cuid())
+  webhookId      String
+  event          String
+  payload        Json
+  status         WebhookDeliveryStatus @default(pending)
+  responseCode   Int?
+  attempts       Int                   @default(0)
+  lastError      String?               @db.Text
+  nextAttemptAt  DateTime
   // Exclusive-claim lease: set when a worker transitions the row
   // pending -> processing; expired leases are deliberately recovered back to
   // pending by the scheduler sweep so a crashed worker cannot strand a row.
   leaseExpiresAt DateTime?
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
 
   webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
 
@@ -648,11 +656,11 @@ enum TaskActivityAction {
 
 model ActivityEvent {
   id        String             @id @default(cuid())
-  taskId     String
-  actorId    String?
-  action     TaskActivityAction
-  details    Json?
-  createdAt  DateTime          @default(now())
+  taskId    String
+  actorId   String?
+  action    TaskActivityAction
+  details   Json?
+  createdAt DateTime           @default(now())
 
   task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
   actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
@@ -669,9 +677,9 @@ enum NotificationType {
 }
 
 model TaskWatcher {
-  taskId     String
-  userId     String
-  createdAt  DateTime @default(now())
+  taskId    String
+  userId    String
+  createdAt DateTime @default(now())
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -681,9 +689,9 @@ model TaskWatcher {
 }
 
 model TaskParticipant {
-  taskId     String
-  userId     String
-  createdAt  DateTime @default(now())
+  taskId    String
+  userId    String
+  createdAt DateTime @default(now())
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -734,11 +742,11 @@ model TaskLink {
 // ─── Tags ────────────────────────────────────────────────
 
 model Tag {
-  id              String    @id @default(cuid())
+  id              String  @id @default(cuid())
   projectId       String
   name            String
-  color           String    @default("#6b7280")
-  isAutoGenerated Boolean   @default(false)
+  color           String  @default("#6b7280")
+  isAutoGenerated Boolean @default(false)
 
   project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   tasks   TaskTag[]
@@ -773,16 +781,16 @@ model Comment {
 }
 
 model CommentAttachment {
-  id           String   @id @default(cuid())
-  commentId    String
-  originalName String
-  mimeType     String
-  sizeBytes    Int
-  storagePath  String
+  id              String          @id @default(cuid())
+  commentId       String
+  originalName    String
+  mimeType        String
+  sizeBytes       Int
+  storagePath     String
   storageProvider StorageProvider @default(local)
   storageBucket   String?
   storageKey      String?
-  createdAt    DateTime @default(now())
+  createdAt       DateTime        @default(now())
 
   comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
@@ -869,8 +877,8 @@ model SavedFilter {
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  owner   User    @relation("OwnedSavedFilters", fields: [ownerId], references: [id], onDelete: Cascade)
+  project Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner   User                   @relation("OwnedSavedFilters", fields: [ownerId], references: [id], onDelete: Cascade)
   shares  SavedFilterUserShare[]
   widgets DashboardWidget[]
 
@@ -900,8 +908,8 @@ model Dashboard {
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  owner   User    @relation("OwnedDashboards", fields: [ownerId], references: [id], onDelete: Cascade)
+  project Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  owner   User                 @relation("OwnedDashboards", fields: [ownerId], references: [id], onDelete: Cascade)
   shares  DashboardUserShare[]
   widgets DashboardWidget[]
 
@@ -1010,9 +1018,9 @@ model AiProviderConnection {
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
-  ownerUser User? @relation("OwnedAiProviders", fields: [ownerUserId], references: [id], onDelete: Cascade)
-  project   Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  conversations AiConversation[]
+  ownerUser                 User?             @relation("OwnedAiProviders", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  project                   Project?          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  conversations             AiConversation[]
   defaultForProjectPolicies AiProjectPolicy[] @relation("AiPolicyDefaultProvider")
 
   @@index([ownerUserId])
@@ -1020,19 +1028,19 @@ model AiProviderConnection {
 }
 
 model AiProjectPolicy {
-  projectId          String   @id
-  defaultProviderId  String?
-  allowUserProviders Boolean  @default(true)
-  allowProjectProviders Boolean @default(true)
-  allowSharedProviders Boolean @default(true)
-  allowYoloMode      Boolean  @default(true)
-  allowYoloDestructive Boolean @default(false)
-  defaultPermissions Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\"]")
-  maxPermissions     Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\",\"add_comment\",\"link_tasks\",\"move_status\",\"assign_task\",\"edit_core_fields\",\"edit_tags\",\"edit_custom_fields\",\"bulk_update_selected\",\"create_task\",\"duplicate_task\",\"archive_task\"]")
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  projectId             String   @id
+  defaultProviderId     String?
+  allowUserProviders    Boolean  @default(true)
+  allowProjectProviders Boolean  @default(true)
+  allowSharedProviders  Boolean  @default(true)
+  allowYoloMode         Boolean  @default(true)
+  allowYoloDestructive  Boolean  @default(false)
+  defaultPermissions    Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\"]")
+  maxPermissions        Json     @default("[\"read_current_task\",\"read_selected_tasks\",\"search_project\",\"add_comment\",\"link_tasks\",\"move_status\",\"assign_task\",\"edit_core_fields\",\"edit_tags\",\"edit_custom_fields\",\"bulk_update_selected\",\"create_task\",\"duplicate_task\",\"archive_task\"]")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
-  project         Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project         Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
   defaultProvider AiProviderConnection? @relation("AiPolicyDefaultProvider", fields: [defaultProviderId], references: [id], onDelete: SetNull)
 }
 
@@ -1051,11 +1059,11 @@ model AiConversation {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  project       Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  task          Task?                @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  createdByUser User                 @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: Cascade)
-  provider      AiProviderConnection @relation(fields: [providerId], references: [id], onDelete: Restrict)
-  messages      AiMessage[]
+  project          Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task             Task?                @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  createdByUser    User                 @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  provider         AiProviderConnection @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  messages         AiMessage[]
   actionExecutions AiActionExecution[]
 
   @@index([projectId, updatedAt])
@@ -1076,48 +1084,48 @@ model AiMessage {
   isStreaming    Boolean       @default(false)
   createdAt      DateTime      @default(now())
 
-  conversation AiConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation     AiConversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   actionExecutions AiActionExecution[]
 
   @@index([conversationId, createdAt])
 }
 
 model AiActionExecution {
-  id                String             @id @default(cuid())
-  conversationId    String
-  messageId         String?
+  id                   String             @id @default(cuid())
+  conversationId       String
+  messageId            String?
   // Native provider tool-call id this execution was created from (null for
   // markdown-fallback proposals). Used to replay role:"tool" result rows.
-  toolCallId        String?
-  projectId         String
-  taskId            String?
-  requestedByUserId String
-  executedByUserId  String?
-  actionType        AiActionType
-  title             String?
-  summary           String?            @db.Text
-  mode              AiConversationMode
-  status            AiActionStatus     @default(proposed)
-  proposedPayload   Json
-  executedPayload   Json?
-  result            Json?
-  checkpointBefore  Json?
-  checkpointAfter   Json?
-  rollbackStatus    AiRollbackStatus    @default(unavailable)
-  rollbackErrorMessage String?           @db.Text
-  rolledBackAt      DateTime?
-  rolledBackByUserId String?
-  errorMessage      String?            @db.Text
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  toolCallId           String?
+  projectId            String
+  taskId               String?
+  requestedByUserId    String
+  executedByUserId     String?
+  actionType           AiActionType
+  title                String?
+  summary              String?            @db.Text
+  mode                 AiConversationMode
+  status               AiActionStatus     @default(proposed)
+  proposedPayload      Json
+  executedPayload      Json?
+  result               Json?
+  checkpointBefore     Json?
+  checkpointAfter      Json?
+  rollbackStatus       AiRollbackStatus   @default(unavailable)
+  rollbackErrorMessage String?            @db.Text
+  rolledBackAt         DateTime?
+  rolledBackByUserId   String?
+  errorMessage         String?            @db.Text
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
 
-  conversation    AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  message         AiMessage?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
-  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  task            Task?           @relation(fields: [taskId], references: [id], onDelete: SetNull)
-  requestedByUser User            @relation("RequestedAiActions", fields: [requestedByUserId], references: [id], onDelete: Cascade)
-  executedByUser  User?           @relation("ExecutedAiActions", fields: [executedByUserId], references: [id], onDelete: SetNull)
-  rolledBackByUser User?           @relation("RolledBackAiActions", fields: [rolledBackByUserId], references: [id], onDelete: SetNull)
+  conversation     AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message          AiMessage?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  project          Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task             Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  requestedByUser  User           @relation("RequestedAiActions", fields: [requestedByUserId], references: [id], onDelete: Cascade)
+  executedByUser   User?          @relation("ExecutedAiActions", fields: [executedByUserId], references: [id], onDelete: SetNull)
+  rolledBackByUser User?          @relation("RolledBackAiActions", fields: [rolledBackByUserId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, createdAt])
   @@index([projectId, createdAt])

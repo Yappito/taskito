@@ -87,7 +87,9 @@ describe("POST /api/cron/process-recurring", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual(SUCCESS_BODY);
     expect(processDueRecurrences).toHaveBeenCalledTimes(1);
-    expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100 });
+    // M9: the cron route now drives the processor against the tick deadline
+    // handed over by the lock helper.
+    expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100, signal: expect.any(AbortSignal) });
     // M8: the processor ran inside the scheduler lock transaction.
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
     expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);

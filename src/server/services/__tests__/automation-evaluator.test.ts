@@ -37,6 +37,7 @@ import {
 const PROJECT_A = "cmab8yxxp0001i7p4k8n2v3q4";
 const PROJECT_B = "cmab8yxxp0002i7p4k8n2v3q5"; // referenced by cross-project payload checks
 const CREATOR_ID = "cmab8yxxp0003i7p4k8n2v3q6";
+const EDITOR_ID = "cmab8yxxp000di7p4k8n2v3qg"; // last editor (finding 4 attribution)
 const TASK_A = "cmab8yxxp0005i7p4k8n2v3q8";
 
 const NOW = new Date("2026-05-19T10:00:00.000Z");
@@ -60,6 +61,10 @@ function createRuleFixture(overrides: Record<string, unknown> = {}) {
     action: "addComment",
     actionPayload: { content: "This task is overdue" },
     createdByUserId: CREATOR_ID,
+    // Finding 4: the execution principal is the last editor; null here means
+    // the rule has not been edited since the column was introduced and falls
+    // back to the creator.
+    lastEditedByUserId: null,
     ...overrides,
   };
 }
@@ -220,8 +225,8 @@ describe("automation action permission map (H3c)", () => {
   });
 });
 
-describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
-  it("uses the rule creator as the scheduled actor", async () => {
+describe("resolveAutomationRuleActorId (H3b: attribution)", () => {
+  it("falls back to the rule creator for rules never edited since the last-editor column existed", async () => {
     const prisma = createPrismaMock();
     getEffectiveProjectAccess.mockResolvedValue({
       actor: { disabledAt: null },
@@ -233,6 +238,7 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
       projectId: PROJECT_A,
       action: "addComment",
       createdByUserId: CREATOR_ID,
+      lastEditedByUserId: null,
     });
 
     expect(actorId).toBe(CREATOR_ID);
@@ -241,7 +247,30 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
     );
   });
 
-  it("skips the rule when the creator no longer exists", async () => {
+  it("runs the rule as the LAST EDITOR (execution principal, finding 4)", async () => {
+    const prisma = createPrismaMock();
+    prisma.user.findUnique.mockResolvedValue({ id: EDITOR_ID, disabledAt: null });
+    getEffectiveProjectAccess.mockResolvedValue({
+      actor: { disabledAt: null },
+      permissions: new Set(["automation_manage", "task_comment"]),
+    });
+
+    const actorId = await resolveAutomationRuleActorId(prisma as never, {
+      id: "rule-1",
+      projectId: PROJECT_A,
+      action: "addComment",
+      createdByUserId: CREATOR_ID,
+      lastEditedByUserId: EDITOR_ID,
+    });
+
+    expect(actorId).toBe(EDITOR_ID);
+    // The principal lookup hit the editor, not the creator.
+    expect(prisma.user.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: EDITOR_ID } }),
+    );
+  });
+
+  it("skips the rule when the execution principal no longer exists", async () => {
     const prisma = createPrismaMock();
     prisma.user.findUnique.mockResolvedValue(null);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -251,10 +280,11 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
       projectId: PROJECT_A,
       action: "addComment",
       createdByUserId: CREATOR_ID,
+      lastEditedByUserId: null,
     });
 
     expect(actorId).toBeNull();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("creator"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("execution principal"));
     warnSpy.mockRestore();
   });
 
@@ -268,6 +298,7 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
       projectId: PROJECT_A,
       action: "addComment",
       createdByUserId: CREATOR_ID,
+      lastEditedByUserId: null,
     });
 
     expect(actorId).toBeNull();
@@ -288,10 +319,34 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
       projectId: PROJECT_A,
       action: "addComment",
       createdByUserId: CREATOR_ID,
+      lastEditedByUserId: null,
     });
 
     expect(actorId).toBeNull();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("automation_manage, task_comment"));
+    warnSpy.mockRestore();
+  });
+
+  it("skips the rule when the LAST EDITOR lost automation_manage or the action permission (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    prisma.user.findUnique.mockResolvedValue({ id: EDITOR_ID, disabledAt: null });
+    // The editor edited the rule but has since lost the action permission.
+    getEffectiveProjectAccess.mockResolvedValue({
+      actor: { disabledAt: null },
+      permissions: new Set(["automation_manage"]),
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const actorId = await resolveAutomationRuleActorId(prisma as never, {
+      id: "rule-1",
+      projectId: PROJECT_A,
+      action: "addComment",
+      createdByUserId: CREATOR_ID,
+      lastEditedByUserId: EDITOR_ID,
+    });
+
+    expect(actorId).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("task_comment"));
     warnSpy.mockRestore();
   });
 
@@ -304,18 +359,19 @@ describe("resolveAutomationRuleActorId (H3b: creator attribution)", () => {
       projectId: PROJECT_A,
       action: "addComment",
       createdByUserId: null,
+      lastEditedByUserId: null,
     });
 
     expect(actorId).toBeNull();
     // No member lookup that could resolve an "earliest member" fallback.
     expect(prisma.projectMember.findFirst).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no creator"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no creator or last editor"));
     warnSpy.mockRestore();
   });
 });
 
 describe("processDueDateAutomationRules (scheduled execution)", () => {
-  it("executes a due rule as the rule creator (H3b/H3c)", async () => {
+  it("executes a never-edited rule as the rule creator (H3b/H3c)", async () => {
     const prisma = createPrismaMock();
     prisma.automationRule.findMany.mockResolvedValue([
       createRuleFixture({ action: "addComment", actionPayload: { content: "overdue!" } }),
@@ -334,6 +390,69 @@ describe("processDueDateAutomationRules (scheduled execution)", () => {
     ]);
     // The action ran with the creator's session — never the project owner's.
     expect(taskCallerSessions).toEqual([CREATOR_ID]);
+  });
+
+  it("executes an edited rule as the LAST EDITOR — never the original creator (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    // A created an addComment rule; B (with automation_manage + task_comment)
+    // later edited it. The generated comment MUST be attributed to B — running
+    // it as A would let B forge content authored by A.
+    prisma.automationRule.findMany.mockResolvedValue([
+      createRuleFixture({
+        action: "addComment",
+        actionPayload: { content: "text written by B" },
+        createdByUserId: CREATOR_ID,
+        lastEditedByUserId: EDITOR_ID,
+      }),
+    ]);
+    wireOverdueTasks(prisma, [createTaskFixture({})]);
+    prisma.user.findUnique.mockResolvedValue({ id: EDITOR_ID, disabledAt: null });
+    prisma.user.findUniqueOrThrow.mockResolvedValue({
+      id: EDITOR_ID,
+      role: "member",
+      email: "editor@example.com",
+      name: "Editor",
+      image: null,
+    });
+    getEffectiveProjectAccess.mockResolvedValue({
+      actor: { disabledAt: null },
+      permissions: new Set(["automation_manage", "task_comment"]),
+    });
+
+    const result = await processDueDateAutomationRules(prisma as never, { now: NOW });
+
+    expect(result.fired).toBe(1);
+    expect(taskCallerCalls).toEqual([
+      { action: "addComment", input: { taskId: TASK_A, content: "text written by B" } },
+    ]);
+    expect(taskCallerSessions).toEqual([EDITOR_ID]);
+    expect(taskCallerSessions).not.toContain(CREATOR_ID);
+  });
+
+  it("skips a scheduled rule whose LAST EDITOR lost the action permission (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    prisma.automationRule.findMany.mockResolvedValue([
+      createRuleFixture({
+        createdByUserId: CREATOR_ID,
+        lastEditedByUserId: EDITOR_ID,
+      }),
+    ]);
+    wireOverdueTasks(prisma, [createTaskFixture({})]);
+    prisma.user.findUnique.mockResolvedValue({ id: EDITOR_ID, disabledAt: null });
+    // The editor keeps automation_manage but lacks task_comment — the rule is
+    // skipped, never run as the original creator instead.
+    getEffectiveProjectAccess.mockResolvedValue({
+      actor: { disabledAt: null },
+      permissions: new Set(["automation_manage"]),
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await processDueDateAutomationRules(prisma as never, { now: NOW });
+
+    expect(result.fired).toBe(0);
+    expect(result.skippedRules).toBe(1);
+    expect(taskCallerCalls).toEqual([]);
+    warnSpy.mockRestore();
   });
 
   it("skips a scheduled rule whose creator is disabled (H3b)", async () => {

@@ -77,8 +77,12 @@ export const automationRouter = createTRPCRouter({
         data: {
           projectId: input.projectId,
           // H3a: attribution — scheduled executions run as this user, so store
-          // who authored the rule.
+          // who authored the rule. The last-editor column (below) is the
+          // execution principal for scheduled runs once the rule is edited.
           createdByUserId: ctx.session.user.id,
+          // Finding 4: on create, creator and execution principal are the
+          // same user.
+          lastEditedByUserId: ctx.session.user.id,
           name: input.name,
           isEnabled: input.isEnabled,
           trigger: input.trigger,
@@ -94,7 +98,7 @@ export const automationRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const rule = await ctx.prisma.automationRule.findUniqueOrThrow({
         where: { id: input.id },
-        select: { projectId: true, action: true, createdByUserId: true },
+        select: { projectId: true, action: true, createdByUserId: true, lastEditedByUserId: true },
       });
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { permission: "automation_manage" });
       if (input.action !== undefined && input.actionPayload === undefined) {
@@ -122,9 +126,18 @@ export const automationRouter = createTRPCRouter({
           ...(input.triggerCondition !== undefined ? { triggerCondition: (validated.triggerCondition ?? Prisma.JsonNull) as Prisma.InputJsonValue } : {}),
           ...(input.action !== undefined ? { action: input.action } : {}),
           ...(input.actionPayload !== undefined ? { actionPayload: validated.actionPayload as Prisma.InputJsonValue } : {}),
-          // H3a: keep the original creator for attribution; back-fill the
-          // column when editing a rule created before it existed.
+          // H3a: keep the original creator for history; back-fill the column
+          // when editing a rule created before it existed.
           createdByUserId: rule.createdByUserId ?? ctx.session.user.id,
+          // Finding 4: any edit makes the EDITOR the execution principal for
+          // scheduled runs. The previous behavior kept the original creator,
+          // so an editor B could rewrite A's rule (e.g. repoint addComment at
+          // arbitrary text) and the scheduled execution would author the
+          // comment AS A — a non-repudiation/integrity failure. The action
+          // permission re-check below already applies to the editor, and
+          // resolveAutomationRuleActorId re-checks automation_manage + the
+          // action permission against lastEditedByUserId at execution time.
+          lastEditedByUserId: ctx.session.user.id,
         },
       });
     }),
