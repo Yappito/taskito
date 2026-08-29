@@ -136,6 +136,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
     { href: `/${projectSlug}/settings/custom-fields`, label: "Custom Fields" },
     { href: `/${projectSlug}/settings/ai`, label: "AI" },
     { href: `/${projectSlug}/settings/automation`, label: "Automation" },
+    { href: `/${projectSlug}/settings/webhooks`, label: "Webhooks" },
   ];
 
   return (

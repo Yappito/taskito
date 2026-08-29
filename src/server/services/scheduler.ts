@@ -3,13 +3,15 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
+import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatcher";
 
 /**
  * In-process background scheduler ("cron inside the app").
  *
- * Drives the two time-based features that used to require an external trigger:
+ * Drives the time-based features that used to require an external trigger:
  *  - recurrence processing (creating the next occurrence of recurring tasks)
  *  - due-date automation rules (`dueDatePassed` trigger)
+ *  - pending webhook deliveries whose `nextAttemptAt` came due (retries)
  *
  * Multi-replica safety: every tick opens one interactive transaction and takes
  * a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`)
@@ -132,6 +134,13 @@ async function runDueDateAutomationJob() {
   }
 }
 
+async function runWebhookDeliveryJob() {
+  const result = await processDueWebhookDeliveries(prisma, new Date());
+  if (result.processed > 0) {
+    console.info(`${SCHEDULER_LOG_PREFIX} webhook delivery job processed ${result.processed} delivery(ies) (${result.succeeded} succeeded)`);
+  }
+}
+
 /**
  * One scheduler tick: open a transaction, take the transaction-scoped advisory
  * lock inside it, and run both jobs while the transaction (and therefore the
@@ -150,7 +159,7 @@ export async function runScheduledJobs() {
           return { ran: false };
         }
 
-        for (const job of [runRecurrenceJob, runDueDateAutomationJob]) {
+        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runWebhookDeliveryJob]) {
           try {
             await job();
           } catch (error) {

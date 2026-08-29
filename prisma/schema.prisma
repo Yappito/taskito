@@ -50,6 +50,7 @@ model User {
   requestedAiActionExecutions AiActionExecution[] @relation("RequestedAiActions")
   executedAiActionExecutions AiActionExecution[] @relation("ExecutedAiActions")
   rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
+  createdWebhooks Webhook[]
   timeLogs      TimeLog[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -165,6 +166,7 @@ model Project {
   sprints     Sprint[]
   automationRules AutomationRule[]
   automationRuns AutomationRun[]
+  webhooks Webhook[]
 }
 
 enum SprintStatus {
@@ -535,6 +537,51 @@ model AutomationRun {
   @@index([projectId, createdAt])
   @@index([ruleId, createdAt])
   @@index([taskId, createdAt])
+}
+
+// ─── Outbound webhooks ───────────────────────────────────
+
+model Webhook {
+  id              String   @id @default(cuid())
+  projectId       String
+  url             String
+  encryptedSecret String
+  events          String[]
+  isEnabled       Boolean  @default(true)
+  createdByUserId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy  User              @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([projectId, isEnabled])
+}
+
+enum WebhookDeliveryStatus {
+  pending
+  success
+  failed
+}
+
+model WebhookDelivery {
+  id            String                @id @default(cuid())
+  webhookId     String
+  event         String
+  payload       Json
+  status        WebhookDeliveryStatus @default(pending)
+  responseCode  Int?
+  attempts      Int                   @default(0)
+  lastError     String?               @db.Text
+  nextAttemptAt DateTime
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([status, nextAttemptAt])
 }
 
 enum TaskActivityAction {
