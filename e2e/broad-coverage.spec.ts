@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import {
   closeTaskDetail,
+  waitForAppShell,
   createSprint,
   createTask,
   dragTaskDetailSection,
@@ -229,7 +230,7 @@ test.describe("Broader application coverage", () => {
     await page.goto("/totally-missing-project-slug");
     await page.waitForLoadState("networkidle");
     await page.waitForURL((url) => url.pathname !== "/totally-missing-project-slug", { timeout: 15_000 });
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await waitForAppShell(page);
     await expect(page).toHaveURL(/\/(default|test|switcher-project)/);
   });
 

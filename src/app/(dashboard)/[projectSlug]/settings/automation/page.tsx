@@ -69,7 +69,7 @@ export default function AutomationSettingsPage({ params }: { params: Promise<{ p
         </div>
         <textarea name="triggerCondition" rows={3} defaultValue="{}" className="rounded-xl border p-3 font-mono text-xs" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg)", color: "var(--color-text)" }} />
         <textarea name="actionPayload" rows={4} defaultValue={'{"content":"Automation ran"}'} className="rounded-xl border p-3 font-mono text-xs" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg)", color: "var(--color-text)" }} />
-        <Button disabled={createRule.isPending}>Create rule</Button>
+        <Button type="submit" disabled={createRule.isPending}>Create rule</Button>
       </form>
       <section className="space-y-3">
         {rules.map((rule) => (

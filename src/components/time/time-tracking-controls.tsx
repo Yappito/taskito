@@ -116,7 +116,7 @@ export function TimeTrackingControls({
           className="h-9 flex-1 rounded-lg border px-3 text-sm"
           style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }}
         />
-        <Button size="sm" variant="outline" disabled={addManual.isPending}>Add minutes</Button>
+        <Button type="submit" size="sm" variant="outline" disabled={addManual.isPending}>Add minutes</Button>
       </form>
 
       {logs.length > 0 && (

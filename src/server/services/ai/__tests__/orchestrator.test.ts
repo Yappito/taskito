@@ -205,7 +205,7 @@ describe("ai orchestrator fallback parsing", () => {
     expect(extractAiProposals(INJECTION_COMMENT)).toHaveLength(1);
 
     const { prisma } = createPersistPrismaMock();
-    const completion: AiProviderCompletion = { content: "Nothing to change.", toolCalls: [] };
+    const completion: AiProviderCompletion = { content: "Nothing to change.", toolCalls: [], truncated: false, stopReason: null, usage: null };
 
     const result = await persistAiAssistantCompletion(prisma, {
       conversation: baseConversation,
@@ -231,7 +231,7 @@ describe("ai orchestrator yolo scoping", () => {
       { id: "t4", name: "taskito_createTask", arguments: { title: "Create follow-up", summary: "Creates a task.", taskTitle: "Follow-up", dueDate: "2026-06-01T00:00:00.000Z" } },
       { id: "t5", name: "taskito_addComment", arguments: { title: "Add note two", summary: "Adds context.", taskId: otherTaskId, content: "note two" } },
     ];
-    return { content: "Done for now.", toolCalls };
+    return { content: "Done for now.", toolCalls, truncated: false, stopReason: null, usage: null };
   }
 
   it("keeps destructive proposals pending while executing the rest when allowYoloDestructive is false", async () => {
@@ -300,6 +300,9 @@ describe("ai orchestrator sequential execution", () => {
         { id: "t2", name: "taskito_addComment", arguments: { title: "Note", summary: "Second.", taskId: otherTaskId, content: "note two" } },
         { id: "t3", name: "taskito_addComment", arguments: { title: "Note", summary: "Third.", taskId, content: "note three" } },
       ],
+      truncated: false,
+      stopReason: null,
+      usage: null,
     };
 
     const result = await persistAiAssistantCompletion(prisma, {

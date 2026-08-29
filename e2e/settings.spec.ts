@@ -82,7 +82,7 @@ test.describe("Settings page", () => {
 
     const projectSwitcher = page.getByLabel("Select project");
     await expect(projectSwitcher).toHaveValue("default");
-    await expect(page.getByRole("heading", { level: 1, name: "Default Project" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Default Project" })).toBeVisible();
 
     await projectSwitcher.selectOption("switcher-project");
     await page.waitForURL("**/switcher-project", { timeout: 15000 });

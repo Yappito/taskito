@@ -99,7 +99,7 @@ export function RecurrenceControls({
             setFormError(null);
           }
         }} className="h-9 rounded-lg border px-3 text-sm" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", color: "var(--color-text)" }} />
-        <Button size="sm" disabled={setRecurrence.isPending}>{rule ? "Update" : "Repeat"}</Button>
+        <Button type="submit" size="sm" disabled={setRecurrence.isPending}>{rule ? "Update" : "Repeat"}</Button>
       </form>
       {formError ? (
         <p className="mt-2 text-xs" style={{ color: "var(--color-danger, #dc2626)" }}>

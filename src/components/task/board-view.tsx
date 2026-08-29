@@ -480,6 +480,10 @@ export function BoardView({ projectId, statuses, tags, projectSettings }: BoardV
                     key={task.id}
                     data-board-task-id={task.id}
                     className="select-none"
+                    // Pointer capture (set in handlePointerDown) retargets the click to this
+                    // wrapper, so the mouse path must be handled here; TaskCard keeps its own
+                    // onClick for the keyboard (Enter/Space) path.
+                    onClick={() => handleTaskClick(task.id)}
                     onPointerDown={(e) => handlePointerDown(e, task.id, status.id)}
                     onPointerMove={handlePointerMove}
                     onPointerUp={handlePointerUp}

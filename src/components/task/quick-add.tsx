@@ -224,7 +224,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
       <Dialog
         open={open}
         onClose={() => setOpen(false)}
-        panelClassName="max-h-[min(88vh,56rem)] max-w-2xl"
+        panelClassName="max-h-[min(88vh,56rem)] max-w-[min(92vw,72rem)]"
       >
         <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>New Task</h2>
         {submitError && (
