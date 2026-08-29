@@ -5,6 +5,20 @@ import type { AiPermission, AiToolProposal } from "@/lib/ai-types";
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 
+// Action types that are destructive enough to be excluded from automatic
+// "yolo" execution unless the project policy explicitly allows it.
+// Action-type names verified against the AiActionType enum in prisma/schema.prisma:
+// archive_task & unarchive_task → archiveTask/unarchiveTask, bulk_update_selected → bulkUpdate,
+// create_task → createTask, duplicate_task → duplicateTask, remove_link → removeLink.
+export const YOLO_DESTRUCTIVE_ACTIONS: ReadonlySet<AiToolProposal["actionType"]> = new Set([
+  "archiveTask",
+  "unarchiveTask",
+  "bulkUpdate",
+  "createTask",
+  "duplicateTask",
+  "removeLink",
+]);
+
 const cuid = z.string().cuid();
 const taskReference = z.string().trim().min(1).max(100);
 const linkTypeInput = z.string().trim().min(1).max(50);
