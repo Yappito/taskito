@@ -18,6 +18,7 @@ services:
       - STORAGE_S3_SESSION_TOKEN=${STORAGE_S3_SESSION_TOKEN:-}
       - STORAGE_S3_FORCE_PATH_STYLE=${STORAGE_S3_FORCE_PATH_STYLE:-false}
       - STORAGE_S3_PREFIX=${STORAGE_S3_PREFIX:-}
+      - AI_PROVIDER_ALLOW_PRIVATE_HOSTS=${AI_PROVIDER_ALLOW_PRIVATE_HOSTS:-false}
     depends_on:
       postgres:
         condition: service_healthy

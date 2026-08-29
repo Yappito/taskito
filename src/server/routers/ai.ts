@@ -14,6 +14,7 @@ import { normalizeAiConversationTitle } from "@/server/services/ai/presenter";
 import { completeWithAnthropicProvider } from "@/server/services/ai/provider-anthropic";
 import { completeWithOpenAiCompatibleProvider } from "@/server/services/ai/provider-openai-compatible";
 import { resolveAiProvider } from "@/server/services/ai/provider-registry";
+import { UpstreamProviderError } from "@/server/services/ai/provider-request";
 import { getRequiredPermissionsForActionPayload, resolveAiActionPayload } from "@/server/services/ai/tools";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
@@ -222,6 +223,24 @@ async function assertAiActionStillAllowed(
   return { selectedTaskIds, payload };
 }
 
+const PROVIDER_TEST_SUMMARY_MAX_CHARS = 200;
+
+function normalizeUpstreamTextForSummary(value: string) {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function summarizeProviderTestOutcome(status: number | null, rawMessage: string) {
+  const header = status === null
+    ? "Provider test failed"
+    : `Provider test completed with status ${status}`;
+  const detail = normalizeUpstreamTextForSummary(rawMessage)
+    .slice(0, PROVIDER_TEST_SUMMARY_MAX_CHARS - header.length - 2);
+  return detail ? `${header}: ${detail}` : header;
+}
+
 async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisibleProviderOrThrow>>) {
   const provider = resolveAiProvider(providerRecord);
   const messages = [
@@ -238,11 +257,24 @@ async function runProviderTest(providerRecord: Awaited<ReturnType<typeof getVisi
       createdAt: new Date(),
     },
   ] satisfies AiMessage[];
-  const content = provider.adapter === "anthropic"
-    ? await completeWithAnthropicProvider(provider, messages)
-    : await completeWithOpenAiCompatibleProvider(provider, messages);
 
-  return content.slice(0, 500);
+  try {
+    if (provider.adapter === "anthropic") {
+      await completeWithAnthropicProvider(provider, messages);
+    } else {
+      await completeWithOpenAiCompatibleProvider(provider, messages);
+    }
+  } catch (error) {
+    const status = error instanceof UpstreamProviderError && Number.isInteger(error.status) && error.status > 0
+      ? error.status
+      : null;
+    const rawMessage = error instanceof Error && error.message ? error.message : "AI provider request failed";
+    // Bounded, sanitized status/summary only — never raw upstream body text.
+    throw new Error(summarizeProviderTestOutcome(status, rawMessage));
+  }
+
+  // Deliberately do not surface raw upstream body/model text to the client.
+  return summarizeProviderTestOutcome(200, "Upstream accepted the request.");
 }
 
 async function getVisibleProviderOrThrow(
