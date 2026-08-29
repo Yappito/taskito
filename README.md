@@ -16,6 +16,7 @@ Taskito is a self-hosted task manager for project-scoped planning, delivery, and
 - Project tags with colors, merge support, and filtering across views
 - Custom fields per project, including ordering and required field support
 - Saved filter presets and reusable task templates
+- CSV/JSON task export and CSV import with preview, column mapping, and all-or-nothing commits
 - Bulk task actions for status, assignee, tags, and archive
 - Project-scoped search with keyboard navigation, assignee/status context, and task key support
 - Notifications with preferences, mark-all-read, and clear-all actions
@@ -357,6 +358,30 @@ Stored AI provider secrets, OIDC client secrets, and S3 storage credentials are 
 If a run fails with a transaction timeout (very large tables), raise the interactive-transaction budget with `REENCRYPT_TX_TIMEOUT_MS=<milliseconds>` (default `300000`).
 
 If you previously ran without a master key (e.g. compose deployments before this variable was forwarded), migrate from the auth-secret fallback with `AI_SECRET_MASTER_KEY=<new key> AUTH_SECRET=<unchanged> npm run db:reencrypt-ai-secrets`.
+
+## Import and Export
+
+Project settings include an **Import / Export** page (also linked from the project header) for migrating tasks in and out of a project.
+
+### Export
+
+`GET /api/projects/<slug>/export?format=csv|json&query=<dashboard-query>` (session required, `task_read` permission) streams tasks without buffering the whole project.
+
+- **CSV** starts with a UTF-8 BOM (so Excel detects the encoding), uses RFC 4180 quoting (fields containing commas, double quotes, or newlines are quoted with inner quotes doubled), and downloads as `taskito-<project key>-<date>.csv`.
+- **JSON** streams an array of the same records.
+- Columns: `Key`, `Title`, `Status`, `Priority`, `Assignee`, `Creator`, `Due Date`, `Start Date`, `Closed At`, `Tags` (`;`-joined), `Sprint`, `Participants` (`;`-joined emails), one `cf:<Field name>` column per custom field, `Body` (multi-line, CSV-escaped), and `Archived At`. Dates are ISO 8601.
+- The optional `query` parameter accepts the same JQL-like filter grammar as dashboards (for example `status = Done AND priority in (high, urgent)`). Archived tasks are excluded unless the query opts in with `archived = true`.
+
+### Import
+
+`import.previewCsv` and `import.commitCsv` (tRPC, `task_create` permission required) handle CSV import from the settings page.
+
+- Limits: CSV payloads up to **2 MB** and **5000 data rows** per import; the preview shows the first **20 rows**.
+- Headers are auto-mapped case-insensitively with aliases (`Title`/`Summary`/`Name`, `Due`/`Due date`, `Assignee`/`Owner (email)`, `Tags`/`Labels`, `Status`, `Priority`, `Description`/`Body`, and `cf:*` columns matching project custom fields); the mapping can be adjusted per column before committing.
+- `Status` values must match existing workflow statuses and `Tags` must match existing project tags unless "create missing" is enabled — creating missing statuses/tags requires `workflow_manage` permission and is opt-in per import.
+- Assignees and participants are resolved by email; unknown emails are left unassigned and reported in the result.
+- Custom field values are coerced per field type (number, date, select choices).
+- Any hard row error (missing title, unknown status, invalid priority/date/custom field value, …) aborts the whole import with the offending line numbers — nothing is committed unless every row is valid.
 
 ## Notes
 

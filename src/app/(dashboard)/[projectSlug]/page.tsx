@@ -134,6 +134,7 @@ function ProjectPageContent({ projectSlug }: { projectSlug: string }) {
     { href: `/${projectSlug}/settings/workflow`, label: "Workflow" },
     { href: `/${projectSlug}/settings/tags`, label: "Tags" },
     { href: `/${projectSlug}/settings/custom-fields`, label: "Custom Fields" },
+    { href: `/${projectSlug}/settings/import-export`, label: "Import / Export" },
     { href: `/${projectSlug}/settings/ai`, label: "AI" },
     { href: `/${projectSlug}/settings/automation`, label: "Automation" },
   ];
