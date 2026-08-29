@@ -94,7 +94,7 @@ test.describe("Broader application coverage", () => {
 
   test("task detail sections can be reordered from drag handles and persist after reopen", async ({ page }) => {
     test.slow();
-    const title = uniqueName("Reorder Task Detail Sections");
+    const title = uniqueName("Reorder Task Sections");
 
     await goToDefaultProject(page);
     await createTask(page, { title, description: "Task detail reorder coverage", dueDate: todayPlus(5), status: "To Do" });
@@ -216,11 +216,19 @@ test.describe("Broader application coverage", () => {
     await goToDefaultProject(page);
     const themeToggle = page.getByLabel(/Theme:/);
     const before = await themeToggle.getAttribute("aria-label");
+
+    // The toggle persists the new scheme via user.updateAppearance; wait for
+    // that mutation before reloading or the change would be lost.
+    const persistResponse = page.waitForResponse((response) =>
+      response.url().includes("user.updateAppearance") && response.request().method() === "POST"
+    );
     await themeToggle.click();
+    await expect(themeToggle).not.toHaveAttribute("aria-label", before ?? "", { timeout: 5_000 });
     const after = await themeToggle.getAttribute("aria-label");
 
     expect(after).not.toBe(before);
     const expectedTheme = after?.replace("Theme: ", "") ?? "";
+    await persistResponse;
     await page.reload();
     await page.waitForLoadState("networkidle");
     await expect(page.getByLabel(`Theme: ${expectedTheme}`)).toBeVisible();

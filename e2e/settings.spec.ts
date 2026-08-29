@@ -89,7 +89,9 @@ test.describe("Settings page", () => {
     await page.waitForLoadState("networkidle");
 
     await expect(projectSwitcher).toHaveValue("switcher-project");
-    await expect(page.getByRole("heading", { level: 1, name: "Switcher Project" })).toBeVisible();
+    // The project name is rendered in the header as a home link (not an h1);
+    // the only real h1 on settings pages is "Settings" on /settings itself.
+    await expect(page.getByRole("link", { name: "Switcher Project", exact: true })).toBeVisible();
   });
 
   test("users tab shows user list", async ({ page }) => {

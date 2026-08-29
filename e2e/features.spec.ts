@@ -1,6 +1,6 @@
 import { test, expect, Page } from "@playwright/test";
 
-import { goToDefaultProject, login, switchToView, waitForAppShell } from "./helpers";
+import { clickFirstClickable, createTask, expectTaskDetailOpen, goToDefaultProject, login, switchToView, todayPlus, uniqueName, waitForAppShell } from "./helpers";
 
 /** Navigate to the default project page */
 async function goToProject(page: Page) {
@@ -33,8 +33,8 @@ test.describe("Board view drag-and-drop", () => {
 
     await backlogCard.click();
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-    await expect(page.getByText("Task Detail")).toBeVisible();
-    await detailPanel.getByRole("button", { name: "Edit" }).click();
+    await expectTaskDetailOpen(page);
+    await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
     await detailPanel.locator('select[name="statusId"]').selectOption({ label: "To Do" });
     await detailPanel.getByRole("button", { name: "Save" }).click();
     await expect(
@@ -49,7 +49,7 @@ test.describe("Board view drag-and-drop", () => {
     await page.waitForTimeout(300);
 
     // Task detail panel should appear
-    await expect(page.getByText("Task Detail")).toBeVisible();
+    await expectTaskDetailOpen(page);
   });
 
   test("board can filter tasks by title substring", async ({ page }) => {
@@ -83,11 +83,11 @@ test.describe("Task body/description", () => {
     await firstCard.click();
 
     // Wait for detail panel to appear
-    await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10000 });
+    await expectTaskDetailOpen(page);
 
     // Click Edit button in the detail panel
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-    await detailPanel.getByRole("button", { name: "Edit" }).click();
+    await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
     await page.waitForTimeout(300);
 
     // Should see the description textarea
@@ -101,11 +101,11 @@ test.describe("Task body/description", () => {
     await firstCard.click();
 
     // Wait for detail panel
-    await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10000 });
+    await expectTaskDetailOpen(page);
 
     // Click Edit
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-    await detailPanel.getByRole("button", { name: "Edit" }).click();
+    await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
     await page.waitForTimeout(300);
 
     // Fill in description
@@ -193,7 +193,7 @@ test.describe("Search opens task", () => {
     await expect(firstResult).toBeVisible({ timeout: 10000 });
     await firstResult.click();
 
-    await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10000 });
+    await expectTaskDetailOpen(page);
   });
 });
 
@@ -233,29 +233,34 @@ test.describe("Graph view", () => {
   test("clicking a graph node toggles focused subgraph mode", async ({ page }) => {
     await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
     const initialNodeCount = await page.locator(".graph-node").count();
-    const node = page.locator(".graph-node").first();
-    await node.click({ force: true });
-    await page.waitForTimeout(600);
 
-    await expect(page.getByText("Show all")).toBeVisible();
+    // Floating panels (task filters, toolbar, mini-map) cover part of the
+    // canvas; click the first node that is actually reachable.
+    const node = await clickFirstClickable(page, page.locator(".graph-node"));
+    const focusedTitle = await node.getAttribute("data-task-title");
+    expect(focusedTitle).toBeTruthy();
 
-    const focusedNodeCount = await page.locator(".graph-node").count();
-  expect(focusedNodeCount).toBeGreaterThan(2);
-  expect(focusedNodeCount).not.toBe(initialNodeCount);
+    const showAll = page.getByRole("button", { name: "Show all", exact: true });
+    await expect(showAll).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText(`Focus: ${focusedTitle}`)).toBeVisible({ timeout: 10_000 });
 
-    await page.getByText("Show all").click();
-    await page.waitForTimeout(600);
+    // Focusing shows a connected subgraph, so the rendered set can only shrink.
+    await expect
+      .poll(async () => page.locator(".graph-node").count(), { timeout: 10_000 })
+      .toBeLessThanOrEqual(initialNodeCount);
+    expect(await page.locator(".graph-node").count()).toBeGreaterThan(0);
 
-    await expect(page.getByText("Show all")).not.toBeVisible();
-    await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
-    const restoredNodeCount = await page.locator(".graph-node").count();
-    expect(restoredNodeCount).toBeGreaterThan(0);
+    await showAll.click();
+    await expect(showAll).not.toBeVisible({ timeout: 10_000 });
+    await expect
+      .poll(async () => page.locator(".graph-node").count(), { timeout: 10_000 })
+      .toBe(initialNodeCount);
   });
 
   test("graph node info icon opens task detail", async ({ page }) => {
-    const infoButton = page.getByLabel("Open task details").first();
-    await infoButton.click({ force: true });
-    await expect(page.getByText("Task Detail")).toBeVisible();
+    await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
+    await clickFirstClickable(page, page.getByLabel("Open task details"));
+    await expectTaskDetailOpen(page);
   });
 
   test("graph title filter highlights matches without removing other tasks", async ({ page }) => {
@@ -285,45 +290,42 @@ test.describe("Graph view", () => {
     expect(finalNodeCount).toBeLessThanOrEqual(initialNodeCount);
   });
 
-  test("graph tag filter highlights matching tasks", async ({ page }) => {
+  test("graph tag filter narrows the graph to tasks carrying the selected tag", async ({ page }) => {
+    // Create a tagged task so the tag is guaranteed to match at least one task
+    // regardless of what previous runs left in the database.
+    const title = uniqueName("Graph Tag Task");
+    await createTask(page, { title, dueDate: todayPlus(5), status: "To Do", tagNames: ["frontend"] });
+
+    // Re-enter the graph view so it fetches data including the new task.
+    await goToDefaultProject(page, "?view=graph");
     await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
-    const visibleNodeData = await page.locator(".graph-node").evaluateAll((nodes) =>
-      nodes.map((node) => ({
-        title: node.getAttribute("data-task-title"),
-        tags: (node.getAttribute("data-task-tags") ?? "")
-          .split(",")
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-      }))
-    );
 
-    const taggedNode = visibleNodeData.find((node) => node.title && node.tags.length > 0 && node.tags[0]);
+    // Narrow by title first so the new task's node is deterministically
+    // rendered, then verify the tag metadata the graph pipes onto its nodes.
+    await page.getByPlaceholder("Highlight by title...").fill(title);
+    const node = page.locator(`.graph-node[data-task-title="${title}"]`);
+    await expect(node).toHaveAttribute("data-task-tags", "frontend", { timeout: 10_000 });
 
-    expect(taggedNode).toBeTruthy();
-
-    const selectedTag = taggedNode!.tags[0];
-    const unmatchedNode = visibleNodeData.find(
-      (node) => node.title && !node.tags.includes(selectedTag)
-    );
-
+    // Selecting a tag narrows the graph; clear the title query and confirm
+    // every rendered node carries the selected tag.
     await page.getByRole("button", { name: "Show filters" }).click();
-    await page.getByRole("button", { name: selectedTag, exact: true }).click();
-    await page.waitForTimeout(300);
+    await page.getByRole("button", { name: "frontend", exact: true }).click();
+    await page.getByPlaceholder("Highlight by title...").fill("");
 
-    const matchingNode = page.locator(
-      `.graph-node[data-task-title="${taggedNode!.title}"]`
-    );
-
-    await expect(matchingNode).toHaveAttribute("data-filter-match", "true");
-
-    if (unmatchedNode?.title) {
-      const otherNode = page.locator(
-        `.graph-node[data-task-title="${unmatchedNode.title}"]`
-      );
-      if (await otherNode.count()) {
-        await expect(otherNode.first()).toHaveAttribute("data-filter-match", "false");
-      }
-    }
+    await expect
+      .poll(
+        async () => {
+          const tagLists = await page.locator(".graph-node").evaluateAll((nodes) =>
+            nodes.map((node) => (node.getAttribute("data-task-tags") ?? "")
+              .split(",")
+              .map((tag) => tag.trim())
+              .filter(Boolean))
+          );
+          return tagLists.length > 0 && tagLists.every((tags) => tags.includes("frontend"));
+        },
+        { timeout: 10_000 }
+      )
+      .toBe(true);
   });
 
   test("reset zoom button works", async ({ page }) => {

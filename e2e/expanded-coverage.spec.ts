@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-import { createSprint, createTask, goToDefaultProject, login, openBoardTaskDetail, switchToView, todayPlus, uniqueName } from "./helpers";
+import { createSprint, createTask, expectTaskDetailOpen, goToDefaultProject, login, openBoardTaskDetail, switchToView, taskDetailPanel, todayPlus, uniqueName } from "./helpers";
 
 async function dragSprintTaskBetweenColumns(page: Page, fromStatus: string, toStatus: string) {
   const fromColumn = page.locator(`[data-sprint-status-id]`, { has: page.getByRole("heading", { name: fromStatus }) }).first();
@@ -102,7 +102,7 @@ test.describe("Expanded Playwright coverage", () => {
     await searchInput.fill("drag-and-drop");
     await expect(page.locator('#search-modal-results [role="option"]').first()).toBeVisible({ timeout: 10_000 });
     await page.keyboard.press("Enter");
-    await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10_000 });
+    await expectTaskDetailOpen(page);
 
     await page.keyboard.press("Escape");
     await page.keyboard.press("Meta+k");
@@ -236,15 +236,19 @@ test.describe("Expanded Playwright coverage", () => {
   });
 
   test("task can be deleted from detail edit mode", async ({ page }) => {
-    const title = uniqueName("Delete Task");
+    // Prefix avoids UI words like "Delete" that could collide with button
+    // accessible names via substring matching.
+    const title = uniqueName("Disposable Task");
 
     await goToDefaultProject(page);
     await createTask(page, { title, dueDate: todayPlus(6), status: "To Do", description: "Delete me" });
     await openBoardTaskDetail(page, title);
-    await page.getByRole("button", { name: "Edit" }).click();
+    await taskDetailPanel(page).getByRole("button", { name: "Edit", exact: true }).click();
     page.once("dialog", (dialog) => void dialog.accept());
-    await page.getByRole("button", { name: "Delete" }).click();
-    await expect(page.getByText("Task Detail")).not.toBeVisible({ timeout: 10_000 });
+    // The edit-mode Delete button lives inside the task detail panel; scope to
+    // it so board cards whose titles contain "Delete" cannot match too.
+    await taskDetailPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(taskDetailPanel(page)).not.toBeVisible({ timeout: 10_000 });
 
     await switchToView(page, "board");
     await page.getByPlaceholder("Filter by title...").fill(title);

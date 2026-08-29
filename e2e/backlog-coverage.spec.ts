@@ -4,10 +4,12 @@ import {
   closeTaskDetail,
   createTask,
   escapeRegex,
+  expectTaskDetailOpen,
   goToDefaultProject,
   login,
   openBoardTaskDetail,
   switchToView,
+  taskDetailPanel,
   todayPlus,
   uniqueName,
   waitForAppShell,
@@ -56,7 +58,7 @@ async function addTaskLink(page: Page, sourceTitle: string, linkType: "parent" |
 async function updateTaskStatusToDoneExpectingError(page: Page, title: string, expectedMessage: RegExp) {
   await openBoardTaskDetail(page, title);
   const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-  await detailPanel.getByRole("button", { name: "Edit" }).click();
+  await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
   await detailPanel.locator('select[name="statusId"]').selectOption({ label: "Done" });
   await detailPanel.getByRole("button", { name: "Save" }).click();
   await expect(detailPanel.getByText(expectedMessage)).toBeVisible({ timeout: 10_000 });
@@ -115,16 +117,17 @@ test.describe("Backlog regression coverage", () => {
     });
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Custom Fields" })).toBeVisible({ timeout: 10_000 });
+    await waitForAppShell(page);
 
     await filterBoardByTitle(page, title);
     await expect(page.getByText(title)).toBeVisible();
 
     await openNewTaskDialog(page);
-    await page.locator('select').filter({ has: page.locator('option:has-text("No template")') }).first().selectOption({ label: templateName });
+    const templateSelect = page.locator('select').filter({ has: page.locator('option:has-text("No template")') }).first();
+    await templateSelect.selectOption({ label: templateName });
     await expect(page.getByPlaceholder("Task title...")).toHaveValue(title);
     await expect(page.getByPlaceholder("Add task details...")).toHaveValue(description);
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
   });
 
   test("task detail duplicate creates a copied task", async ({ page }) => {
@@ -163,7 +166,7 @@ test.describe("Backlog regression coverage", () => {
 
     await openBoardTaskDetail(page, title);
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-    await detailPanel.getByRole("button", { name: "Edit" }).click();
+    await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
     await detailPanel.locator('input[name="title"]').fill(updatedTitle);
     await detailPanel.locator('textarea[name="body"]').fill("Activity changed body");
     await detailPanel.getByRole("button", { name: "Save" }).click();
@@ -263,10 +266,13 @@ test.describe("Backlog regression coverage", () => {
       await goToDefaultProject(page);
       await openBoardTaskDetail(page, "Add drag-and-drop to board");
       const detailPanel = page.locator(".fixed.inset-y-0.right-0");
-      await detailPanel.getByRole("button", { name: "Edit" }).click();
+      await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
       await detailPanel.locator('select[name="assigneeId"]').selectOption({ label: name });
       await detailPanel.getByRole("button", { name: "Save" }).click();
-      await expect(detailPanel.getByText(name)).toBeVisible({ timeout: 10_000 });
+      // The member name appears in the assignee card; scope there so the
+      // participants row (which also lists the assignee) cannot double-match.
+      const assigneeCard = detailPanel.locator("div.rounded-2xl").filter({ hasText: "Assignee" }).first();
+      await expect(assigneeCard.getByText(name)).toBeVisible({ timeout: 10_000 });
 
       await closeTaskDetail(page);
       await logout(page);
