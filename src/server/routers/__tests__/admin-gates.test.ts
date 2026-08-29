@@ -53,6 +53,9 @@ const NON_ADMIN_USER_PROCEDURES = [
   "updateAppearance",
   "updateProfile",
   "changePassword",
+  "createApiToken",
+  "listApiTokens",
+  "revokeApiToken",
 ];
 
 const ROUTERS: Record<string, unknown> = {

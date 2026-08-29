@@ -420,7 +420,7 @@ export const aiRouter = createTRPCRouter({
   createSharedProvider: protectedProcedure
     .input(providerInputSchema)
     .mutation(async ({ ctx, input }) => {
-      await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+      await requireGlobalAdmin(ctx.prisma, ctx.session.user.id, { authMethod: ctx.session.authMethod });
 
       const normalizedBaseUrl = validateAiProviderBaseUrl(input.baseUrl);
       const normalizedHeaders = normalizeAiProviderHeaders(input.defaultHeaders);
@@ -527,7 +527,7 @@ export const aiRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
       if (provider.scope === "shared") {
-        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id, { authMethod: ctx.session.authMethod });
       } else if (provider.scope === "project" && provider.projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
       }
@@ -597,7 +597,7 @@ export const aiRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
       if (provider.scope === "shared") {
-        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id, { authMethod: ctx.session.authMethod });
         await ctx.prisma.aiProjectPolicy.updateMany({
           where: { defaultProviderId: provider.id },
           data: { defaultProviderId: null },
@@ -619,7 +619,7 @@ export const aiRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
       if (provider.scope === "shared") {
-        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id, { authMethod: ctx.session.authMethod });
       } else if (provider.scope === "project" && provider.projectId) {
         await requireProjectAccess(ctx.prisma, ctx.session.user.id, provider.projectId, { permission: "ai_manage" });
       }
@@ -641,7 +641,7 @@ export const aiRouter = createTRPCRouter({
 
       const provider = await getVisibleProviderOrThrow(ctx.prisma, ctx.session.user.id, input.id);
       if (provider.scope === "shared") {
-        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id);
+        await requireGlobalAdmin(ctx.prisma, ctx.session.user.id, { authMethod: ctx.session.authMethod });
       }
       const responsePreview = await runProviderTest(provider);
       return {

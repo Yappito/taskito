@@ -5,10 +5,18 @@ import { PASSWORD_MIN_LENGTH, PASSWORD_MIN_LENGTH_HINT } from "@/lib/password-po
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Alert } from "@/components/ui/alert";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Avatar } from "@/components/ui/avatar";
 import { trpc } from "@/lib/trpc-client";
 import { useRouter } from "next/navigation";
 import { useAvatarUpload } from "@/hooks/use-avatar-upload";
+
+/** Format an optional token timestamp for the settings list. */
+function formatTokenDate(value: Date | string | null) {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString(undefined, { dateStyle: "medium" });
+}
 
 /** Profile tab: identity card, profile photo, display name and password change */
 export function ProfileSettings({
@@ -37,6 +45,14 @@ export function ProfileSettings({
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
 
+  const [tokenName, setTokenName] = useState("");
+  const [tokenExpiresInDays, setTokenExpiresInDays] = useState("");
+  const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
+  const [tokenMessage, setTokenMessage] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const { confirm, confirmElement } = useConfirm();
+
   const updateProfile = trpc.user.updateProfile.useMutation({
     onSuccess: async () => {
       setProfileError(null);
@@ -64,6 +80,58 @@ export function ProfileSettings({
       setPasswordError(error.message);
     },
   });
+
+  const listApiTokens = trpc.user.listApiTokens.useQuery();
+  const tokens = listApiTokens.data ?? [];
+
+  const createApiToken = trpc.user.createApiToken.useMutation({
+    onSuccess: (data) => {
+      setTokenError(null);
+      setTokenMessage(null);
+      setCreatedToken(data.token);
+      setTokenCopied(false);
+      setTokenName("");
+      setTokenExpiresInDays("");
+      void utils.user.listApiTokens.invalidate();
+    },
+    onError: (error) => {
+      setTokenMessage(null);
+      setTokenError(error.message);
+    },
+  });
+
+  const revokeApiToken = trpc.user.revokeApiToken.useMutation({
+    onSuccess: () => {
+      setTokenError(null);
+      void utils.user.listApiTokens.invalidate();
+    },
+    onError: (error) => {
+      setTokenError(error.message);
+    },
+  });
+
+  async function copyCreatedToken() {
+    if (!createdToken) return;
+    try {
+      await navigator.clipboard.writeText(createdToken);
+      setTokenCopied(true);
+      setTokenError(null);
+    } catch {
+      setTokenError("Copying failed — select the token text and copy it manually.");
+    }
+  }
+
+  async function handleRevokeToken(id: string, name: string) {
+    const confirmed = await confirm({
+      title: `Revoke "${name}"?`,
+      description: "Any script using this token will immediately lose access. This cannot be undone.",
+      confirmLabel: "Revoke token",
+      destructive: true,
+    });
+    if (confirmed) {
+      revokeApiToken.mutate({ id });
+    }
+  }
 
   return (
     <div className="grid gap-6 lg:grid-cols-[1.05fr_1.25fr]">
@@ -276,6 +344,134 @@ export function ProfileSettings({
           </form>
         </section>
       </div>
+
+      <section className="rounded-3xl border p-6 lg:col-span-2" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
+        <h2 className="text-lg font-semibold" style={{ color: "var(--color-text)" }}>
+          API tokens
+        </h2>
+        <p className="mt-1 text-sm" style={{ color: "var(--color-text-secondary)" }}>
+          Personal tokens let scripts and external tools call the Taskito API as you with
+          {" "}
+          <code>Authorization: Bearer tk_…</code>. Treat them like passwords: they are shown only once at
+          creation and cannot be used for admin actions or account changes.
+        </p>
+
+        {tokens.length > 0 && (
+          <ul className="mt-5 space-y-3">
+            {tokens.map((token) => (
+              <li key={token.id} className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium" style={{ color: "var(--color-text)" }}>{token.name}</div>
+                    <code className="text-xs" style={{ color: "var(--color-text-muted)" }}>{token.tokenPrefix}…</code>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleRevokeToken(token.id, token.name)}
+                    disabled={!!token.revokedAt || revokeApiToken.isPending}
+                  >
+                    {token.revokedAt ? "Revoked" : "Revoke"}
+                  </Button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  <span>Created {formatTokenDate(token.createdAt)}</span>
+                  <span>Last used {formatTokenDate(token.lastUsedAt)}</span>
+                  <span>{token.revokedAt ? `Revoked ${formatTokenDate(token.revokedAt)}` : token.expiresAt ? `Expires ${formatTokenDate(token.expiresAt)}` : "No expiry"}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {createdToken && (
+          <Alert className="mt-5" variant="warning" title="Copy your new token now — you won't see it again.">
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <code
+                className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-lg px-3 py-2"
+                style={{ backgroundColor: "var(--color-bg-overlay)", border: "1px solid var(--color-border)", color: "var(--color-text)" }}
+              >
+                {createdToken}
+              </code>
+              <Button type="button" variant="outline" onClick={() => void copyCreatedToken()}>
+                {tokenCopied ? "Copied!" : "Copy"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setCreatedToken(null);
+                  setTokenMessage("Token created. Save it somewhere safe before leaving this page.");
+                }}
+              >
+                Done
+              </Button>
+            </div>
+          </Alert>
+        )}
+
+        <form
+          className="mt-5 space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setTokenMessage(null);
+            setTokenError(null);
+
+            const daysRaw = tokenExpiresInDays.trim();
+            let expiresInDays: number | undefined;
+            if (daysRaw) {
+              const parsed = Number(daysRaw);
+              if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+                setTokenError("Expiry must be a whole number of days between 1 and 365.");
+                return;
+              }
+              expiresInDays = parsed;
+            }
+
+            createApiToken.mutate({ name: tokenName, expiresInDays });
+          }}
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Token name" required>
+              {(ids) => (
+                <Input
+                  id={ids.id}
+                  value={tokenName}
+                  onChange={(event) => setTokenName(event.target.value)}
+                  maxLength={100}
+                  placeholder="e.g. CI script"
+                  required
+                />
+              )}
+            </Field>
+            <Field label="Expires in days (optional)">
+              {(ids) => (
+                <Input
+                  id={ids.id}
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={tokenExpiresInDays}
+                  onChange={(event) => setTokenExpiresInDays(event.target.value)}
+                  placeholder="Leave empty for no expiry"
+                />
+              )}
+            </Field>
+          </div>
+          {tokenError && (
+            <Alert className="mt-1" variant="danger">{tokenError}</Alert>
+          )}
+          {tokenMessage && (
+            <Alert className="mt-1" variant="success">{tokenMessage}</Alert>
+          )}
+          <div className="flex justify-end">
+            <Button type="submit" disabled={createApiToken.isPending}>
+              {createApiToken.isPending ? "Creating..." : "Create Token"}
+            </Button>
+          </div>
+        </form>
+        {confirmElement}
+      </section>
     </div>
   );
 }

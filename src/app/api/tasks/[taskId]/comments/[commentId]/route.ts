@@ -2,13 +2,20 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { bearerSessionFromIdentity, resolveBearerToken } from "@/server/services/api-tokens";
 import { updateTaskComment } from "@/server/services/comment-service";
+import type { Session } from "next-auth";
 
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ taskId: string; commentId: string }> }
 ) {
-  const session = await auth();
+  let session: Session | null = await auth();
+  if (!session?.user?.id) {
+    // Personal API tokens: fall back to `Authorization: Bearer tk_…`
+    const identity = await resolveBearerToken(prisma, request.headers);
+    session = identity ? bearerSessionFromIdentity(identity) : null;
+  }
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

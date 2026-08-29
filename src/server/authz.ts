@@ -129,8 +129,25 @@ export async function getCurrentActor(prisma: PrismaLike, userId: string) {
   return user;
 }
 
-/** Ensures that the current user is a global administrator. */
-export async function requireGlobalAdmin(prisma: PrismaLike, userId: string) {
+/** Options for admin checks. */
+export interface RequireGlobalAdminOptions {
+  /** Token-authenticated requests never receive admin powers (v1 decision). */
+  authMethod?: "cookie" | "token";
+}
+
+/** Ensures that the current user is a global administrator (browser sessions only). */
+export async function requireGlobalAdmin(
+  prisma: PrismaLike,
+  userId: string,
+  options?: RequireGlobalAdminOptions
+) {
+  if (options?.authMethod === "token") {
+    // Personal API tokens never grant admin — even for admin users.
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "This action is not available with API token authentication. Sign in with your browser instead.",
+    });
+  }
   const actor = await getCurrentActor(prisma, userId);
   if (actor.role !== "admin") {
     throw new TRPCError({ code: "FORBIDDEN" });
