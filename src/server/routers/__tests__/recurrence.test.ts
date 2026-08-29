@@ -5,11 +5,17 @@ const {
   requireTaskAccess,
   getCurrentActor,
   processDueRecurrences,
+  lockConnectionMock,
 } = vi.hoisted(() => ({
   requireProjectAccess: vi.fn(),
   requireTaskAccess: vi.fn(),
   getCurrentActor: vi.fn(),
   processDueRecurrences: vi.fn(),
+  lockConnectionMock: {
+    tryAdvisoryLock: vi.fn(),
+    releaseAdvisoryLock: vi.fn(),
+    end: vi.fn(),
+  },
 }));
 
 vi.mock("@/server/authz", () => ({
@@ -22,19 +28,12 @@ vi.mock("@/server/services/recurrence-processor", () => ({
   processDueRecurrences,
 }));
 
-// withSchedulerLock takes the advisory lock on the global prisma client, so
-// the lock transaction has to be mockable independently of ctx.prisma.
-const { prismaGlobalMock } = vi.hoisted(() => ({
-  prismaGlobalMock: {
-    $transaction: vi.fn(
-      async (callback: (tx: unknown) => unknown) =>
-        callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) }),
-    ),
-  },
+vi.mock("@/server/services/scheduler-lock-connection", () => ({
+  createSchedulerLockConnection: () => lockConnectionMock,
 }));
 
 vi.mock("@/lib/prisma", () => ({
-  prisma: prismaGlobalMock,
+  prisma: {},
 }));
 
 import { createCallerFactory } from "@/server/trpc";
@@ -54,12 +53,8 @@ function createPrismaMock() {
       upsert: vi.fn().mockResolvedValue({ id: RULE_ID, taskId: TASK_ID }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    $transaction: vi.fn(
-      async (callback: (tx: unknown) => unknown) =>
-        callback({
-          $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]),
-        }),
-    ),
+    // The router only ever reads/writes rules through this client; the
+    // scheduler lock itself runs on the dedicated lock connection mock.
   };
 }
 
@@ -80,10 +75,9 @@ describe("recurrence router", () => {
     getCurrentActor.mockResolvedValue({ id: USER_ID, role: "owner" });
     requireProjectAccess.mockResolvedValue({ actor: { id: USER_ID, role: "owner" }, membershipRole: "owner" });
     processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
-    prismaGlobalMock.$transaction.mockImplementation(
-      async (callback: (tx: unknown) => unknown) =>
-        callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) }),
-    );
+    lockConnectionMock.tryAdvisoryLock.mockResolvedValue(true);
+    lockConnectionMock.releaseAdvisoryLock.mockResolvedValue(undefined);
+    lockConnectionMock.end.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -204,22 +198,27 @@ describe("recurrence router", () => {
         signal: expect.any(AbortSignal),
       });
       expect(result).toEqual({ processed: 3, createdTaskIds: ["cmab8yxxp000bi7p4k8n2v3qd"] });
-      // The processor ran inside the scheduler lock transaction.
-      expect(prismaGlobalMock.$transaction).toHaveBeenCalledTimes(1);
+      // The run held the scheduler lock on the dedicated lock connection —
+      // NOT on the shared prisma client (finding 8) — and released it and
+      // closed the connection after the work settled.
+      expect(lockConnectionMock.tryAdvisoryLock).toHaveBeenCalledTimes(1);
+      expect(lockConnectionMock.releaseAdvisoryLock).toHaveBeenCalledTimes(1);
+      expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
     });
 
     it("returns a skipped result instead of racing a tick that holds the scheduler lock (M8)", async () => {
       const prisma = createPrismaMock();
       const caller = createCallerWith(prisma);
-      prismaGlobalMock.$transaction.mockImplementation(
-        async (callback: (tx: { $queryRaw: unknown }) => unknown) =>
-          callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: false }]) }),
-      );
+      // Another session/replica holds the lock.
+      lockConnectionMock.tryAdvisoryLock.mockResolvedValue(false);
 
       const result = await caller.processDue({ projectId: PROJECT_ID });
 
       expect(result).toEqual({ processed: 0, createdTaskIds: [], skipped: true });
       expect(processDueRecurrences).not.toHaveBeenCalled();
+      // The dedicated lock connection is still closed (no session leak).
+      expect(lockConnectionMock.releaseAdvisoryLock).not.toHaveBeenCalled();
+      expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
     });
   });
 });

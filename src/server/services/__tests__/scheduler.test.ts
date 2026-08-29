@@ -7,16 +7,116 @@ const {
   recordSprintSnapshots,
   processDueWebhookDeliveries,
   prismaMock,
-} = vi.hoisted(() => ({
-  processDueRecurrences: vi.fn(),
-  processDueDateAutomationRules: vi.fn(),
-  runDailyDigestJob: vi.fn(),
-  recordSprintSnapshots: vi.fn(),
-  processDueWebhookDeliveries: vi.fn(),
-  prismaMock: {
-    $transaction: vi.fn(),
-  },
-}));
+  fakePg,
+  createSchedulerLockConnection,
+} = vi.hoisted(() => {
+  type FakeLockConnection = {
+    id: number;
+    live: boolean;
+    tryLockKeys: number[];
+    unlockKeys: number[];
+    tryAdvisoryLock: (key: number) => Promise<boolean>;
+    releaseAdvisoryLock: (key: number) => Promise<void>;
+    end: () => Promise<void>;
+  };
+
+  // A tiny fake of Postgres session advisory locks. Every dedicated lock
+  // connection handed out below is an independent SESSION (exactly like a
+  // second replica would open its own), yet all sessions share one advisory
+  // lock space — so a lock taken on session A is invisible to session B
+  // until A releases it (or A's session dies).
+  const server = {
+    held: new Map<number, number>(), // advisory key -> owning session id
+    connections: [] as FakeLockConnection[],
+    events: [] as string[],
+    nextSessionId: 0,
+    tryLockError: undefined as Error | undefined,
+    unlockError: undefined as Error | undefined,
+    factoryError: undefined as Error | undefined,
+  };
+
+  function open(): FakeLockConnection {
+    const connection: FakeLockConnection = {
+      id: server.nextSessionId++,
+      live: true,
+      tryLockKeys: [],
+      unlockKeys: [],
+      async tryAdvisoryLock(key: number) {
+        if (!connection.live) throw new Error("lock connection is closed");
+        if (server.tryLockError) throw server.tryLockError;
+        server.events.push(`try:${connection.id}`);
+        connection.tryLockKeys.push(key);
+        if (server.held.has(key)) {
+          return false;
+        }
+        server.held.set(key, connection.id);
+        return true;
+      },
+      async releaseAdvisoryLock(key: number) {
+        if (!connection.live) throw new Error("lock connection is closed");
+        if (server.unlockError) throw server.unlockError;
+        server.events.push(`unlock:${connection.id}`);
+        connection.unlockKeys.push(key);
+        if (server.held.get(key) === connection.id) {
+          server.held.delete(key);
+        }
+      },
+      async end() {
+        server.events.push(`end:${connection.id}`);
+        connection.live = false;
+        // A dropped session releases every advisory lock it holds.
+        for (const [key, owner] of [...server.held]) {
+          if (owner === connection.id) {
+            server.held.delete(key);
+          }
+        }
+      },
+    };
+    server.connections.push(connection);
+    server.events.push(`open:${connection.id}`);
+    return connection;
+  }
+
+  const fakePg = {
+    server,
+    open,
+    reset() {
+      server.held.clear();
+      server.connections = [];
+      server.events = [];
+      server.nextSessionId = 0;
+      server.tryLockError = undefined;
+      server.unlockError = undefined;
+      server.factoryError = undefined;
+    },
+    isHeld(key: number) {
+      return server.held.has(key);
+    },
+  };
+
+  return {
+    processDueRecurrences: vi.fn(),
+    processDueDateAutomationRules: vi.fn(),
+    runDailyDigestJob: vi.fn(),
+    recordSprintSnapshots: vi.fn(),
+    processDueWebhookDeliveries: vi.fn(),
+    prismaMock: {
+      // The global (shared-pool) client. The scheduler lock must NEVER touch
+      // it: the dedicated lock connection is a separate client, so jobs never
+      // wait on the connection that holds the lock (finding 8).
+      $transaction: vi.fn(),
+      $queryRaw: vi.fn(),
+      $executeRaw: vi.fn(),
+    },
+    fakePg,
+    createSchedulerLockConnection: vi.fn(() => {
+      if (server.factoryError) {
+        throw server.factoryError;
+      }
+      return fakePg.open();
+    }),
+  };
+});
 
 vi.mock("@/server/services/recurrence-processor", () => ({
   processDueRecurrences,
@@ -42,6 +142,10 @@ vi.mock("@/lib/prisma", () => ({
   prisma: prismaMock,
 }));
 
+vi.mock("@/server/services/scheduler-lock-connection", () => ({
+  createSchedulerLockConnection,
+}));
+
 import {
   SCHEDULER_ADVISORY_LOCK_KEY,
   getSchedulerDigestHourUtc,
@@ -56,25 +160,13 @@ import { TickDeadlineExceededError } from "@/server/services/scheduler-deadline"
 
 const NOW = new Date("2026-05-19T09:00:00.000Z");
 const INTERVAL_MS = 60_000;
-const DEFAULT_LOCK_TX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
-// Stand-in for the interactive-transaction client Prisma hands to the callback.
-// The advisory lock query runs on the tx connection; the jobs keep using the
-// global prisma mock (prismaMock).
-let txMock: { $queryRaw: ReturnType<typeof vi.fn> };
-
-function sqlText(call: unknown[]) {
-  const sql = call[0] as { sql?: string; text?: string; values?: unknown[] };
-  const values = Array.from(sql.values ?? []).map((value) => String(value));
-  return `${sql.text ?? sql.sql ?? String(call[0])} (${values.join(", ")})`;
+function connections() {
+  return fakePg.server.connections;
 }
 
-function lockCalls() {
-  return txMock.$queryRaw.mock.calls.filter((call) => sqlText(call).includes("pg_try_advisory_xact_lock"));
-}
-
-function transactionOptions() {
-  return prismaMock.$transaction.mock.calls.at(-1)?.[1];
+function eventIndex(event: string) {
+  return fakePg.server.events.indexOf(event);
 }
 
 describe("scheduler", () => {
@@ -85,16 +177,29 @@ describe("scheduler", () => {
     process.env.SCHEDULER_ENABLED = "true";
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
-    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
     delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
+    fakePg.reset();
 
-    txMock = { $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) };
-    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => unknown) => callback(txMock));
-    processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
-    processDueDateAutomationRules.mockResolvedValue({ processed: 0, fired: 0, skippedRules: 0 });
-    runDailyDigestJob.mockResolvedValue({ sent: 0, skipped: 0 });
-    recordSprintSnapshots.mockResolvedValue(0);
-    processDueWebhookDeliveries.mockResolvedValue({ processed: 0, succeeded: 0 });
+    processDueRecurrences.mockImplementation(async () => {
+      fakePg.server.events.push("job:recurrence");
+      return { processed: 0, createdTaskIds: [] };
+    });
+    processDueDateAutomationRules.mockImplementation(async () => {
+      fakePg.server.events.push("job:automation");
+      return { processed: 0, fired: 0, skippedRules: 0 };
+    });
+    runDailyDigestJob.mockImplementation(async () => {
+      fakePg.server.events.push("job:digest");
+      return { sent: 0, skipped: 0 };
+    });
+    recordSprintSnapshots.mockImplementation(async () => {
+      fakePg.server.events.push("job:snapshot");
+      return 0;
+    });
+    processDueWebhookDeliveries.mockImplementation(async () => {
+      fakePg.server.events.push("job:webhooks");
+      return { processed: 0, succeeded: 0 };
+    });
     stopScheduler();
   });
 
@@ -103,25 +208,33 @@ describe("scheduler", () => {
     delete process.env.SCHEDULER_ENABLED;
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
-    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
     delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
     vi.useRealTimers();
   });
 
   describe("runScheduledJobs", () => {
-    it("takes the transaction-scoped advisory lock and runs all three jobs once", async () => {
+    it("takes the session advisory lock on a dedicated connection and runs all jobs once", async () => {
       const result = await runScheduledJobs();
 
       expect(result).toEqual({ ran: true });
-      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
-      expect(lockCalls()).toHaveLength(1);
-      const lockSql = sqlText(lockCalls()[0]);
-      expect(lockSql).toContain("pg_try_advisory_xact_lock");
-      expect(lockSql).toContain(String(SCHEDULER_ADVISORY_LOCK_KEY));
-      expect(lockSql).not.toContain("pg_advisory_unlock");
-      expect(lockSql).not.toContain("pg_try_advisory_lock(");
+      // Exactly one dedicated lock connection; the lock never touches the
+      // shared global client/pool the jobs use (finding 8).
+      expect(connections()).toHaveLength(1);
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
+
+      const connection = connections()[0];
+      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      // Released exactly once, with the same key, on the same session, and
+      // only after the run settled — then the dedicated connection is closed.
+      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.live).toBe(false);
+      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("job:webhooks"));
+
+      // M9/M8 unchanged: every job receives the tick's cancellable deadline
+      // signal and runs on the global prisma client.
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
-      // M9: every job receives the tick's cancellable deadline signal.
       const recurrenceArgs = processDueRecurrences.mock.calls[0];
       expect(recurrenceArgs[0]).toBe(prismaMock);
       expect(recurrenceArgs[1].limit).toBe(100);
@@ -132,94 +245,81 @@ describe("scheduler", () => {
       // Digest ticks at 09:00 UTC are past the default SCHEDULER_DIGEST_HOUR_UTC of 7.
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
       expect(runDailyDigestJob.mock.calls[0][0]).toEqual(NOW);
-    });
-
-
-    it("runs the sprint snapshot and webhook delivery jobs on each tick", async () => {
-      await runScheduledJobs();
-
       expect(recordSprintSnapshots).toHaveBeenCalledTimes(1);
       expect(processDueWebhookDeliveries).toHaveBeenCalledTimes(1);
-    });
-
-    it("runs the sprint snapshot and webhook delivery jobs on each tick", async () => {
-      await runScheduledJobs();
-
-      expect(recordSprintSnapshots).toHaveBeenCalledTimes(1);
-      expect(processDueWebhookDeliveries).toHaveBeenCalledTimes(1);
-      // M9: the webhook sweep receives the tick deadline signal too.
       expect(processDueWebhookDeliveries.mock.calls[0][0]).toBe(prismaMock);
       expect(processDueWebhookDeliveries.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
     });
 
-    it("keeps the lock transaction independent of the tick timeout (M9)", async () => {
-      await runScheduledJobs();
+    it("refuses a second concurrent acquisition (simulating another replica) and only grants it after the first run settles", async () => {
+      let releaseFirstWork: () => void = () => {};
+      const firstRun = withSchedulerLock(async () => {
+        fakePg.server.events.push("first-work");
+        await new Promise<void>((resolve) => {
+          releaseFirstWork = resolve;
+        });
+        fakePg.server.events.push("first-work-done");
+        return "first";
+      });
+      await vi.advanceTimersByTimeAsync(0); // let the first run acquire the lock
 
-      // The lock tx is not the deadline: it holds exactly one query and stays
-      // open for the whole run, so it must never expire at the tick timeout.
-      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: DEFAULT_LOCK_TX_TIMEOUT_MS });
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
+
+      // A second run on its OWN dedicated session — the cross-replica case:
+      // a different process has a different connection, so only the shared
+      // DB lock can arbitrate.
+      const secondRun = withSchedulerLock(async () => {
+        fakePg.server.events.push("second-work");
+        return "second";
+      });
+      await expect(secondRun).resolves.toBeNull();
+      expect(fakePg.server.connections).toHaveLength(2);
+      expect(fakePg.server.connections[1].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(fakePg.server.connections[1].unlockKeys).toEqual([]);
+      expect(fakePg.server.connections[1].live).toBe(false);
+      // The refused run must NOT have executed its work, and the lock must
+      // still be held by the first session.
+      expect(fakePg.server.events).not.toContain("second-work");
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
+
+      // Only when the first run's work settles is the lock released —
+      // strictly after the work finished (unlock:0 follows first-work-done).
+      releaseFirstWork();
+      await expect(firstRun).resolves.toBe("first");
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("first-work-done"));
+      expect(fakePg.server.events).toContain("end:0");
+
+      // With the lock free again, a later acquisition succeeds.
+      await expect(withSchedulerLock(async () => "third")).resolves.toBe("third");
+      expect(fakePg.server.connections).toHaveLength(3);
     });
 
-    it("honours SCHEDULER_LOCK_TX_TIMEOUT_MS for the lock transaction", async () => {
-      process.env.SCHEDULER_TICK_TIMEOUT_MS = "30000";
-      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "7200000";
-
-      await runScheduledJobs();
-
-      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: 7200000 });
-    });
-
-    it("does not allow a second lock acquisition until a job that outlives the tick deadline finishes (M9)", async () => {
+    it("keeps the session lock held while a job outlives the tick deadline; the next tick runs only after the run settles", async () => {
       const tickTimeoutMs = 1_000;
-      const lockTxTimeoutMs = 1_500;
       process.env.SCHEDULER_TICK_TIMEOUT_MS = String(tickTimeoutMs);
-      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = String(lockTxTimeoutMs);
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      // Simulate real Prisma semantics: the interactive lock transaction is
-      // expired (rejected by a timer) while the job keeps running on the
-      // global client — the tx cannot cancel the job.
       let pendingJobs = 0;
       let releaseFirstJob: () => void = () => {};
       processDueRecurrences.mockImplementation(() => {
         pendingJobs += 1;
         if (pendingJobs === 1) {
-          // The first run's job outlives the tick deadline (nobody resolves
-          // it until the test does).
+          // The first run's recurrence job outlives the tick deadline; only
+          // the test can finish it.
           return new Promise<void>((resolve) => {
             releaseFirstJob = resolve;
           });
         }
-        // Later runs' jobs complete normally.
+        fakePg.server.events.push("job:recurrence");
         return Promise.resolve({ processed: 0, createdTaskIds: [] });
       });
-      prismaMock.$transaction.mockImplementation(
-        (callback: (tx: typeof txMock) => Promise<unknown>, options?: { timeout?: number }) =>
-          new Promise((resolve, reject) => {
-            const expiry = setTimeout(
-              () => reject(new Error("Transactions are timed out")),
-              options?.timeout ?? 5_000,
-            );
-            void callback(txMock).then(
-              (value) => {
-                clearTimeout(expiry);
-                resolve(value);
-              },
-              (error) => {
-                clearTimeout(expiry);
-                reject(error);
-              },
-            );
-          }),
-      );
 
       const firstTick = runScheduledJobs();
-      // Advance past both the tick deadline and the lock tx expiry, so the
-      // job has outlived SCHEDULER_TICK_TIMEOUT_MS and the lock tx expired.
-      await vi.advanceTimersByTimeAsync(lockTxTimeoutMs + 100);
+      // Advance well past SCHEDULER_TICK_TIMEOUT_MS: the deadline signal is
+      // aborted while the job keeps running (deadline and lock are independent).
+      await vi.advanceTimersByTimeAsync(tickTimeoutMs + 500);
 
-      // The first tick must still be in flight: withSchedulerLock awaits the
-      // outstanding work even though the lock tx itself already expired.
       let firstSettled = false;
       void firstTick.then(() => {
         firstSettled = true;
@@ -227,39 +327,79 @@ describe("scheduler", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(firstSettled).toBe(false);
       expect(pendingJobs).toBe(1);
+      // The dedicated session still holds the advisory lock while the job is
+      // live, so another replica could not run jobs either.
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
 
-      // A second tick cannot acquire the lock while the first run is live.
-      const secondResult = await runScheduledJobs();
-      expect(secondResult).toEqual({ ran: false });
+      // A second tick cannot start while the first run is live.
+      expect(await runScheduledJobs()).toEqual({ ran: false });
       expect(pendingJobs).toBe(1);
+      // FINDING 8: while the long job runs, the dedicated lock connection has
+      // issued nothing beyond the initial try-lock (unlock strictly waits for
+      // the run to settle), no other lock connection was opened, and the
+      // global shared pool was never touched by the lock machinery — jobs
+      // keep every shared-pool connection for themselves.
+      expect(connections()).toHaveLength(1);
+      expect(connections()[0].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
 
-      // Only when the long-running job actually finishes does the first tick
-      // settle (fail-safe skip) and the next tick run again.
+      // Once the long-running job finishes, the first tick settles, the lock
+      // is released and closed, and a later tick runs again. Note: fake timers
+      // do not fire AbortSignal.timeout, so the first tick's remaining jobs
+      // simply complete normally after the release (they are never observed
+      // by another replica because the session lock was held throughout).
       releaseFirstJob();
       await firstTick;
-      await vi.advanceTimersByTimeAsync(0);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      const firstConnection = connections()[0];
+      expect(firstConnection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(firstConnection.live).toBe(false);
+      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("job:recurrence"));
 
       const thirdResult = await runScheduledJobs();
       expect(thirdResult).toEqual({ ran: true });
       expect(pendingJobs).toBe(2);
+      warnSpy.mockRestore();
+    });
+
+    it("skips the tick when another session/replica holds the lock", async () => {
+      // Simulate a lock taken by a DIFFERENT process (session id 999).
+      fakePg.server.held.set(SCHEDULER_ADVISORY_LOCK_KEY, 999);
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(connections()).toHaveLength(1);
+      const connection = connections()[0];
+      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      // Not acquired: nothing is unlocked, but the dedicated connection is
+      // still closed (no leaked sessions between ticks).
+      expect(connection.unlockKeys).toEqual([]);
+      expect(connection.live).toBe(false);
+      expect(processDueRecurrences).not.toHaveBeenCalled();
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+      expect(runDailyDigestJob).not.toHaveBeenCalled();
+      expect(recordSprintSnapshots).not.toHaveBeenCalled();
+      expect(processDueWebhookDeliveries).not.toHaveBeenCalled();
+    });
+
+    it("skips the tick when the lock connection cannot be created", async () => {
+      fakePg.server.factoryError = new Error("no database url");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(processDueRecurrences).not.toHaveBeenCalled();
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
     });
 
-    it("skips the tick when another instance holds the lock", async () => {
-      txMock.$queryRaw.mockResolvedValue([{ locked: false }]);
-
-      const result = await runScheduledJobs();
-
-      expect(result).toEqual({ ran: false });
-      expect(lockCalls()).toHaveLength(1);
-      expect(processDueRecurrences).not.toHaveBeenCalled();
-      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
-      expect(runDailyDigestJob).not.toHaveBeenCalled();
-    });
-
-    it("skips the tick when the lock query fails", async () => {
-      txMock.$queryRaw.mockRejectedValue(new Error("database unavailable"));
+    it("skips the tick when the lock query fails and still closes the dedicated connection", async () => {
+      fakePg.server.tryLockError = new Error("database unavailable");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await runScheduledJobs();
 
@@ -267,6 +407,11 @@ describe("scheduler", () => {
       expect(processDueRecurrences).not.toHaveBeenCalled();
       expect(processDueDateAutomationRules).not.toHaveBeenCalled();
       expect(runDailyDigestJob).not.toHaveBeenCalled();
+      expect(connections()).toHaveLength(1);
+      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(connections()[0].live).toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
+      errorSpy.mockRestore();
     });
 
     it("skips a tick while the previous tick's promise is still in flight (M9)", async () => {
@@ -285,8 +430,10 @@ describe("scheduler", () => {
 
       const secondResult = await secondTick;
       expect(secondResult).toEqual({ ran: false });
-      // The first tick is still the only one running jobs.
+      // The first tick is still the only one running jobs, and the in-flight
+      // guard means no second lock connection was even opened.
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(connections()).toHaveLength(1);
 
       releaseFirstTick?.();
       expect(await firstTick).toEqual({ ran: true });
@@ -297,6 +444,7 @@ describe("scheduler", () => {
       const thirdTick = await runScheduledJobs();
       expect(thirdTick).toEqual({ ran: true });
       expect(processDueRecurrences).toHaveBeenCalledTimes(2);
+      expect(recordSprintSnapshots).toHaveBeenCalledTimes(2);
     });
 
     it("stops the remaining jobs when a job hits the tick deadline (M9)", async () => {
@@ -337,6 +485,10 @@ describe("scheduler", () => {
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
       expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+      // The lock is still released and the connection closed after a failing run.
+      const connection = connections()[0];
+      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.live).toBe(false);
     });
 
     it("still runs recurrences and the digest when due-date automation throws", async () => {
@@ -389,9 +541,11 @@ describe("scheduler", () => {
       await runScheduledJobs();
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
 
-      vi.clearAllMocks();
-      txMock.$queryRaw.mockResolvedValue([{ locked: true }]);
-      runDailyDigestJob.mockResolvedValue({ sent: 0, skipped: 0 });
+      runDailyDigestJob.mockClear();
+      runDailyDigestJob.mockImplementation(async () => {
+        fakePg.server.events.push("job:digest");
+        return { sent: 0, skipped: 0 };
+      });
       process.env.SCHEDULER_DIGEST_HOUR_UTC = "23";
       await runScheduledJobs();
       expect(runDailyDigestJob).not.toHaveBeenCalled();
@@ -399,33 +553,56 @@ describe("scheduler", () => {
   });
 
   describe("withSchedulerLock (external entry points)", () => {
-    it("runs the callback and returns its result while holding the lock", async () => {
+    it("runs the callback and returns its result while holding the session lock", async () => {
       const result = await withSchedulerLock(async () => "ran");
 
       expect(result).toBe("ran");
-      expect(lockCalls()).toHaveLength(1);
-      expect(sqlText(lockCalls()[0])).toContain(String(SCHEDULER_ADVISORY_LOCK_KEY));
+      expect(connections()).toHaveLength(1);
+      expect(connections()[0].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].live).toBe(false);
     });
 
-    it("returns null (skip) when the lock is already held", async () => {
-      txMock.$queryRaw.mockResolvedValue([{ locked: false }]);
+    it("never lets the callback run — and releases nothing — when the lock is held by another session", async () => {
+      fakePg.server.held.set(SCHEDULER_ADVISORY_LOCK_KEY, 999);
 
       const result = await withSchedulerLock(async () => {
-        throw new Error("must not run while another tick holds the lock");
+        throw new Error("must not run while another session holds the lock");
       });
 
       expect(result).toBeNull();
+      const connection = connections()[0];
+      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.unlockKeys).toEqual([]);
+      expect(connection.live).toBe(false);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
     });
 
-    it("returns null (skip) when the lock transaction fails", async () => {
-      prismaMock.$transaction.mockRejectedValue(new Error("database unavailable"));
+    it("returns null (skip) when the lock connection cannot be created", async () => {
+      fakePg.server.factoryError = new Error("database down");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await withSchedulerLock(async () => "never");
 
       expect(result).toBeNull();
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
+      errorSpy.mockRestore();
     });
 
-    it("treats a callback failure as a skip (fail safe)", async () => {
+    it("returns null (skip) when the try-lock query fails", async () => {
+      fakePg.server.tryLockError = new Error("database unavailable");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const result = await withSchedulerLock(async () => "never");
+
+      expect(result).toBeNull();
+      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(connections()[0].live).toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
+      errorSpy.mockRestore();
+    });
+
+    it("treats a callback failure as a skip, but still releases the lock and closes the connection", async () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await withSchedulerLock(async () => {
@@ -435,8 +612,42 @@ describe("scheduler", () => {
       // The lock helper never throws — callers treat null as "skip" so the
       // interval loop and the cron endpoint stay alive.
       expect(result).toBeNull();
+      const connection = connections()[0];
+      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.live).toBe(false);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("open:0"));
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
+    });
+
+    it("keeps the lock through an unlock failure (logged) and still closes the session", async () => {
+      fakePg.server.unlockError = new Error("unlock failed");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const result = await withSchedulerLock(async () => "ran");
+
+      // The run itself succeeded; the unlock failure is logged, and closing
+      // the dedicated session drops the lock server-side regardless.
+      expect(result).toBe("ran");
+      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(connections()[0].live).toBe(false);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] advisory unlock failed"));
+      errorSpy.mockRestore();
+    });
+
+    it("orders: lock acquired -> work -> unlock -> close, strictly", async () => {
+      const workRan = withSchedulerLock(async () => {
+        fakePg.server.events.push("work");
+        return "ok";
+      });
+
+      await expect(workRan).resolves.toBe("ok");
+      expect(eventIndex("try:0")).toBeGreaterThan(eventIndex("open:0"));
+      expect(eventIndex("work")).toBeGreaterThan(eventIndex("try:0"));
+      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("work"));
+      expect(eventIndex("end:0")).toBeGreaterThan(eventIndex("unlock:0"));
     });
   });
 
@@ -446,14 +657,14 @@ describe("scheduler", () => {
       startScheduler();
 
       await vi.advanceTimersByTimeAsync(0);
-      expect(lockCalls()).toHaveLength(0);
+      expect(connections()).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(1000);
-      expect(lockCalls()).toHaveLength(1);
+      expect(connections()).toHaveLength(1);
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1000);
-      expect(lockCalls()).toHaveLength(2);
+      expect(connections()).toHaveLength(2);
       expect(processDueRecurrences).toHaveBeenCalledTimes(2);
     });
 
@@ -464,7 +675,7 @@ describe("scheduler", () => {
 
       await vi.advanceTimersByTimeAsync(INTERVAL_MS);
 
-      expect(lockCalls()).toHaveLength(1);
+      expect(connections()).toHaveLength(1);
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
     });
 
@@ -476,7 +687,7 @@ describe("scheduler", () => {
 
       await vi.advanceTimersByTimeAsync(INTERVAL_MS * 5);
 
-      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+      expect(createSchedulerLockConnection).not.toHaveBeenCalled();
       expect(processDueRecurrences).not.toHaveBeenCalled();
       expect(processDueDateAutomationRules).not.toHaveBeenCalled();
       expect(isSchedulerEnabled()).toBe(false);
@@ -521,7 +732,7 @@ describe("scheduler", () => {
 
       await vi.advanceTimersByTimeAsync(INTERVAL_MS * 3);
 
-      expect(lockCalls()).toHaveLength(0);
+      expect(connections()).toHaveLength(0);
     });
   });
 });
