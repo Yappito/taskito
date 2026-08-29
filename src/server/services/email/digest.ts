@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { prisma as prismaClient } from "@/lib/prisma";
 import { getAlertConfig } from "@/lib/alert-utils";
@@ -10,6 +10,19 @@ import { DIGEST_MAX_TASKS_PER_SECTION, renderDigestEmail, type DigestTask } from
 type PrismaLike = typeof prismaClient | Prisma.TransactionClient;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** How long a pending claim can sit untouched before it is considered
+ * orphaned (its owning run crashed mid-send) and may be reclaimed. */
+export const DIGEST_CLAIM_STALE_MS = 15 * 60 * 1000;
+
+/** Maximum send attempts per user per UTC day; after this the claim stays
+ * failed and is no longer retried (bounded retry loop for a dead SMTP). */
+export const DIGEST_CLAIM_MAX_ATTEMPTS = 5;
+
+/** Claims older than this many UTC days are pruned. */
+const DIGEST_CLAIM_RETENTION_DAYS = 8;
+
+const DIGEST_CLAIM_LAST_ERROR_MAX_LENGTH = 500;
 
 export interface DueSoonDigest {
   userId: string;
@@ -29,6 +42,9 @@ export interface DueSoonDigest {
 export interface DigestJobResult {
   sent: number;
   skipped: number;
+  /** Recipients that still need a retry for this UTC day (failed sends below
+   * the attempt cap, or claims still pending from an interrupted run). */
+  retryable: number;
 }
 
 interface DigestTaskRow {
@@ -42,6 +58,27 @@ interface DigestTaskRow {
 
 function startOfUtcDay(date: Date): number {
   return Math.floor(date.getTime() / DAY_MS) * DAY_MS;
+}
+
+/** "YYYY-MM-DD" form of the UTC day containing `date` (the claim key). */
+function utcDayString(date: Date): string {
+  return new Date(startOfUtcDay(date)).toISOString().slice(0, 10);
+}
+
+function describeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, DIGEST_CLAIM_LAST_ERROR_MAX_LENGTH);
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+interface DigestClaimRow {
+  userId: string;
+  status: string;
+  attempts: number;
+  updatedAt: Date;
 }
 
 /**
@@ -255,13 +292,25 @@ export async function buildDueSoonDigest(
 
 /**
  * Send the digest to every user with the "digest" email preference enabled.
- * Per-user double-send protection: users whose settings.emailChannel.
- * lastDigestSentAt already falls within the current UTC day are skipped, so a
- * restart or a second replica (the scheduler advisory lock only deduplicates
- * within one tick) can never resend a digest for the same day. After a
- * successful send, lastDigestSentAt is written back to User.settings.
+ *
+ * Cross-replica uniqueness boundary: a durable EmailDigestClaim row, unique on
+ * (userId, dayUtc), NOT the best-effort settings.emailChannel.lastDigestSentAt
+ * write. The claim row is created (pending) before the send attempt, so two
+ * replicas or ticks racing on the same user/day can never both send; after a
+ * successful SMTP send the claim is marked succeeded, and a failed send keeps
+ * an explicit failed state that a later tick on the same UTC day retries (up
+ * to {@link DIGEST_CLAIM_MAX_ATTEMPTS} attempts; stale pending claims from a
+ * crashed run are reclaimed after {@link DIGEST_CLAIM_STALE_MS}).
+ *
+ * The returned `retryable` count reports how many recipients still need work
+ * for this day — runDailyDigestJob only closes its process-level day guard
+ * once that reaches zero, and another replica re-running the same day is kept
+ * out by the succeeded claims, never by the process guard.
  */
 export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaClient): Promise<DigestJobResult> {
+  const dayUtc = utcDayString(now);
+  const staleBefore = new Date(now.getTime() - DIGEST_CLAIM_STALE_MS);
+
   const users = (await client.user.findMany({
     where: { disabledAt: null },
     select: { id: true, name: true, email: true, settings: true },
@@ -272,18 +321,93 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
     return readEmailChannelPreference(settings, "digest");
   });
 
+  // Housekeeping: drop claims older than the retention window.
+  try {
+    await client.emailDigestClaim.deleteMany({
+      where: { dayUtc: { lt: utcDayString(new Date(now.getTime() - DIGEST_CLAIM_RETENTION_DAYS * DAY_MS)) } },
+    });
+  } catch (error) {
+    logEmailError("due-soon digest claim pruning failed", error);
+  }
+
+  const claims = (recipients.length === 0 ? [] : (await client.emailDigestClaim.findMany({
+    where: { dayUtc, userId: { in: recipients.map((user) => user.id) } },
+  })) as DigestClaimRow[]);
+  const claimByUser = new Map(claims.map((claim) => [claim.userId, claim]));
+
   let sent = 0;
   let skipped = 0;
 
   for (const user of recipients) {
-    // DB-backed guard: this user already received a digest today.
+    // Legacy settings-based guard, kept as a bootstrap for days already
+    // completed before the claim table existed. It is NOT the uniqueness
+    // boundary, only an additional read-only skip.
     if (wasDigestSentToday(user.settings, now)) {
+      skipped += 1;
+      continue;
+    }
+
+    const existing = claimByUser.get(user.id);
+    if (existing?.status === "succeeded") {
+      // Durable proof this user already received (or needed nothing for) the
+      // digest today — another replica or tick is done with this recipient.
+      skipped += 1;
+      continue;
+    }
+    if (existing?.status === "pending" && existing.updatedAt.getTime() > staleBefore.getTime()) {
+      // A live run somewhere owns this recipient; never race it.
+      skipped += 1;
+      continue;
+    }
+
+    // Atomically acquire (first attempt) or re-acquire (retry) the claim. For
+    // retries the CAS-style updateMany only matches claims that are still
+    // failed below the attempt cap or stale-pending; if another replica took
+    // the claim first, the update matches nothing and we skip.
+    let acquired = false;
+    if (!existing) {
+      try {
+        await client.emailDigestClaim.create({
+          data: { userId: user.id, dayUtc, status: "pending", attempts: 1 },
+        });
+        acquired = true;
+      } catch (error) {
+        if (!isUniqueConstraintError(error)) {
+          throw error;
+        }
+        // Another replica created the claim between our read and write.
+      }
+    } else {
+      const reclaimed = await client.emailDigestClaim.updateMany({
+        where: {
+          userId: user.id,
+          dayUtc,
+          OR: [
+            { status: "failed", attempts: { lt: DIGEST_CLAIM_MAX_ATTEMPTS } },
+            { status: "pending", updatedAt: { lt: staleBefore } },
+          ],
+        },
+        data: { status: "pending", attempts: { increment: 1 } },
+      });
+      acquired = reclaimed.count === 1;
+    }
+    if (!acquired) {
       skipped += 1;
       continue;
     }
 
     const digest = await buildDueSoonDigest(client, user.id, now);
     if (!digest) {
+      // Nothing to report: close the claim so later ticks skip this user
+      // without rebuilding the digest.
+      try {
+        await client.emailDigestClaim.updateMany({
+          where: { userId: user.id, dayUtc },
+          data: { status: "succeeded" },
+        });
+      } catch (error) {
+        logEmailError(`due-soon digest claim bookkeeping for user ${user.id} failed`, error);
+      }
       skipped += 1;
       continue;
     }
@@ -307,52 +431,100 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
         text: email.text,
         html: email.html,
       });
-      sent += 1;
-      // Best-effort bookkeeping: record the send so no other replica or a
-      // restarted process resends the digest for this UTC day. Merges into the
-      // existing settings/emailChannel to preserve unrelated keys.
-      try {
-        const settings = (user.settings ?? {}) as Record<string, unknown>;
-        const emailChannel = (settings.emailChannel ?? {}) as Record<string, unknown>;
-        await client.user.update({
-          where: { id: user.id },
-          data: {
-            settings: {
-              ...settings,
-              emailChannel: {
-                ...emailChannel,
-                lastDigestSentAt: now.toISOString(),
-              },
-            } as Prisma.InputJsonValue,
-          },
-        });
-      } catch (error) {
-        logEmailError(`due-soon digest bookkeeping for user ${user.id} failed`, error);
-      }
     } catch (error) {
       logEmailError(`due-soon digest to user ${user.id} failed`, error);
+      // Durable failure marker: the claim flips to failed so a later tick on
+      // the same UTC day retries, while every replica sees the failure.
+      try {
+        await client.emailDigestClaim.updateMany({
+          where: { userId: user.id, dayUtc },
+          data: { status: "failed", lastError: describeError(error) },
+        });
+      } catch (bookkeepingError) {
+        logEmailError(`due-soon digest claim bookkeeping for user ${user.id} failed`, bookkeepingError);
+      }
+      continue;
+    }
+
+    sent += 1;
+    // Mark the durable claim succeeded FIRST: once this write lands, no other
+    // replica can resend this user/day even if the legacy settings bookkeeping
+    // below fails (the claim, not lastDigestSentAt, is the boundary).
+    try {
+      await client.emailDigestClaim.updateMany({
+        where: { userId: user.id, dayUtc },
+        data: { status: "succeeded", sentAt: now },
+      });
+    } catch (error) {
+      logEmailError(`due-soon digest claim bookkeeping for user ${user.id} failed`, error);
+    }
+    // Legacy user-visible bookkeeping (settings.emailChannel.lastDigestSentAt).
+    // Best-effort and purely informational now; merges into the existing
+    // settings/emailChannel to preserve unrelated keys.
+    try {
+      const settings = (user.settings ?? {}) as Record<string, unknown>;
+      const emailChannel = (settings.emailChannel ?? {}) as Record<string, unknown>;
+      await client.user.update({
+        where: { id: user.id },
+        data: {
+          settings: {
+            ...settings,
+            emailChannel: {
+              ...emailChannel,
+              lastDigestSentAt: now.toISOString(),
+            },
+          } as Prisma.InputJsonValue,
+        },
+      });
+    } catch (error) {
+      logEmailError(`due-soon digest bookkeeping for user ${user.id} failed`, error);
     }
   }
 
-  return { sent, skipped };
+  // How many recipients still need work for this day? Failed claims under the
+  // attempt cap plus any pending claim not owned by a live run — including
+  // pending claims another replica is still working on, so this process never
+  // closes its day guard while any recipient might still be mid-flight.
+  let retryable = 0;
+  try {
+    const remaining = (await client.emailDigestClaim.findMany({
+      where: {
+        dayUtc,
+        OR: [
+          { status: "failed", attempts: { lt: DIGEST_CLAIM_MAX_ATTEMPTS } },
+          { status: "pending" },
+        ],
+      },
+      select: { id: true },
+    })) as Array<{ id: string }>;
+    retryable = remaining.length;
+  } catch (error) {
+    // If this sweep fails, stay conservative and keep the day open so the
+    // next tick re-examines every recipient through the claim table.
+    logEmailError("due-soon digest retryability sweep failed", error);
+    retryable = 1;
+  }
+
+  return { sent, skipped, retryable };
 }
 
-// Once-per-day guard (a lastDigestSentAt-style check) so a repeated cron tick
-// cannot resend the digest for the same UTC day.
+// Once-per-day guard (a lastDigestRunDay-style check) so a repeated cron tick
+// cannot resend the digest for the same UTC day. Only closed when no retryable
+// recipients remain; per-user/day uniqueness lives in the durable
+// EmailDigestClaim rows, not here.
 let lastDigestRunDay: string | null = null;
 
 /**
  * Job entry point for the built-in scheduler (src/server/services/scheduler.ts):
- * sends the daily due-soon digest for every opted-in user. Two guards keep it
- * at most once per UTC day: this process-level fast path (cheap, per-process)
- * and the DB-backed settings.emailChannel.lastDigestSentAt skip in
- * sendDueSoonDigests (survives restarts and multi-replica deployments).
+ * sends the daily due-soon digest for every opted-in user.
  *
- * The process-level day is ONLY marked as done after sendDueSoonDigests
- * completes without throwing: if the run crashes mid-way (e.g. a DB error),
- * the next scheduler tick retries it instead of silently losing the day.
- * Double-sends between two concurrent ticks are prevented by the DB-backed
- * per-user lastDigestSentAt guard, which stays as is.
+ * Cross-replica double-send prevention lives in the durable EmailDigestClaim
+ * rows (unique per user + UTC day, created before any send attempt). This
+ * process-level day guard is a cheap fast path ONLY and is marked done only
+ * when sendDueSoonDigests reports no retryable recipients: while a recipient
+ * failure (or an unfinished claim) remains, the next tick of the same UTC day
+ * re-enters sendDueSoonDigests and retries failed recipients through their
+ * failed/stale-pending claims instead of silently losing the day.
  */
 export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJobResult | { skipped: true }> {
   const day = String(startOfUtcDay(now));
@@ -361,13 +533,15 @@ export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJ
   }
 
   if (!isEmailConfigured()) {
-    return { sent: 0, skipped: 0 };
+    return { sent: 0, skipped: 0, retryable: 0 };
   }
 
   // A throw here propagates to the scheduler (which logs it) without marking
   // the day as done, so the same day can be retried on the next tick.
   const result = await sendDueSoonDigests(now);
-  lastDigestRunDay = day;
+  if (result.retryable === 0) {
+    lastDigestRunDay = day;
+  }
   return result;
 }
 

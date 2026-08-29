@@ -154,14 +154,16 @@ describe("GET /api/projects/[slug]/export auth branches", () => {
     expect(where.AND?.[0]?.projectId).toBe(PROJECT_ID);
   });
 
-  it("returns 403 for a valid token whose user has no project access", async () => {
+  it("returns the same 404 for a valid token whose user cannot access an existing project", async () => {
+    // Anti-enumeration (finding 13): an existing-but-inaccessible project must
+    // be indistinguishable from a nonexistent slug — identical 404, never 403.
     const authorization = await setupValidToken(false);
     prismaMock.project.findUnique.mockResolvedValue(projectRecord());
 
     const response = await GET(exportRequest({ authorization }), routeContext());
 
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({ error: "Forbidden" });
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: "Not found" });
     // Streaming never starts without task_read access.
     expect(prismaMock.task.findMany).not.toHaveBeenCalled();
   });

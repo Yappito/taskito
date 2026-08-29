@@ -107,6 +107,16 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: "Internal server error" }, { status: 500 });
 }
 
+/**
+ * The ONLY 404 this route returns, for both unknown slugs and existing
+ * projects the caller cannot access: identical status and body so a valid
+ * low-privilege session or bearer token cannot enumerate which project slugs
+ * exist (anti-enumeration parity, cookie and bearer paths alike).
+ */
+function notFoundResponse() {
+  return NextResponse.json({ error: "Not found" }, { status: 404 });
+}
+
 /** GET /api/projects/[slug]/export?format=csv|json&query=<dashboard-query> */
 export async function GET(
   request: Request,
@@ -133,12 +143,21 @@ export async function GET(
   });
 
   if (!project) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return notFoundResponse();
   }
 
   try {
     // Export requires project access with task_read.
-    await requireProjectAccess(prisma, session.user.id, project.id, { permission: "task_read" });
+    try {
+      await requireProjectAccess(prisma, session.user.id, project.id, { permission: "task_read" });
+    } catch (accessError) {
+      // Anti-enumeration: an existing project the caller cannot access answers
+      // with the exact same 404 as a nonexistent slug, never a 403.
+      if (accessError instanceof TRPCError && accessError.code === "FORBIDDEN") {
+        return notFoundResponse();
+      }
+      throw accessError;
+    }
 
     const [customFields, dictionary] = await Promise.all([
       prisma.customField.findMany({

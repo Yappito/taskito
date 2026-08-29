@@ -31,8 +31,11 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { Prisma } from "@prisma/client";
+
 import {
   buildDueSoonDigest,
+  DIGEST_CLAIM_MAX_ATTEMPTS,
   resetDailyDigestJobForTests,
   runDailyDigestJob,
   sendDueSoonDigests,
@@ -69,6 +72,7 @@ function makePrisma(options: {
   projects?: Array<{ id: string; settings: unknown }>;
   statuses?: Array<{ id: string; category: string }>;
   taskCalls?: Array<Array<Record<string, unknown>>>;
+  claims?: Array<{ userId: string; status: string; attempts: number; updatedAt: Date }>;
 }) {
   let taskCallIndex = 0;
   return {
@@ -86,6 +90,20 @@ function makePrisma(options: {
     },
     task: {
       findMany: vi.fn(async () => options.taskCalls?.[taskCallIndex++] ?? []),
+    },
+    emailDigestClaim: {
+      // Called twice per run: the recipient claim preload (full claim rows),
+      // then the retryable sweep (id-only select). The two shapes differ, so
+      // the return type is widened; tests queue mockResolvedValueOnce(...)
+      // values when the sweep result must differ from the preload.
+      findMany: vi.fn(async (): Promise<Array<Record<string, unknown>>> => options.claims ?? []),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "claim-1",
+        ...data,
+      })),
+      update: vi.fn(async () => ({})),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+      deleteMany: vi.fn(async () => ({ count: 0 })),
     },
   };
 }
@@ -209,7 +227,7 @@ describe("sendDueSoonDigests", () => {
 
     const result = await sendDueSoonDigests(NOW, prisma as never);
 
-    expect(result).toEqual({ sent: 1, skipped: 1 });
+    expect(result).toEqual({ sent: 1, skipped: 1, retryable: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,7 +257,7 @@ describe("sendDueSoonDigests", () => {
 
     const result = await sendDueSoonDigests(NOW, prisma as never);
 
-    expect(result).toEqual({ sent: 0, skipped: 1 });
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
@@ -262,8 +280,30 @@ describe("sendDueSoonDigests", () => {
 
     const result = await sendDueSoonDigests(NOW, prisma as never);
 
-    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(result).toEqual({ sent: 1, skipped: 0, retryable: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a durable pending claim before sending and closes it as succeeded", async () => {
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    await sendDueSoonDigests(NOW, prisma as never);
+
+    // The claim row is created BEFORE the send — the uniqueness boundary.
+    expect(prisma.emailDigestClaim.create).toHaveBeenCalledWith({
+      data: { userId: "u1", dayUtc: "2026-08-29", status: "pending", attempts: 1 },
+    });
+    // …and durably closed out once SMTP accepted the message.
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29" },
+      data: { status: "succeeded", sentAt: NOW },
+    });
   });
 
   it("records emailChannel.lastDigestSentAt in User.settings after sending", async () => {
@@ -287,7 +327,7 @@ describe("sendDueSoonDigests", () => {
 
     const result = await sendDueSoonDigests(NOW, prisma as never);
 
-    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(result).toEqual({ sent: 1, skipped: 0, retryable: 0 });
     expect(prisma.user.update).toHaveBeenCalledTimes(1);
     expect(prisma.user.update).toHaveBeenCalledWith({
       where: { id: "u1" },
@@ -301,27 +341,167 @@ describe("sendDueSoonDigests", () => {
     });
   });
 
-  it("still counts the send when the lastDigestSentAt bookkeeping fails", async () => {
+  it("does not resend from another replica when the settings bookkeeping fails after SMTP success", async () => {
     const prisma = makePrisma({
       users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
       user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
       projects: [projectP1],
       taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
     });
+    // Legacy settings bookkeeping fails AFTER SMTP accepted the message.
     prisma.user.update.mockRejectedValueOnce(new Error("db down"));
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const first = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(first).toEqual({ sent: 1, skipped: 0, retryable: 0 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // The durable claim — not lastDigestSentAt — was still closed as succeeded.
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29" },
+      data: { status: "succeeded", sentAt: NOW },
+    });
+
+    // Another replica re-running the same day reads the succeeded claim and
+    // must NOT resend, even though the settings write above failed.
+    const replicaClaims = [{ userId: "u1", status: "succeeded", attempts: 1, updatedAt: NOW }];
+    const replica = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: replicaClaims,
+    });
+    replica.emailDigestClaim.findMany
+      .mockResolvedValueOnce(replicaClaims) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep
+
+    const second = await sendDueSoonDigests(NOW, replica as never);
+
+    expect(second).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("reclaims a failed claim on a later run of the same day and retries the send", async () => {
+    const failedClaim = { userId: "u1", status: "failed", attempts: 1, updatedAt: new Date(NOW.getTime() - 600_000) };
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      claims: [failedClaim],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    });
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([failedClaim]) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep: all done after this run
     getAccessibleProjectIds.mockResolvedValue(["p1"]);
 
     const result = await sendDueSoonDigests(NOW, prisma as never);
 
-    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(result).toEqual({ sent: 1, skipped: 0, retryable: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+    // CAS-style re-acquisition of the failed claim.
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: {
+        userId: "u1",
+        dayUtc: "2026-08-29",
+        OR: [
+          { status: "failed", attempts: { lt: DIGEST_CLAIM_MAX_ATTEMPTS } },
+          { status: "pending", updatedAt: { lt: expect.any(Date) } },
+        ],
+      },
+      data: { status: "pending", attempts: { increment: 1 } },
+    });
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29" },
+      data: { status: "succeeded", sentAt: NOW },
+    });
+  });
+
+  it("stops retrying a recipient whose claim reached the attempt cap", async () => {
+    const maxedClaim = {
+      userId: "u1",
+      status: "failed",
+      attempts: DIGEST_CLAIM_MAX_ATTEMPTS,
+      updatedAt: new Date(NOW.getTime() - 600_000),
+    };
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: [maxedClaim],
+    });
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([maxedClaim]) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep: capped claim is filtered out
+    prisma.emailDigestClaim.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("skips a recipient whose fresh pending claim is owned by another replica", async () => {
+    const pendingClaim = { userId: "u1", status: "pending", attempts: 1, updatedAt: NOW };
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: [pendingClaim],
+    });
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([pendingClaim]) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep: fresh foreign pending claim is not ours
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("skips a recipient when another replica wins the claim creation race", async () => {
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+    });
+    prisma.emailDigestClaim.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+        code: "P2002",
+        clientVersion: "test",
+      })
+    );
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("marks a transient SMTP failure durably as failed on the claim", async () => {
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    });
+    sendEmail.mockRejectedValueOnce(new Error("smtp 421 try again later"));
+    // Retryable sweep: the just-failed claim has attempts left.
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([]) // claim preload
+      .mockResolvedValueOnce([{ id: "claim-1" }]); // retryable sweep
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 0, retryable: 1 });
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29" },
+      data: { status: "failed", lastError: "smtp 421 try again later" },
+    });
+    expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
   it("is a no-op when SMTP is unconfigured", async () => {
     isEmailConfigured.mockReturnValue(false);
     const prisma = makePrisma({});
     const result = await sendDueSoonDigests(NOW, prisma as never);
-    expect(result).toEqual({ sent: 0, skipped: 0 });
+    expect(result).toEqual({ sent: 0, skipped: 0, retryable: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
   });
 });
@@ -345,7 +525,7 @@ describe("runDailyDigestJob", () => {
     prismaRef.current = prisma as never;
 
     const first = await runDailyDigestJob(NOW);
-    expect(first).toEqual({ sent: 1, skipped: 0 });
+    expect(first).toEqual({ sent: 1, skipped: 0, retryable: 0 });
     expect(prisma.user.update).toHaveBeenCalledWith({
       where: { id: "u1" },
       data: {
@@ -371,14 +551,14 @@ describe("runDailyDigestJob", () => {
     }) as never;
     resetDailyDigestJobForTests();
     const nextDay = await runDailyDigestJob(new Date(NOW.getTime() + DAY_MS));
-    expect(nextDay).toEqual({ sent: 1, skipped: 0 });
+    expect(nextDay).toEqual({ sent: 1, skipped: 0, retryable: 0 });
   });
 
   it("does nothing when email is not configured", async () => {
     isEmailConfigured.mockReturnValue(false);
     prismaRef.current = makePrisma({}) as never;
     const result = await runDailyDigestJob(NOW);
-    expect(result).toEqual({ sent: 0, skipped: 0 });
+    expect(result).toEqual({ sent: 0, skipped: 0, retryable: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
   });
 
@@ -392,6 +572,6 @@ describe("runDailyDigestJob", () => {
     // A successful retry on the same calendar day must not be skipped by the
     // process-level guard; the DB-backed per-user guard remains in place.
     prismaRef.current = makePrisma({ users: [] }) as never;
-    await expect(runDailyDigestJob(NOW)).resolves.toEqual({ sent: 0, skipped: 0 });
+    await expect(runDailyDigestJob(NOW)).resolves.toEqual({ sent: 0, skipped: 0, retryable: 0 });
   });
 });

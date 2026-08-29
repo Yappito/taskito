@@ -53,6 +53,7 @@ model User {
   createdWebhooks Webhook[]
   timeLogs      TimeLog[]
   apiTokens     ApiToken[]
+  digestClaims  EmailDigestClaim[]
   createdAutomationRules AutomationRule[] @relation("AutomationRuleCreator")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -1139,4 +1140,33 @@ model ApiToken {
 
   @@index([userId])
   @@index([tokenPrefix])
+}
+
+/// Durable per-user, per-UTC-day claim for the daily due-soon digest email.
+/// The unique (userId, dayUtc) pair — not the best-effort lastDigestSentAt
+/// settings write — is the cross-replica uniqueness boundary: the row is
+/// created (pending) before any send attempt, so concurrent replicas can never
+/// double-send, and failed recipients keep an explicit failed state that a
+/// later tick on the same UTC day can retry.
+model EmailDigestClaim {
+  id        String                 @id @default(cuid())
+  userId    String
+  dayUtc    String
+  status    EmailDigestClaimStatus @default(pending)
+  attempts  Int                    @default(0)
+  sentAt    DateTime?
+  lastError String?
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dayUtc])
+  @@index([dayUtc, status])
+}
+
+enum EmailDigestClaimStatus {
+  pending
+  succeeded
+  failed
 }
