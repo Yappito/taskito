@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { EMAIL_CHANNEL_KEYS, type EmailChannelKey } from "@/lib/notification-preferences";
+
 import { trpc } from "@/lib/trpc-client";
 
 export function NotificationCenter() {
@@ -98,8 +100,10 @@ export function NotificationCenter() {
 
           {preferences && (
             <div className="mb-3 rounded-lg border p-3 text-xs" style={{ borderColor: "var(--color-border)" }}>
-              <div className="mb-2 font-medium" style={{ color: "var(--color-text-secondary)" }}>
-                Preferences
+              <div className="mb-2 grid grid-cols-[1fr_auto_auto] gap-x-4" style={{ color: "var(--color-text-secondary)" }}>
+                <span className="font-medium">Preferences</span>
+                <span style={{ color: "var(--color-text-muted)" }}>In-app</span>
+                <span style={{ color: "var(--color-text-muted)" }}>Email</span>
               </div>
               {([
                 ["assignments", "Assignments"],
@@ -107,10 +111,15 @@ export function NotificationCenter() {
                 ["statusChanges", "Status changes"],
                 ["mentions", "Mentions"],
               ] as const).map(([key, label]) => (
-                <label key={key} className="flex items-center justify-between py-1" style={{ color: "var(--color-text-secondary)" }}>
+                <div
+                  key={key}
+                  className="grid grid-cols-[1fr_auto_auto] items-center gap-x-4 py-1"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
                   <span>{label}</span>
                   <input
                     type="checkbox"
+                    aria-label={`${label} in-app`}
                     checked={preferences[key]}
                     onChange={(event) =>
                       updatePreferences.mutate({
@@ -119,8 +128,45 @@ export function NotificationCenter() {
                       })
                     }
                   />
-                </label>
+                  <input
+                    type="checkbox"
+                    aria-label={`${label} email`}
+                    checked={preferences.emailChannel[key as EmailChannelKey]}
+                    onChange={(event) =>
+                      updatePreferences.mutate({
+                        ...preferences,
+                        emailChannel: {
+                          ...preferences.emailChannel,
+                          [key]: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                </div>
               ))}
+              <label
+                className="mt-2 flex items-center justify-between border-t pt-2"
+                style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}
+              >
+                <span>Daily due-soon digest (email)</span>
+                <input
+                  type="checkbox"
+                  aria-label="Daily due-soon digest email"
+                  checked={preferences.emailChannel.digest}
+                  onChange={(event) => {
+                    const digest: boolean = event.target.checked;
+                    updatePreferences.mutate({
+                      ...preferences,
+                      emailChannel: Object.fromEntries(
+                        EMAIL_CHANNEL_KEYS.map((k) => [
+                          k,
+                          k === "digest" ? digest : preferences.emailChannel[k],
+                        ])
+                      ) as typeof preferences.emailChannel,
+                    });
+                  }}
+                />
+              </label>
             </div>
           )}
 

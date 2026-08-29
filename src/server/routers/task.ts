@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { autoTagTask } from "../services/auto-tagger";
 import { createTaskActivity } from "../services/task-activity";
-import { createNotification, notifyTaskWatchers } from "../services/notifications";
+import { dispatchNotification, notifyTaskWatchers } from "../services/notifications";
 import { createTaskComment } from "../services/comment-service";
 import { evaluateAutomationRules, isAutomationExecutionActive } from "../services/automation-evaluator";
 import {
@@ -960,7 +960,7 @@ export const taskRouter = createTRPCRouter({
       }
 
       if (assigneeId !== undefined && assigneeId && assigneeId !== currentTaskSnapshot.assigneeId) {
-        createNotification({
+        dispatchNotification({
           recipientId: assigneeId,
           actorId: ctx.session.user.id,
           taskId: updated.id,
@@ -980,7 +980,7 @@ export const taskRouter = createTRPCRouter({
             return;
           }
 
-          createNotification({
+          dispatchNotification({
             recipientId: participantId,
             actorId: ctx.session.user.id,
             taskId: updated.id,

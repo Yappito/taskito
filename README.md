@@ -210,6 +210,34 @@ Uploads can also be stored in S3-compatible object storage instead of the local 
 
 Task comment attachments and profile images are still served through authenticated Taskito routes. Each stored file records its storage backend, bucket, and object key in the database, so restoring the database and reconnecting the same S3 bucket restores access to S3-backed files.
 
+## Notifications
+
+Notifications are fan-out per recipient through a single dispatcher (`src/server/services/notifications.ts`). Every notification creates the in-app row it always did and, independently, may send an email through the optional SMTP channel. Email delivery is fire-and-forget: it can never block or fail the originating mutation, errors are logged (never credentials), and sends flow through a small in-process queue that caps at 100 pending jobs and drops beyond that with a warning.
+
+### Channels and per-type preferences
+
+Each of the four notification types (`assigned`, `commented`, `statusChanged`, `mentioned`) has two independent switches stored in `User.settings`:
+
+- `notificationPreferences` — the existing in-app switches (default ON).
+- `emailChannel` — the channel switches (default OFF for everything except `mentioned` and `assigned`, which default ON).
+
+Both are editable in the notification bell's Preferences block, which shows "In-app" and "Email" checkbox columns, and they are exposed for read/update via the notification router (`notification.preferences` / `notification.updatePreferences`) and the user router (`user.notificationPreferences` / `user.updateNotificationPreferences`).
+
+### Enabling email
+
+Email sending activates when `SMTP_HOST` and `SMTP_FROM` are set (all `SMTP_*` variables are listed in the environment table). Without configuration, sending is a logged no-op and every channel switch is harmless. Emails carry a text/plain and text/html body and deep links of the form `{AUTH_URL}/{project.slug}?task={taskId}`, which opens the task directly in a project view.
+
+### Daily due-soon digest
+
+Users can opt in to a daily due-soon digest with the "Daily due-soon digest (email)" preference (stored in `emailChannel.digest`, default OFF). The digest groups, across all of the user's accessible projects:
+
+- overdue open tasks (due before today),
+- tasks due today,
+- tasks due within the project's `dueDateWarningDays` setting (see `src/lib/alert-utils.ts`),
+- open tasks assigned to the user that are blocked by an unfinished task (`blocks` task links).
+
+Users with nothing to report are skipped. `runDailyDigestJob()` in `src/server/services/email/digest.ts` is the scheduler-facing entry point (guarded to run at most once per UTC day per process); no in-app scheduler ships yet, so wire it from an external cron or a future `scheduler.ts` service.
+
 ## Operations
 
 Useful commands from the repository root:
@@ -264,6 +292,13 @@ Useful commands from the repository root:
 | `STORAGE_S3_SESSION_TOKEN` | No | Optional temporary credentials session token |
 | `STORAGE_S3_FORCE_PATH_STYLE` | No | Set `true` for S3-compatible services that need path-style URLs |
 | `STORAGE_S3_PREFIX` | No | Optional object key prefix, e.g. `taskito/prod` |
+| `SMTP_HOST` | Required for email | SMTP server hostname; together with `SMTP_FROM` this enables the email channel |
+| `SMTP_PORT` | No | SMTP port; defaults to `587` |
+| `SMTP_SECURE` | No | `true` = implicit TLS (typically port `465`); defaults to `false`, using STARTTLS when the server offers it |
+| `SMTP_USER` | Required with auth | SMTP username; omit for unauthenticated relays |
+| `SMTP_PASSWORD` | Required with auth | SMTP password; never logged |
+| `SMTP_FROM` | Required for email | Envelope/From address, e.g. `Taskito <noreply@example.com>`; required to enable sending |
+| `SMTP_TLS_REJECT_UNAUTHORIZED` | No | Set `false` only for self-signed certificates; defaults to `true` |
 
 ### Rotating the secret encryption key (`AI_SECRET_MASTER_KEY`)
 
