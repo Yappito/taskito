@@ -9,6 +9,8 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert } from "@/components/ui/alert";
 import { Dialog } from "@/components/ui/dialog";
+// CITADEL-d77.17 (markdown + mentions): preview the markdown-rendered description.
+import { Markdown } from "@/components/ui/markdown";
 
 interface ProjectTaskTemplate {
   id: string;
@@ -44,6 +46,8 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // citadel-d77.17: description preview toggle (Textarea <-> Markdown).
+  const [previewingBody, setPreviewingBody] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
@@ -105,6 +109,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   // Auto-focus title on open
   useEffect(() => {
     if (open) {
+      setPreviewingBody(false);
       setTimeout(() => titleRef.current?.focus(), 100);
     } else {
       resetForm();
@@ -260,20 +265,41 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
           ) : null}
 
           <div>
-              <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
-                Description
-              </label>
-              <Textarea
-                name="body"
-                rows={5}
-                placeholder="Add task details..."
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
-                className="w-full"
-                style={{
-                  resize: "vertical",
-                }}
-              />
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
+                  Description
+                </label>
+                {/* citadel-d77.17: markdown preview toggle */}
+                <button
+                  type="button"
+                  aria-pressed={previewingBody}
+                  onClick={() => setPreviewingBody((current) => !current)}
+                  className="shrink-0 text-xs underline underline-offset-2"
+                  style={{ color: "var(--color-accent)" }}
+                >
+                  {previewingBody ? "Edit description" : "Preview"}
+                </button>
+              </div>
+              {previewingBody ? (
+                <Markdown
+                  source={body.trim() ? body : "_Nothing to preview yet._"}
+                  className="min-h-16 w-full rounded-md border px-3 py-2"
+                  mentionUsers={people ?? []}
+                  breaks
+                />
+              ) : (
+                <Textarea
+                  name="body"
+                  rows={5}
+                  placeholder="Add task details..."
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  className="w-full"
+                  style={{
+                    resize: "vertical",
+                  }}
+                />
+              )}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">

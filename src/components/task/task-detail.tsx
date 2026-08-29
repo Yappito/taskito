@@ -5,6 +5,9 @@ import { GripVertical } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { trpc } from "@/lib/trpc-client";
 import { getCommentBody } from "@/lib/comment-content";
+// CITADEL-d77.17 (markdown + mentions): shared renderer and mention textarea.
+import { Markdown } from "@/components/ui/markdown";
+import { MentionTextarea } from "@/components/task/mention-textarea";
 import {
   DEFAULT_TASK_DETAIL_SECTION_ORDER,
   getTaskDetailSectionOrderStorageKey,
@@ -944,9 +947,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                       <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
                         Description
                       </h4>
-                      <div className="mt-3 whitespace-pre-wrap text-sm leading-6" style={{ color: "var(--color-text)" }}>
-                        {taskBody}
-                      </div>
+                      {/* citadel-d77.17: markdown-rendered description with @mention highlights */}
+                      <Markdown source={taskBody} className="mt-3" mentionUsers={peopleOptions} />
                     </div>
                   </div>
                 </section>
@@ -1026,17 +1028,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                                   {editingCommentError}
                                 </div>
                               )}
-                              <textarea
+                              {/* citadel-d77.17: mention autocomplete textarea */}
+                              <MentionTextarea
                                 value={editingCommentContent}
-                                onChange={(event) => setEditingCommentContent(event.target.value)}
-                                rows={3}
+                                onChange={(next) => setEditingCommentContent(next)}
+                                people={peopleOptions}
                                 maxLength={5000}
-                                className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                                style={{
-                                  backgroundColor: "var(--color-surface)",
-                                  borderColor: "var(--color-border)",
-                                  color: "var(--color-text)",
-                                }}
+                                rows={3}
+                                className="w-full"
                               />
                               <div className="flex justify-end gap-2">
                                 <Button
@@ -1061,7 +1060,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                               </div>
                             </div>
                           ) : commentBody ? (
-                            <p className="mt-1 whitespace-pre-wrap break-words">{commentBody}</p>
+                            // citadel-d77.17: markdown-rendered comment (single newlines kept as line breaks)
+                            <Markdown source={commentBody} className="mt-1" mentionUsers={peopleOptions} breaks />
                           ) : null}
                           {(comment.attachments?.length ?? 0) > 0 && (
                             <div className="mt-3 space-y-2">
@@ -1125,19 +1125,15 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                       {commentError}
                     </div>
                   )}
-                  <textarea
+                  <MentionTextarea
                     name="content"
                     value={commentContent}
-                    onChange={(event) => setCommentContent(event.target.value)}
+                    onChange={(next) => setCommentContent(next)}
+                    people={peopleOptions}
                     placeholder="Add a comment..."
                     maxLength={5000}
                     rows={3}
-                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: "var(--color-surface)",
-                      borderColor: "var(--color-border)",
-                      color: "var(--color-text)",
-                    }}
+                    className="w-full"
                   />
                   <div>
                     <input

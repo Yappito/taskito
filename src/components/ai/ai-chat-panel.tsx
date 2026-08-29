@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { Button } from "@/components/ui/button";
+// citadel-d77.17: use the shared markdown renderer (styles extracted from this file).
+import { Markdown } from "@/components/ui/markdown";
 import { trpc } from "@/lib/trpc-client";
 import type { AiConversationContextSnapshot, AiPermission } from "@/lib/ai-types";
 
@@ -491,59 +491,8 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       return <div className="whitespace-pre-wrap text-sm" style={{ color: "var(--color-text)" }}>{content}</div>;
     }
 
-    return (
-      <div className="text-sm leading-6" style={{ color: "var(--color-text)" }}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            h1: ({ children }) => <h1 className="mb-3 mt-5 text-lg font-semibold">{children}</h1>,
-            h2: ({ children }) => <h2 className="mb-3 mt-5 text-base font-semibold">{children}</h2>,
-            h3: ({ children }) => <h3 className="mb-3 mt-5 text-base font-semibold">{children}</h3>,
-            h4: ({ children }) => <h4 className="mb-2 mt-4 text-sm font-semibold">{children}</h4>,
-            p: ({ children }) => <p className="my-3">{children}</p>,
-            ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-5">{children}</ul>,
-            ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-5">{children}</ol>,
-            li: ({ children }) => <li className="leading-6">{children}</li>,
-            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-            em: ({ children }) => <em className="italic">{children}</em>,
-            hr: () => <hr className="my-4 border-t" style={{ borderColor: "var(--color-border)" }} />,
-            blockquote: ({ children }) => (
-              <blockquote
-                className="my-4 border-l-2 pl-4 italic"
-                style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}
-              >
-                {children}
-              </blockquote>
-            ),
-            a: (props) => <a {...props} target="_blank" rel="noreferrer" className="underline underline-offset-2" />,
-            code: ({ className, children, ...props }) => {
-              if (!className) {
-                return (
-                  <code
-                    {...props}
-                    className="rounded px-1 py-0.5"
-                    style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}
-                  >
-                    {children}
-                  </code>
-                );
-              }
-
-              return <code {...props} className={className}>{children}</code>;
-            },
-            pre: (props) => (
-              <pre
-                {...props}
-                className="my-4 overflow-x-auto rounded-xl border p-3 text-xs leading-5"
-                style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}
-              />
-            ),
-          }}
-        >
-          {content}
-        </ReactMarkdown>
-      </div>
-    );
+    // citadel-d77.17: shared markdown renderer (same styles as before, now in ui/markdown.tsx)
+    return <Markdown source={content} />;
   }
 
   async function invalidateAfterAiTurn(id: string) {
