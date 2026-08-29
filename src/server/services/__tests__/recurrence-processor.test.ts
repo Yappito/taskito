@@ -254,10 +254,12 @@ describe("recurrence processor", () => {
   });
 
   it("retires a rule whose CURRENT occurrence is already past the end date with a standalone advance and no task (finding 9)", async () => {
+    // CITADEL-ae2 (finding 4): reachable in normal operation now — the batch
+    // query selects every rule with a due occurrence (nextDueDate <= now),
+    // including rules whose end DAY has already passed (e.g. after scheduler
+    // downtime); those retire themselves here, one interval per tick, until
+    // nextDueDate moves past `now`.
     const prisma = createPrismaMock();
-    // Defensive branch: only reachable with pre-existing data drift or direct
-    // invocation — nextDueDate itself sits beyond endDate, so there is no
-    // valid occurrence left to create.
     const current = new Date("2026-05-19T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
       createRule({
@@ -278,6 +280,102 @@ describe("recurrence processor", () => {
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
+    });
+  });
+
+  // CITADEL-ae2 (finding 4): the batch query must NOT gate on endDate >= now.
+  // That gate permanently excluded a rule whose final valid occurrence fell
+  // due before the endDate but could only be processed after it (scheduler
+  // downtime spanning the end date) — its final occurrence was never created.
+  // Selection now keys on a due occurrence existing (nextDueDate <= now);
+  // end-date validity is decided per rule in the loop, on the router's
+  // dateKey day granularity.
+  it("selects rules by due occurrence only — no endDate >= now gate on the batch query (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    const now = new Date("2026-05-21T10:00:00.000Z");
+
+    await processDueRecurrences(prisma as never, { now });
+
+    expect(prisma.recurrenceRule.findMany).toHaveBeenCalledTimes(1);
+    const call = prisma.recurrenceRule.findMany.mock.calls[0][0] as {
+      where: Record<string, unknown>;
+    };
+    expect(call.where).toEqual({ nextDueDate: { lte: now } });
+  });
+
+  // The bead's headline scenario: nextDueDate=2026-05-19, endDate=2026-05-20,
+  // processed 2026-05-21 (scheduler was down past the end date). The May 19
+  // occurrence is still valid (its day is on/before the endDate's day) and
+  // MUST be created; the rule then retires via the claimed advance past the
+  // end date, in the same transaction as the creation.
+  it("creates the final valid occurrence of a rule processed after its endDate (downtime spanning the end date, finding 4)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-19T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T00:00:00.000Z"),
+      }),
+    ]);
+
+    const result = await processDueRecurrences(prisma as never, { now: new Date("2026-05-21T10:00:00.000Z") });
+
+    // The May 19 task IS created (the old endDate >= now gate dropped this
+    // rule from the batch entirely, so the occurrence never happened).
+    expect(result.createdTaskIds).toEqual([CREATED_TASK_ID]);
+    expect(tx.task.create).toHaveBeenCalledTimes(1);
+    expect(tx.task.create.mock.calls[0][0].data).toMatchObject({ dueDate: current });
+    // Retirement rides the claim: nextDueDate advances past the end date
+    // inside the creation transaction, so the rule never becomes due again.
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: { id: RULE_ID, nextDueDate: current },
+      data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
+    });
+  });
+
+  // The router (dateKey validation) accepts nextDueDate on the SAME calendar
+  // day as endDate — e.g. a 09:00 occurrence with a midnight-normalized
+  // endDate. Comparing exact timestamps here used to treat that valid
+  // same-day occurrence as expired and retire the rule without creating it.
+  it("creates a same-day occurrence when nextDueDate falls on the endDate's calendar day (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-20T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T00:00:00.000Z"),
+      }),
+    ]);
+
+    const result = await processDueRecurrences(prisma as never, { now: new Date("2026-05-20T10:00:00.000Z") });
+
+    expect(result.createdTaskIds).toEqual([CREATED_TASK_ID]);
+    expect(tx.task.create.mock.calls[0][0].data).toMatchObject({ dueDate: current });
+  });
+
+  it("retires without creating when the current occurrence's DAY is past the endDate's day (finding 4)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-21T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T23:59:59.999Z"),
+      }),
+    ]);
+
+    const result = await processDueRecurrences(prisma as never, { now: new Date("2026-05-21T10:00:00.000Z") });
+
+    expect(result.createdTaskIds).toEqual([]);
+    expect(createTaskWithNextNumber).not.toHaveBeenCalled();
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: { id: RULE_ID, nextDueDate: current },
+      data: { nextDueDate: new Date("2026-05-28T09:00:00.000Z") },
     });
   });
 

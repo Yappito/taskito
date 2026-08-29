@@ -5,6 +5,11 @@ import { processDueRecurrences } from "@/server/services/recurrence-processor";
 import { withSchedulerLock } from "@/server/services/scheduler";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
+// `dateKey` compares on UTC calendar DAYS, so nextDueDate may equal endDate
+// even when its timestamp falls after a midnight-normalized endDate. The
+// recurrence processor (src/server/services/recurrence-processor.ts `dayKey`)
+// applies the same day granularity to its end-date gating (CITADEL-ae2,
+// finding 4) — keep the two in sync.
 function dateKey(date: Date) {
   return date.toISOString().split("T")[0];
 }

@@ -388,9 +388,28 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
       // semantics: abandon the claim as failed at the attempt cap (never
       // reclaimed, never resent) with a logged warning. A missed digest is
       // preferable to a duplicate.
+      //
+      // CITADEL-ae2 (finding 5): the abandonment must reassert the EXACT
+      // staleness this run observed — `updatedAt <= staleBefore` plus the
+      // attempts value it read at preload time. Matching only on
+      // {userId, dayUtc, status: "sending"} is an ABA hazard: between the
+      // preload above and this write, the claim can go stale-sending →
+      // failed → reclaimed-pending → FRESH sending by another replica that
+      // is mid-SMTP right now; the un-pinned update would then cap that
+      // healthy in-flight send at failed/attempts-max. With both observed
+      // fields pinned, the update can only match the same stale claim this
+      // run saw — a fresh claim (recent updatedAt, different attempts) fits
+      // neither condition, matches nothing (count 0), and stays with its
+      // live owner.
       try {
-        await client.emailDigestClaim.updateMany({
-          where: { userId: user.id, dayUtc, status: "sending" },
+        const abandoned = await client.emailDigestClaim.updateMany({
+          where: {
+            userId: user.id,
+            dayUtc,
+            status: "sending",
+            updatedAt: { lte: staleBefore },
+            attempts: existing.attempts,
+          },
           data: {
             status: "failed",
             attempts: DIGEST_CLAIM_MAX_ATTEMPTS,
@@ -398,8 +417,10 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
           },
         });
         logEmailError(
-          `due-soon digest claim for user ${user.id} was stale in "sending" — abandoned without resending (at-most-once)`,
-          new Error("stale sending claim"),
+          abandoned.count > 0
+            ? `due-soon digest claim for user ${user.id} was stale in "sending" — abandoned without resending (at-most-once)`
+            : `due-soon digest claim for user ${user.id} looked stale in "sending" but changed underneath (fresh live claim) — left untouched`,
+          new Error(abandoned.count > 0 ? "stale sending claim" : "sending claim ABA: fresh claim not abandoned"),
         );
       } catch (error) {
         logEmailError(`due-soon digest claim bookkeeping for user ${user.id} failed`, error);
