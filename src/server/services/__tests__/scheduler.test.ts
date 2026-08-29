@@ -295,6 +295,10 @@ describe("scheduler", () => {
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
       expect(runDailyDigestJob.mock.calls[0][0]).toEqual(NOW);
       expect(recordSprintSnapshots).toHaveBeenCalledTimes(1);
+      // Wave-10 finding 2b: the sprint job threads the tick's cancellable
+      // deadline signal INTO recordSprintSnapshots, which checks it between
+      // sprints so a large active-sprint population stops at the deadline.
+      expect(recordSprintSnapshots.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
       expect(processDueWebhookDeliveries).toHaveBeenCalledTimes(1);
       expect(processDueWebhookDeliveries.mock.calls[0][0]).toBe(prismaMock);
       expect(processDueWebhookDeliveries.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);

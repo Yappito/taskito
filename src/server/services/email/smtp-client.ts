@@ -9,6 +9,7 @@ import {
   InvalidEmailAddressError,
   parseEmailAddress,
 } from "./address";
+import { SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS } from "@/server/services/scheduler-deadline";
 
 // Mailbox parsing/validation and RFC 2047 encoding live in address.ts;
 // re-exported here for callers that only import the client.
@@ -73,6 +74,20 @@ const DEFAULT_RESPONSE_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 export const DEFAULT_MESSAGE_TIMEOUT_MS = 60_000;
 
+/**
+ * Hard upper cap for every per-unit SMTP timeout (wave-10 finding 2a):
+ * `SMTP_CONNECT_TIMEOUT_MS` and `SMTP_MESSAGE_TIMEOUT_MS` are parsed with no
+ * upper bound of their own, so an operator typo (e.g. 60000000) could park a
+ * single send on the one-worker email queue for hours while the scheduler's
+ * advisory lock stays held past any sane budget. Both are clamped to at most
+ * `SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS` (default 300000) — one SMTP unit
+ * (connect/handshake OR a whole message conversation) can therefore never
+ * outlive the scheduler lock safety margin. A configured value above the cap
+ * is clamped down with a logged warning; lower bounds and defaults are kept
+ * as before.
+ */
+export const SMTP_UNIT_TIMEOUT_MAX_MS = SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS;
+
 type PendingEmailJob = () => Promise<void>;
 
 interface SmtpResponse {
@@ -98,6 +113,24 @@ function parseTimeoutMs(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+/**
+ * Parses one SMTP unit timeout and upper-clamps it to the scheduler lock
+ * safety margin (wave-10 finding 2a): a per-unit timeout above the margin is
+ * clamped down with a logged warning so no single SMTP send can overrun the
+ * scheduler lock floor. The lower bound (any positive millisecond value) and
+ * the fallback default are unchanged.
+ */
+function parseUnitTimeoutMs(raw: string | undefined, fallback: number, envName: string): number {
+  const parsed = parseTimeoutMs(raw, fallback);
+  if (parsed > SMTP_UNIT_TIMEOUT_MAX_MS) {
+    console.warn(
+      `[email] ${envName} (${parsed}ms) exceeds the scheduler lock safety margin (${SMTP_UNIT_TIMEOUT_MAX_MS}ms); clamping to ${SMTP_UNIT_TIMEOUT_MAX_MS}ms so a single SMTP send can never outlive the scheduler lock floor`,
+    );
+    return SMTP_UNIT_TIMEOUT_MAX_MS;
+  }
+  return parsed;
+}
+
 /** Parse SMTP_* env vars into a config object; null when email is not configured. */
 export function readSmtpConfig(env: Record<string, string | undefined> = process.env): SmtpConfig | null {
   const host = env.SMTP_HOST?.trim();
@@ -119,9 +152,27 @@ export function readSmtpConfig(env: Record<string, string | undefined> = process
     fromName: validatedFrom.name,
     tlsRejectUnauthorized: !isFalseish(env.SMTP_TLS_REJECT_UNAUTHORIZED),
     allowInsecureAuth: env.SMTP_ALLOW_INSECURE_AUTH === "true",
-    connectTimeoutMs: parseTimeoutMs(env.SMTP_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS),
-    messageTimeoutMs: parseTimeoutMs(env.SMTP_MESSAGE_TIMEOUT_MS, DEFAULT_MESSAGE_TIMEOUT_MS),
+    connectTimeoutMs: parseUnitTimeoutMs(env.SMTP_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS, "SMTP_CONNECT_TIMEOUT_MS"),
+    messageTimeoutMs: parseUnitTimeoutMs(env.SMTP_MESSAGE_TIMEOUT_MS, DEFAULT_MESSAGE_TIMEOUT_MS, "SMTP_MESSAGE_TIMEOUT_MS"),
   };
+}
+
+/**
+ * Defense in depth for the unit-timeout cap (wave-10 finding 2a): clamps an
+ * EFFECTIVE timeout (which may come from programmatic `options` that bypass
+ * the env parser) to `SMTP_UNIT_TIMEOUT_MAX_MS`. Warns only when a value
+ * actually gets clamped — the env-parsed path in {@link readSmtpConfig}
+ * already warns at parse time, and effective values at/below the cap
+ * (including the clamped ones) pass through silently.
+ */
+export function clampSmtpUnitTimeoutMs(value: number, label: string): number {
+  if (value > SMTP_UNIT_TIMEOUT_MAX_MS) {
+    console.warn(
+      `[email] ${label} (${value}ms) exceeds the scheduler lock safety margin (${SMTP_UNIT_TIMEOUT_MAX_MS}ms); clamping to ${SMTP_UNIT_TIMEOUT_MAX_MS}ms so a single SMTP send can never outlive the scheduler lock floor`,
+    );
+    return SMTP_UNIT_TIMEOUT_MAX_MS;
+  }
+  return value;
 }
 
 /**
@@ -489,8 +540,14 @@ export async function sendEmail(message: OutgoingEmailMessage, options: SmtpSend
   assertValidMailbox(message.to, "recipient address");
 
   const responseTimeoutMs = options.responseTimeoutMs ?? DEFAULT_RESPONSE_TIMEOUT_MS;
-  const connectTimeoutMs = options.connectTimeoutMs ?? config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-  const messageTimeoutMs = options.messageTimeoutMs ?? config.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS;
+  const connectTimeoutMs = clampSmtpUnitTimeoutMs(
+    options.connectTimeoutMs ?? config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    "connect timeout",
+  );
+  const messageTimeoutMs = clampSmtpUnitTimeoutMs(
+    options.messageTimeoutMs ?? config.messageTimeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS,
+    "message timeout",
+  );
   const factory = options.connectionFactory ?? defaultConnectionFactory(config, connectTimeoutMs);
   const messageDeadlineAt = Date.now() + messageTimeoutMs;
 

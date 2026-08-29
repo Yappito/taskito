@@ -177,10 +177,13 @@ async function runDigestJob(now: Date, signal: AbortSignal) {
 /**
  * Daily sprint snapshot series: one remaining-work row per active sprint for
  * the current UTC day (idempotent upsert on the unique sprintId + day pair).
+ * Wave-10 finding 2b: the tick's cancellable deadline signal is threaded INTO
+ * the job so a large active-sprint population stops at the tick deadline
+ * (between sprints) instead of running unbounded past it.
  */
 async function runSprintSnapshotJob(signal: AbortSignal) {
   assertTickAlive(signal);
-  const recorded = await recordSprintSnapshots(prisma);
+  const recorded = await recordSprintSnapshots(prisma, new Date(), { signal });
   if (recorded > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} sprint snapshot job recorded ${recorded} sprint snapshot(s)`);
   }

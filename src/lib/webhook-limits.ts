@@ -31,11 +31,25 @@ export const DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS = 15_000;
  * Fixed buffer added on top of the outbound POST timeout when the dispatcher
  * RENEWS the claim lease immediately before the POST (wave-9 finding 1). The
  * renewal stamps `leaseExpiresAt = now + webhookRequestTimeoutMs() + margin`,
- * so no matter how long the preceding claim/authz/preflight/decrypt stages
- * took, the lease always covers the whole POST window plus this slack (the
- * slack absorbs the finalize update that follows the response).
+ * so under normal clock/latency conditions the lease covers the whole POST
+ * window plus this slack (the slack absorbs the DB update round-trip of the
+ * finalize write that follows the response).
  */
 export const DEFAULT_WEBHOOK_LEASE_MARGIN_MS = 5_000;
+
+/**
+ * SANE MINIMUM for the renewed-lease margin (wave-10 finding 1): the margin
+ * has to cover the lease-stamp (`updateMany`) round-trip being observed by a
+ * RECOVERY sweep on another replica, plus the start of the POST. A margin of
+ * 0 makes the renewed lease expire at the exact POST-timeout boundary — a
+ * config footgun that lets a few milliseconds of clock/latency jitter defeat
+ * the exclusive claim. A configured value below this floor is RAISED to the
+ * floor (with a logged warning), never silently kept.
+ */
+export const MIN_WEBHOOK_LEASE_MARGIN_MS = 2_000;
+
+/** Hard cap for the lease margin (a margin beyond one minute buys nothing). */
+export const MAX_WEBHOOK_LEASE_MARGIN_MS = 60_000;
 
 /**
  * Depth cap for the in-process outbound delivery queue. When the queue is
@@ -95,10 +109,40 @@ export function webhookDeliveryQueueMaxDepth(): number {
 
 /**
  * Buffer over the POST timeout applied when renewing the claim lease right
- * before the POST (`WEBHOOK_LEASE_MARGIN_MS`, default 5s, clamped to 0-60s).
+ * before the POST (`WEBHOOK_LEASE_MARGIN_MS`, default 5s, clamped to the sane
+ * 2s-60s window).
+ *
+ * Wave-10 finding 1: unlike the other knobs (which fail closed to the default
+ * on out-of-range input), a too-SMALL margin is the footgun here — it is
+ * RAISED to the minimum with a logged warning so the renewed lease reliably
+ * covers the finalize DB round-trip plus the POST start. Unparseable values
+ * still fail closed to the default.
  */
 export function webhookLeaseMarginMs(): number {
-  return envInt("WEBHOOK_LEASE_MARGIN_MS", DEFAULT_WEBHOOK_LEASE_MARGIN_MS, 0, 60_000);
+  const raw = process.env.WEBHOOK_LEASE_MARGIN_MS?.trim();
+  if (!raw) {
+    return DEFAULT_WEBHOOK_LEASE_MARGIN_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) {
+    console.warn(
+      `[webhook] invalid WEBHOOK_LEASE_MARGIN_MS "${raw}", using the default ${DEFAULT_WEBHOOK_LEASE_MARGIN_MS}ms`,
+    );
+    return DEFAULT_WEBHOOK_LEASE_MARGIN_MS;
+  }
+  if (parsed < MIN_WEBHOOK_LEASE_MARGIN_MS) {
+    console.warn(
+      `[webhook] WEBHOOK_LEASE_MARGIN_MS (${parsed}ms) is below the ${MIN_WEBHOOK_LEASE_MARGIN_MS}ms minimum; raising it so the renewed lease reliably covers the finalize DB round-trip plus the start of the POST`,
+    );
+    return MIN_WEBHOOK_LEASE_MARGIN_MS;
+  }
+  if (parsed > MAX_WEBHOOK_LEASE_MARGIN_MS) {
+    console.warn(
+      `[webhook] WEBHOOK_LEASE_MARGIN_MS (${parsed}ms) exceeds the ${MAX_WEBHOOK_LEASE_MARGIN_MS}ms cap; clamping it to ${MAX_WEBHOOK_LEASE_MARGIN_MS}ms`,
+    );
+    return MAX_WEBHOOK_LEASE_MARGIN_MS;
+  }
+  return parsed;
 }
 
 /** Outbound timeout constant moved next to the derived lease floor (see dispatcher re-export). */

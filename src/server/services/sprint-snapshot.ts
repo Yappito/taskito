@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
+import { assertTickAlive } from "@/server/services/scheduler-deadline";
+
 type SprintDbClient = PrismaClient | Prisma.TransactionClient;
 
 /** Finished statuses: anything else counts as remaining work. */
@@ -78,8 +80,19 @@ export async function writeSprintSnapshotFromTasks(
  * Record a snapshot row for every active sprint in the app for `now`'s UTC
  * day. Called by the scheduler's sprintSnapshotJob (and reused by the sprint
  * router when a sprint starts or completes). Idempotent via upsert.
+ *
+ * Wave-10 finding 2b: accepts an optional `{ signal }` (the scheduler tick's
+ * AbortSignal) and checks it BETWEEN sprints — before each sprint's task
+ * query/upsert — so a large active-sprint population stops at the tick
+ * deadline (throwing {@link TickDeadlineExceededError}) instead of running
+ * unbounded past it. The upsert itself is idempotent, so a partially
+ * recorded day is completed by the next tick/run.
  */
-export async function recordSprintSnapshots(client: SprintDbClient, now: Date = new Date()) {
+export async function recordSprintSnapshots(
+  client: SprintDbClient,
+  now: Date = new Date(),
+  options: { signal?: AbortSignal } = {}
+) {
   const activeSprints = await client.sprint.findMany({
     where: { status: "active" },
     select: { id: true },
@@ -87,6 +100,10 @@ export async function recordSprintSnapshots(client: SprintDbClient, now: Date = 
 
   let recorded = 0;
   for (const sprint of activeSprints) {
+    // Cooperative cancellation: stop at the tick deadline BETWEEN sprints
+    // (before each sprint's task query/upsert) so one huge population can
+    // never hold the scheduler lock past its budget.
+    assertTickAlive(options.signal);
     const taskStatuses = await client.task.findMany({
       where: { sprintId: sprint.id },
       select: { status: { select: { category: true } } },

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clampSmtpUnitTimeoutMs,
   dotStuff,
   encodeHeaderValue,
   enqueueEmailJob,
@@ -13,6 +14,7 @@ import {
   queueEmail,
   readSmtpConfig,
   resetEmailQueueForTests,
+  SMTP_UNIT_TIMEOUT_MAX_MS,
   sendEmail,
   type SmtpConfig,
   type SmtpConnection,
@@ -149,6 +151,70 @@ describe("smtp client env config", () => {
     expect(config?.port).toBe(587);
     expect(config?.secure).toBe(false);
     expect(config?.tlsRejectUnauthorized).toBe(true);
+  });
+
+  // Wave-10 finding 2a: the per-unit SMTP timeouts had NO upper bound, so a
+  // config typo could park the one-worker email queue for hours past the
+  // scheduler lock safety margin. Both must clamp DOWN to
+  // SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS (300000ms) with a logged warning;
+  // in-range values, lower bounds, and defaults are unchanged.
+  it("clamps over-high SMTP unit timeouts to the scheduler lock safety margin (wave-10 finding 2a)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(SMTP_UNIT_TIMEOUT_MAX_MS).toBe(300_000);
+
+      // Defaults stay below the cap and never warn.
+      const defaults = readSmtpConfig({ SMTP_HOST: "h", SMTP_FROM: "a@b.c" });
+      expect(defaults?.connectTimeoutMs).toBe(10_000);
+      expect(defaults?.messageTimeoutMs).toBe(60_000);
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      // Configured values above the cap clamp down to 300000, with a warning.
+      const clamped = readSmtpConfig({
+        SMTP_HOST: "h",
+        SMTP_FROM: "a@b.c",
+        SMTP_MESSAGE_TIMEOUT_MS: "999999",
+        SMTP_CONNECT_TIMEOUT_MS: "600000",
+      });
+      expect(clamped?.messageTimeoutMs).toBe(300_000);
+      expect(clamped?.connectTimeoutMs).toBe(300_000);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("SMTP_MESSAGE_TIMEOUT_MS"))).toBe(true);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("SMTP_CONNECT_TIMEOUT_MS"))).toBe(true);
+
+      // In-range configured values pass through unchanged.
+      const passthrough = readSmtpConfig({
+        SMTP_HOST: "h",
+        SMTP_FROM: "a@b.c",
+        SMTP_MESSAGE_TIMEOUT_MS: "120000",
+        SMTP_CONNECT_TIMEOUT_MS: "300000",
+      });
+      expect(passthrough?.messageTimeoutMs).toBe(120_000);
+      expect(passthrough?.connectTimeoutMs).toBe(300_000);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("clamps programmatic sendEmail option timeouts to the margin too (defense in depth)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // The sendEmail options path bypasses readSmtpConfig, so the effective
+      // values are clamped at the point of use as well — a caller passing a
+      // 900000ms message timeout gets the margin-capped 300000ms.
+      expect(clampSmtpUnitTimeoutMs(900_000, "message timeout")).toBe(300_000);
+      expect(clampSmtpUnitTimeoutMs(600_000, "connect timeout")).toBe(300_000);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("message timeout"))).toBe(true);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("connect timeout"))).toBe(true);
+      // At/below the cap values pass through without a warning.
+      expect(clampSmtpUnitTimeoutMs(300_000, "message timeout")).toBe(300_000);
+      expect(clampSmtpUnitTimeoutMs(60_000, "message timeout")).toBe(60_000);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("parses plain addresses and display-name addresses", () => {
