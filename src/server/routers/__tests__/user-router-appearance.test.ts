@@ -1,19 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createCallerFactory } from "@/server/trpc";
 import { userRouter } from "@/server/routers/user";
+import { createPrismaMock } from "@/test/prisma-mock";
 
 const createCaller = createCallerFactory(userRouter);
-
-function createPrismaMock() {
-  return {
-    user: {
-      findUnique: vi.fn(),
-      findUniqueOrThrow: vi.fn(),
-      update: vi.fn(),
-    },
-  } as const;
-}
 
 describe("user router appearance settings", () => {
   it("returns default appearance settings when none are stored", async () => {
