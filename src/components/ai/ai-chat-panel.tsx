@@ -814,8 +814,8 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
                   key={item.id}
                   proposals={item.proposals}
                   isPending={approveAction.isPending || rejectAction.isPending || rollbackAction.isPending}
-                  onApprove={(proposalId, overridePayload) => approveAction.mutate({ id: proposalId, ...(overridePayload ? { overridePayload } : {}) })}
-                  onReject={(proposalId) => rejectAction.mutate({ id: proposalId })}
+                  onApprove={(proposalId, overridePayload) => approveAction.mutateAsync({ id: proposalId, ...(overridePayload ? { overridePayload } : {}) })}
+                  onReject={(proposalId) => rejectAction.mutateAsync({ id: proposalId })}
                   onRollback={(proposalId) => rollbackAction.mutate({ id: proposalId })}
                 />
               );

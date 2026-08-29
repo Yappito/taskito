@@ -21,9 +21,11 @@ interface AiActionProposalItem {
 interface AiActionProposalsProps {
   proposals: AiActionProposalItem[];
   isPending?: boolean;
-  onApprove: (proposalId: string, overridePayload?: Record<string, unknown>) => void;
-  onReject: (proposalId: string) => void;
-  onRollback: (proposalId: string) => void;
+  // May return a promise; bulk actions await each result so proposals are
+  // approved strictly one after another (server-side checkpoints depend on order).
+  onApprove: (proposalId: string, overridePayload?: Record<string, unknown>) => void | Promise<unknown>;
+  onReject: (proposalId: string) => void | Promise<unknown>;
+  onRollback: (proposalId: string) => void | Promise<unknown>;
   className?: string;
 }
 
@@ -111,6 +113,34 @@ export function AiActionProposals({ proposals, isPending = false, onApprove, onR
   const [editingId, setEditingId] = useState<string | null>(null);
   const [payloadOverrides, setPayloadOverrides] = useState<Record<string, Record<string, unknown>>>({});
   const proposedCount = useMemo(() => proposals.filter((proposal) => proposal.status === "proposed").length, [proposals]);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const isBulkDisabled = isPending || bulkRunning;
+
+  // Approve/Reject all run strictly one after another: each call is awaited so
+  // the server applies actions in the order shown (checkpointBefore snapshots
+  // must reflect the state left by the previous action).
+  const runProposedSequentially = (run: (proposalId: string) => void | Promise<unknown>) => {
+    const proposalIds = proposals.filter((proposal) => proposal.status === "proposed").map((proposal) => proposal.id);
+    if (proposalIds.length === 0) {
+      return;
+    }
+    setBulkRunning(true);
+    void (async () => {
+      try {
+        for (const proposalId of proposalIds) {
+          try {
+            await run(proposalId);
+          } catch {
+            // Stop the batch on the first failure; mutation-level onError handlers
+            // already surface the error message to the user.
+            break;
+          }
+        }
+      } finally {
+        setBulkRunning(false);
+      }
+    })();
+  };
 
   if (proposals.length === 0) {
     return null;
@@ -121,8 +151,21 @@ export function AiActionProposals({ proposals, isPending = false, onApprove, onR
       {proposedCount > 1 && (
         <div className="flex flex-wrap gap-2 rounded-2xl border p-3" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
           <span className="self-center text-sm font-medium" style={{ color: "var(--color-text)" }}>{proposedCount} pending AI actions</span>
-          <Button size="sm" disabled={isPending} onClick={() => proposals.filter((proposal) => proposal.status === "proposed").forEach((proposal) => onApprove(proposal.id, payloadOverrides[proposal.id]))}>Approve all</Button>
-          <Button size="sm" variant="outline" disabled={isPending} onClick={() => proposals.filter((proposal) => proposal.status === "proposed").forEach((proposal) => onReject(proposal.id))}>Reject all</Button>
+          <Button
+            size="sm"
+            disabled={isBulkDisabled}
+            onClick={() => runProposedSequentially((proposalId) => onApprove(proposalId, payloadOverrides[proposalId]))}
+          >
+            {bulkRunning ? "Approving..." : "Approve all"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={isBulkDisabled}
+            onClick={() => runProposedSequentially((proposalId) => onReject(proposalId))}
+          >
+            {bulkRunning ? "Rejecting..." : "Reject all"}
+          </Button>
         </div>
       )}
       {proposals.map((proposal) => {
@@ -134,13 +177,13 @@ export function AiActionProposals({ proposals, isPending = false, onApprove, onR
           <div className="flex flex-wrap gap-2">
             {proposal.status === "proposed" && (
               <>
-                <Button size="sm" disabled={isPending} onClick={() => onApprove(proposal.id, payloadOverrides[proposal.id])}>{isEditing ? "Approve edited" : "Approve"}</Button>
-                <Button size="sm" variant="outline" disabled={isPending} onClick={() => setEditingId(isEditing ? null : proposal.id)}>{isEditing ? "Preview" : "Edit"}</Button>
-                <Button size="sm" variant="outline" disabled={isPending} onClick={() => onReject(proposal.id)}>Reject</Button>
+                <Button size="sm" disabled={isBulkDisabled} onClick={() => onApprove(proposal.id, payloadOverrides[proposal.id])}>{isEditing ? "Approve edited" : "Approve"}</Button>
+                <Button size="sm" variant="outline" disabled={isBulkDisabled} onClick={() => setEditingId(isEditing ? null : proposal.id)}>{isEditing ? "Preview" : "Edit"}</Button>
+                <Button size="sm" variant="outline" disabled={isBulkDisabled} onClick={() => onReject(proposal.id)}>Reject</Button>
               </>
             )}
             {proposal.status === "executed" && proposal.rollbackStatus === "available" && (
-              <Button size="sm" variant="outline" disabled={isPending} onClick={() => onRollback(proposal.id)}>Rollback</Button>
+              <Button size="sm" variant="outline" disabled={isBulkDisabled} onClick={() => onRollback(proposal.id)}>Rollback</Button>
             )}
           </div>
         );

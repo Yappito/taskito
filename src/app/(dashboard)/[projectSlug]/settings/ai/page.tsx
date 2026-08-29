@@ -38,6 +38,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
   const [allowProjectProviders, setAllowProjectProviders] = useState(true);
   const [allowSharedProviders, setAllowSharedProviders] = useState(true);
   const [allowYoloMode, setAllowYoloMode] = useState(false);
+  const [allowYoloDestructive, setAllowYoloDestructive] = useState(false);
   const [defaultPermissions, setDefaultPermissions] = useState<AiPermission[]>([]);
   const [maxPermissions, setMaxPermissions] = useState<AiPermission[]>([]);
 
@@ -116,6 +117,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     setAllowProjectProviders(policy?.allowProjectProviders ?? true);
     setAllowSharedProviders(policy?.allowSharedProviders ?? true);
     setAllowYoloMode(policy?.allowYoloMode ?? true);
+    setAllowYoloDestructive(policy?.allowYoloDestructive ?? false);
     setMaxPermissions(nextMaxPermissions);
     setDefaultPermissions((Array.isArray(policy?.defaultPermissions) ? (policy.defaultPermissions as AiPermission[]) : fallbackPermissions)
       .filter((permission) => nextMaxPermissions.includes(permission)));
@@ -222,7 +224,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
             </select>
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
               <input type="checkbox" checked={allowUserProviders} onChange={(event) => setAllowUserProviders(event.target.checked)} />
               Allow personal providers
@@ -239,7 +241,16 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
               <input type="checkbox" checked={allowYoloMode} onChange={(event) => setAllowYoloMode(event.target.checked)} />
               Allow Yolo mode
             </label>
+            <label className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
+              <input type="checkbox" checked={allowYoloDestructive} disabled={!allowYoloMode} onChange={(event) => setAllowYoloDestructive(event.target.checked)} />
+              Allow Yolo destructive actions
+            </label>
           </div>
+          {allowYoloMode && (
+            <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+              With “Allow Yolo destructive actions” enabled, Yolo mode also auto-executes archive, unarchive, bulk update, create, duplicate, and remove link actions. Until then those actions stay pending approval even in Yolo mode.
+            </p>
+          )}
 
           <div>
             <div className="mb-2 text-sm font-medium" style={{ color: "var(--color-text-secondary)" }}>Default conversation permissions</div>
@@ -278,6 +289,7 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
                     allowProjectProviders,
                     allowSharedProviders,
                     allowYoloMode,
+                    allowYoloDestructive,
                     defaultPermissions: defaultPermissions.filter((permission) => maxPermissions.includes(permission)),
                     maxPermissions,
                   },

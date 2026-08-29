@@ -40,6 +40,8 @@ const projectPolicySchema = z.object({
   allowProjectProviders: z.boolean(),
   allowSharedProviders: z.boolean(),
   allowYoloMode: z.boolean(),
+  // When true, yolo mode may also auto-execute YOLO_DESTRUCTIVE_ACTIONS.
+  allowYoloDestructive: z.boolean().default(false),
   defaultPermissions: z.array(z.enum(AI_PERMISSION_VALUES)).default([]),
   maxPermissions: z.array(z.enum(AI_PERMISSION_VALUES)).default([]),
 });
@@ -132,6 +134,7 @@ async function getEffectiveProjectAiPolicy(prisma: PrismaClient, projectId: stri
     allowProjectProviders: policy?.allowProjectProviders ?? true,
     allowSharedProviders: policy?.allowSharedProviders ?? true,
     allowYoloMode: policy?.allowYoloMode ?? true,
+    allowYoloDestructive: policy?.allowYoloDestructive ?? false,
     defaultPermissions,
     maxPermissions,
   };
@@ -224,6 +227,26 @@ async function assertAiActionStillAllowed(
 }
 
 const PROVIDER_TEST_SUMMARY_MAX_CHARS = 200;
+
+// Per-conversation in-memory mutex for AI action approvals. A simple
+// Map<conversationId, Promise> chain is acceptable here because Taskito
+// currently runs as a single server instance: each approveAction for a
+// conversation is chained onto the previous one so checkpointBefore for a
+// proposal is always captured after the earlier proposal finished writing.
+const conversationApprovalChains = new Map<string, Promise<unknown>>();
+
+function runExclusivelyPerConversation<T>(conversationId: string, task: () => Promise<T>): Promise<T> {
+  const previous = conversationApprovalChains.get(conversationId) ?? Promise.resolve();
+  const run = previous.then(task);
+  const settled = run.then(() => undefined, () => undefined);
+  conversationApprovalChains.set(conversationId, settled);
+  void settled.finally(() => {
+    if (conversationApprovalChains.get(conversationId) === settled) {
+      conversationApprovalChains.delete(conversationId);
+    }
+  });
+  return run;
+}
 
 function normalizeUpstreamTextForSummary(value: string) {
   return value
@@ -472,6 +495,7 @@ export const aiRouter = createTRPCRouter({
             projectId: input.projectId,
             defaultProviderId: provider.id,
             allowYoloMode: true,
+            allowYoloDestructive: false,
             defaultPermissions: DEFAULT_AI_POLICY_DEFAULT_PERMISSIONS as Prisma.InputJsonValue,
             maxPermissions: DEFAULT_AI_POLICY_MAX_PERMISSIONS as Prisma.InputJsonValue,
           },
@@ -533,6 +557,7 @@ export const aiRouter = createTRPCRouter({
               projectId: provider.projectId,
               defaultProviderId: provider.id,
               allowYoloMode: true,
+              allowYoloDestructive: false,
               defaultPermissions: DEFAULT_AI_POLICY_DEFAULT_PERMISSIONS as Prisma.InputJsonValue,
               maxPermissions: DEFAULT_AI_POLICY_MAX_PERMISSIONS as Prisma.InputJsonValue,
             },
@@ -662,6 +687,7 @@ export const aiRouter = createTRPCRouter({
           allowProjectProviders: input.policy.allowProjectProviders,
           allowSharedProviders: input.policy.allowSharedProviders,
           allowYoloMode: input.policy.allowYoloMode,
+          allowYoloDestructive: input.policy.allowYoloDestructive,
           defaultPermissions: defaultPermissions as Prisma.InputJsonValue,
           maxPermissions: maxPermissions as Prisma.InputJsonValue,
         },
@@ -671,6 +697,7 @@ export const aiRouter = createTRPCRouter({
           allowProjectProviders: input.policy.allowProjectProviders,
           allowSharedProviders: input.policy.allowSharedProviders,
           allowYoloMode: input.policy.allowYoloMode,
+          allowYoloDestructive: input.policy.allowYoloDestructive,
           defaultPermissions: defaultPermissions as Prisma.InputJsonValue,
           maxPermissions: maxPermissions as Prisma.InputJsonValue,
         },
@@ -930,52 +957,54 @@ export const aiRouter = createTRPCRouter({
         throw new Error("You do not have access to this AI action");
       }
 
-      const { selectedTaskIds, payload } = await assertAiActionStillAllowed(ctx.prisma, execution, input.overridePayload);
-      const executionPayload = payload as Prisma.JsonValue;
+      return runExclusivelyPerConversation(execution.conversationId, async () => {
+        const { selectedTaskIds, payload } = await assertAiActionStillAllowed(ctx.prisma, execution, input.overridePayload);
+        const executionPayload = payload as Prisma.JsonValue;
 
-      const claim = await ctx.prisma.aiActionExecution.updateMany({
-        where: { id: input.id, status: "proposed" },
-        data: {
-          status: "approved",
-          errorMessage: null,
-          ...(input.overridePayload ? { proposedPayload: executionPayload as Prisma.InputJsonValue } : {}),
-        },
-      });
-
-      if (claim.count !== 1) {
-        throw new Error("This AI action is no longer pending approval");
-      }
-
-      const approved = await ctx.prisma.aiActionExecution.findUniqueOrThrow({ where: { id: input.id } });
-
-      try {
-        const result = await executeAiAction(ctx.prisma, {
-          actionExecution: {
-            ...approved,
-            proposedPayload: executionPayload,
+        const claim = await ctx.prisma.aiActionExecution.updateMany({
+          where: { id: input.id, status: "proposed" },
+          data: {
+            status: "approved",
+            errorMessage: null,
+            ...(input.overridePayload ? { proposedPayload: executionPayload as Prisma.InputJsonValue } : {}),
           },
-          requestedByUserId: ctx.session.user.id,
-          selectedTaskIds,
         });
 
-        return ctx.prisma.aiActionExecution.update({
-          where: { id: input.id },
-          data: {
-            status: "executed",
-            executedByUserId: ctx.session.user.id,
-            executedPayload: executionPayload as Prisma.InputJsonValue,
-            result: (result ?? null) as Prisma.InputJsonValue,
-          },
-        }).then(mapExecutionForClient);
-      } catch (error) {
-        return ctx.prisma.aiActionExecution.update({
-          where: { id: input.id },
-          data: {
-            status: "failed",
-            errorMessage: error instanceof Error ? error.message : "AI action execution failed",
-          },
-        }).then(mapExecutionForClient);
-      }
+        if (claim.count !== 1) {
+          throw new Error("This AI action is no longer pending approval");
+        }
+
+        const approved = await ctx.prisma.aiActionExecution.findUniqueOrThrow({ where: { id: input.id } });
+
+        try {
+          const result = await executeAiAction(ctx.prisma, {
+            actionExecution: {
+              ...approved,
+              proposedPayload: executionPayload,
+            },
+            requestedByUserId: ctx.session.user.id,
+            selectedTaskIds,
+          });
+
+          return ctx.prisma.aiActionExecution.update({
+            where: { id: input.id },
+            data: {
+              status: "executed",
+              executedByUserId: ctx.session.user.id,
+              executedPayload: executionPayload as Prisma.InputJsonValue,
+              result: (result ?? null) as Prisma.InputJsonValue,
+            },
+          }).then(mapExecutionForClient);
+        } catch (error) {
+          return ctx.prisma.aiActionExecution.update({
+            where: { id: input.id },
+            data: {
+              status: "failed",
+              errorMessage: error instanceof Error ? error.message : "AI action execution failed",
+            },
+          }).then(mapExecutionForClient);
+        }
+      });
     }),
 
   rejectAction: protectedProcedure

@@ -1,12 +1,14 @@
 import type { AiConversation, AiMessage, Prisma } from "@prisma/client";
 
+import type { AiToolProposal } from "@/lib/ai-types";
+
 import { completeWithAnthropicProviderStructured } from "./provider-anthropic";
 import { buildAiConversationContext } from "./context-builder";
 import { executeAiAction } from "./action-executor";
 import { completeWithOpenAiCompatibleProviderStructured, type AiProviderCompletion } from "./provider-openai-compatible";
-import { buildAiContextMessage, buildAiSystemPrompt, extractAiProposals, stripAiProposalBlock } from "./presenter";
+import { buildAiContextUserTurn, buildAiSystemPrompt, extractAiProposals, stripAiProposalBlock } from "./presenter";
 import { resolveAiProvider } from "./provider-registry";
-import { buildAiToolDefinitions, normalizeAiNativeToolCalls, normalizeAiToolProposals, resolveAiActionPayload, type AiNativeToolDefinition } from "./tools";
+import { YOLO_DESTRUCTIVE_ACTIONS, buildAiToolDefinitions, normalizeAiNativeToolCalls, normalizeAiToolProposals, resolveAiActionPayload, type AiNativeToolDefinition } from "./tools";
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 
@@ -65,9 +67,6 @@ export async function buildAiAssistantTurnRequest(
       role: "system",
       content: buildAiSystemPrompt({
         projectName: project.name,
-        mode: input.conversation.mode,
-        permissions: ((input.conversation.grantedPermissions ?? []) as string[]),
-        currentDate: new Date().toISOString(),
       }),
       toolName: null,
       toolPayload: null,
@@ -77,10 +76,17 @@ export async function buildAiAssistantTurnRequest(
       createdAt: new Date(0),
     },
     {
+      // The context snapshot is untrusted user data, so it is sent as a wrapped
+      // first user turn — never as a system message and never unwrapped prose.
       id: "context",
       conversationId: input.conversation.id,
-      role: "system",
-      content: buildAiContextMessage(context),
+      role: "user",
+      content: buildAiContextUserTurn({
+        snapshot: context,
+        generatedAt: new Date().toISOString(),
+        mode: input.conversation.mode,
+        permissions: ((input.conversation.grantedPermissions ?? []) as string[]),
+      }),
       toolName: null,
       toolPayload: null,
       toolCalls: null,
@@ -131,7 +137,22 @@ export async function persistAiAssistantCompletion(
       return null;
     }
   }))).filter((proposal): proposal is (typeof rawProposals)[number] => proposal !== null);
-  const assistantContent = stripAiProposalBlock(input.completion.content) || (proposals.length > 0 ? "I prepared the proposed action cards below." : "");
+  // Yolo scoping: destructive action types are only auto-approved when the
+  // project policy explicitly allows it; otherwise they fall back to pending
+  // approval cards like in approval mode.
+  const policy = input.conversation.mode === "yolo"
+    ? await prisma.aiProjectPolicy.findUnique({ where: { projectId: input.conversation.projectId } })
+    : null;
+  const allowYoloDestructive = policy?.allowYoloDestructive ?? false;
+
+  const shouldAutoApprove = (actionType: string) =>
+    input.conversation.mode === "yolo" &&
+    !(YOLO_DESTRUCTIVE_ACTIONS.has(actionType as AiToolProposal["actionType"]) && !allowYoloDestructive);
+
+  const pendingApprovalCount = input.conversation.mode === "yolo"
+    ? proposals.filter((proposal) => !shouldAutoApprove(proposal.actionType)).length
+    : 0;
+  const assistantContent = buildAssistantContent(input.completion.content, proposals, { pendingApprovalCount });
 
   const assistantMessage = await prisma.aiMessage.create({
     data: {
@@ -156,7 +177,7 @@ export async function persistAiAssistantCompletion(
           title: proposal.title,
           summary: proposal.summary,
           mode: input.conversation.mode,
-          status: input.conversation.mode === "yolo" ? "approved" : "proposed",
+          status: shouldAutoApprove(proposal.actionType) ? "approved" : "proposed",
           proposedPayload: proposal.payload as Prisma.InputJsonValue,
         },
       })
@@ -164,38 +185,56 @@ export async function persistAiAssistantCompletion(
   );
 
   if (input.conversation.mode === "yolo") {
-    await Promise.all(
-      executions.map(async (execution) => {
-        try {
-          const result = await executeAiAction(prisma, {
-            actionExecution: execution,
-            requestedByUserId: input.requestedByUserId,
-            selectedTaskIds: input.selectedTaskIds,
-          });
+    // Sequential in proposal order so each action's checkpointBefore is captured
+    // after the previous action has fully written — parallel writes would corrupt
+    // rollback checkpoints.
+    for (const execution of executions) {
+      if (execution.status !== "approved") {
+        continue;
+      }
+      try {
+        const result = await executeAiAction(prisma, {
+          actionExecution: execution,
+          requestedByUserId: input.requestedByUserId,
+          selectedTaskIds: input.selectedTaskIds,
+        });
 
-          await prisma.aiActionExecution.update({
-            where: { id: execution.id },
-            data: {
-              status: "executed",
-              executedByUserId: input.requestedByUserId,
-              executedPayload: execution.proposedPayload as Prisma.InputJsonValue,
-              result: (result ?? null) as Prisma.InputJsonValue,
-            },
-          });
-        } catch (error) {
-          await prisma.aiActionExecution.update({
-            where: { id: execution.id },
-            data: {
-              status: "failed",
-              errorMessage: error instanceof Error ? error.message : "AI action execution failed",
-            },
-          });
-        }
-      })
-    );
+        await prisma.aiActionExecution.update({
+          where: { id: execution.id },
+          data: {
+            status: "executed",
+            executedByUserId: input.requestedByUserId,
+            executedPayload: execution.proposedPayload as Prisma.InputJsonValue,
+            result: (result ?? null) as Prisma.InputJsonValue,
+          },
+        });
+      } catch (error) {
+        await prisma.aiActionExecution.update({
+          where: { id: execution.id },
+          data: {
+            status: "failed",
+            errorMessage: error instanceof Error ? error.message : "AI action execution failed",
+          },
+        });
+      }
+    }
   }
 
   return { message: assistantMessage, proposals: executions };
+}
+
+const AUTO_EXECUTED_FALLBACK_TEXT = "I prepared the proposed action cards below.";
+
+function buildAssistantProposalNote(proposalCount: number) {
+  const noun = proposalCount === 1 ? "action" : "actions";
+  return `${proposalCount} ${noun} need${proposalCount === 1 ? "s" : ""} your approval.`;
+}
+
+export function buildAssistantContent(rawContent: string, proposals: Array<{ actionType: string }>, options: { pendingApprovalCount?: number } = {}) {
+  const baseContent = stripAiProposalBlock(rawContent) || (proposals.length > 0 ? AUTO_EXECUTED_FALLBACK_TEXT : "");
+  return options.pendingApprovalCount && options.pendingApprovalCount > 0
+    ? `${baseContent}\n\n${buildAssistantProposalNote(options.pendingApprovalCount)}`
+    : baseContent;
 }
 
 export async function appendAiAssistantTurn(
