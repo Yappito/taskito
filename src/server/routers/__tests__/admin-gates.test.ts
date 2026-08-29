@@ -45,6 +45,8 @@ const FULLY_ADMIN_ROUTERS = ["group", "oidc", "storage"];
 // change to the full procedure surface must update this file.
 const NON_ADMIN_USER_PROCEDURES = [
   "me",
+  "notificationPreferences",
+  "updateNotificationPreferences",
   "aiPreferences",
   "appearance",
   "updateAiPreferences",
