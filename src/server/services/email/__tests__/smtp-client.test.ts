@@ -26,6 +26,7 @@ const testConfig: SmtpConfig = {
   password: "super-secret",
   from: "Taskito <no-reply@taskito.local>",
   tlsRejectUnauthorized: true,
+  allowInsecureAuth: false,
 };
 
 /** In-memory SMTP server side of a socket: replays scripted replies. */
@@ -127,11 +128,18 @@ describe("smtp client env config", () => {
       from: "noreply@example.com",
       fromName: "Taskito",
       tlsRejectUnauthorized: false,
+      allowInsecureAuth: false,
     });
     expect(isEmailConfigured({ SMTP_HOST: "h", SMTP_FROM: "a@b.c" })).toBe(true);
     expect(isEmailConfigured({})).toBe(false);
     expect(isEmailConfigured({ SMTP_HOST: "h" })).toBe(false);
     expect(isEmailConfigured({ SMTP_FROM: "a@b.c" })).toBe(false);
+  });
+
+  it("parses SMTP_ALLOW_INSECURE_AUTH as an explicit true opt-in", () => {
+    expect(readSmtpConfig({ SMTP_HOST: "h", SMTP_FROM: "a@b.c", SMTP_ALLOW_INSECURE_AUTH: "true" })?.allowInsecureAuth).toBe(true);
+    expect(readSmtpConfig({ SMTP_HOST: "h", SMTP_FROM: "a@b.c", SMTP_ALLOW_INSECURE_AUTH: "1" })?.allowInsecureAuth).toBe(false);
+    expect(readSmtpConfig({ SMTP_HOST: "h", SMTP_FROM: "a@b.c" })?.allowInsecureAuth).toBe(false);
   });
 
   it("defaults the port to 587 and TLS rejection to true", () => {
@@ -255,6 +263,59 @@ describe("smtp conversation", () => {
     expect(secure.written).toContain("DATA\r\n");
   });
 
+  it("refuses to send credentials over plaintext when STARTTLS is not available", async () => {
+    // AUTH is advertised, but the connection is plaintext and no STARTTLS is
+    // offered: the client must bail out before any AUTH (or MAIL) line is sent.
+    const socket = new FakeSmtpSocket((line) => {
+      if (line.startsWith("EHLO")) return ["250-mail.local", "250-AUTH PLAIN LOGIN", "250 8BITMIME"];
+      return [];
+    }, false);
+
+    const { connection } = fakeConnection(socket);
+    await expect(
+      sendEmail(message, {
+        config: testConfig,
+        connectionFactory: () => {
+          greeting(socket);
+          return Promise.resolve(connection);
+        },
+        responseTimeoutMs: 500,
+      })
+    ).rejects.toThrow(/\[smtp\] refusing to send credentials without TLS; set SMTP_SECURE=true, use a STARTTLS-capable server, or set SMTP_ALLOW_INSECURE_AUTH=true/);
+
+    expect(socket.written).toBe("EHLO taskito.local\r\n");
+    expect(socket.written).not.toContain("AUTH");
+    expect(socket.written).not.toContain("MAIL FROM");
+  });
+
+  it("still sends credentials over plaintext with SMTP_ALLOW_INSECURE_AUTH=true", async () => {
+    const socket = new FakeSmtpSocket((line) => {
+      if (line.startsWith("EHLO")) return ["250-mail.local", "250-AUTH PLAIN LOGIN", "250 8BITMIME"];
+      if (line.startsWith("AUTH PLAIN")) return ["235 2.7.0 Accepted"];
+      if (line.startsWith("MAIL FROM")) return ["250 2.1.0 Ok"];
+      if (line.startsWith("RCPT TO")) return ["250 2.1.5 Ok"];
+      if (line === "DATA") return ["354 Go ahead"];
+      if (line === ".") return ["250 2.0.0 Ok: queued"];
+      if (line === "QUIT") return ["221 2.0.0 Bye"];
+      return [];
+    }, false);
+
+    const { connection } = fakeConnection(socket);
+    await sendEmail(message, {
+      config: { ...testConfig, allowInsecureAuth: true },
+      connectionFactory: () => {
+        greeting(socket);
+        return Promise.resolve(connection);
+      },
+      responseTimeoutMs: 500,
+    });
+
+    const expectedAuth = Buffer.from(`\u0000${testConfig.user}\u0000${testConfig.password}`, "utf8").toString("base64");
+    expect(socket.written).toContain(`AUTH PLAIN ${expectedAuth}\r\n`);
+    expect(socket.written).toContain("DATA\r\n");
+    expect(socket.written).toContain("QUIT\r\n");
+  });
+
   it("falls back to AUTH LOGIN when PLAIN is not advertised", async () => {
     const userB64 = Buffer.from("mailer@taskito.local", "utf8").toString("base64");
     const passB64 = Buffer.from("super-secret", "utf8").toString("base64");
@@ -271,8 +332,11 @@ describe("smtp conversation", () => {
       return [];
     }, false);
     const { connection } = fakeConnection(socket);
+    // Plaintext link without STARTTLS: exercises the LOGIN-mechanism fallback
+    // only with the explicit insecure-auth opt-in (the refusal itself has its
+    // own tests above).
     await sendEmail(message, {
-      config: testConfig,
+      config: { ...testConfig, allowInsecureAuth: true },
       connectionFactory: () => {
         greeting(socket);
         return Promise.resolve(connection);

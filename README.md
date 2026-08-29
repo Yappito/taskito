@@ -227,6 +227,8 @@ Both are editable in the notification bell's Preferences block, which shows "In-
 
 Email sending activates when `SMTP_HOST` and `SMTP_FROM` are set (all `SMTP_*` variables are listed in the environment table). Without configuration, sending is a logged no-op and every channel switch is harmless. Emails carry a text/plain and text/html body and deep links of the form `{AUTH_URL}/{project.slug}?task={taskId}`, which opens the task directly in a project view.
 
+Credentials are never sent over an unencrypted connection: unless the link is already TLS (`SMTP_SECURE=true`) or the server advertises STARTTLS (which the client always upgrades first), SMTP authentication is refused with a clear error instead of transmitting the password in plaintext. Only set `SMTP_ALLOW_INSECURE_AUTH=true` for trusted, isolated networks (e.g. a local relay you fully control).
+
 ### Daily due-soon digest
 
 Users can opt in to a daily due-soon digest with the "Daily due-soon digest (email)" preference (stored in `emailChannel.digest`, default OFF). The digest groups, across all of the user's accessible projects:
@@ -236,10 +238,12 @@ Users can opt in to a daily due-soon digest with the "Daily due-soon digest (ema
 - tasks due within the project's `dueDateWarningDays` setting (see `src/lib/alert-utils.ts`),
 - open tasks assigned to the user that are blocked by an unfinished task (`blocks` task links).
 
-Users with nothing to report are skipped. `runDailyDigestJob()` in `src/server/services/email/digest.ts` is the scheduler-facing entry point (guarded to run at most once per UTC day per process); no in-app scheduler ships yet, so wire it from an external cron or a future `scheduler.ts` service.
+Users with nothing to report are skipped. `runDailyDigestJob()` in `src/server/services/email/digest.ts` is the scheduler-facing entry point, and the built-in scheduler runs it once the current UTC hour reaches `SCHEDULER_DIGEST_HOUR_UTC` (default 7; see the Scheduling section).
+
+Double-send protection is layered: a per-process once-per-UTC-day fast path, plus a database-backed guard — after a digest is sent, `emailChannel.lastDigestSentAt` (ISO string) is written to the recipient's `User.settings`, and users whose `lastDigestSentAt` already falls within the current UTC day are skipped. That way a restart, failover, or a second replica never resends a digest for the same UTC day.
 ## Scheduling
 
-Two features are time-driven and need a scheduler: recurring tasks (the next occurrence is created automatically) and automation rules with the `dueDatePassed` trigger. Both can run through two interchangeable paths:
+Three features are time-driven and need a scheduler: recurring tasks (the next occurrence is created automatically), automation rules with the `dueDatePassed` trigger, and the daily due-soon digest email. All three can run through two interchangeable paths:
 
 ### Built-in in-process scheduler (default)
 
@@ -248,6 +252,7 @@ The production container runs a small in-process scheduler via Next.js instrumen
 1. Opens an interactive transaction and takes a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`, `src/server/services/scheduler.ts`) inside it, so in multi-replica deployments only one instance actually runs jobs — the others skip the tick. The lock lives on the transaction's own connection and is released automatically at commit/rollback, so it cannot leak on a pool connection.
 2. Processes due recurrence rules (creates the next recurring tasks).
 3. Runs `dueDatePassed` automation rules for every project that has them enabled. Actions are attributed to the project owner (the `owner`-role project member), since automation rules do not store a creator.
+4. Sends the daily due-soon digest (see Notifications) once the current UTC hour reaches `SCHEDULER_DIGEST_HOUR_UTC`. Per-user bookkeeping in `User.settings` (`emailChannel.lastDigestSentAt`) prevents restarts or other replicas from double-sending.
 
 Failures are logged with a `[scheduler]` prefix (without secrets) and never abort the remaining jobs. The scheduler is enabled by default and can be configured with:
 
@@ -256,6 +261,7 @@ Failures are logged with a `[scheduler]` prefix (without secrets) and never abor
 | `SCHEDULER_ENABLED` | `true` | Set to `false` to disable the built-in scheduler (e.g. when you prefer an external cron) |
 | `SCHEDULER_INTERVAL_MS` | `60000` | Tick interval in milliseconds; values below `1000` are clamped to `1000` |
 | `SCHEDULER_TICK_TIMEOUT_MS` | `600000` | Maximum duration of one tick; the tick's advisory-lock transaction is aborted when exceeded |
+| `SCHEDULER_DIGEST_HOUR_UTC` | `7` | Earliest UTC hour at which the daily due-soon digest may run (invalid values fall back to the default) |
 
 The scheduler runs inside the web process, so no extra container or worker is needed. It only starts in the Node.js runtime on server boot — never during `next build`.
 
@@ -271,7 +277,7 @@ curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://your-taskito-host/a
 |---|---|
 | `CRON_SECRET` | Bearer token for the cron endpoint. With it unset the endpoint answers `503`; with a wrong token `401` |
 
-Both task recurrence and due-date automation can also be triggered manually from Project settings → Automation ("Process due-date rules") and from the recurring-task controls.
+Both task recurrence and due-date automation can also be triggered manually from Project settings → Automation ("Process due-date rules") and from the recurring-task controls. The external cron endpoint does not trigger the daily digest — that one is owned by the built-in scheduler.
 
 Prefer running exactly one path: leave the built-in scheduler on and skip the cron job, or disable the built-in scheduler with `SCHEDULER_ENABLED=false` and drive jobs externally.
 
@@ -333,11 +339,13 @@ Useful commands from the repository root:
 | `SMTP_PORT` | No | SMTP port; defaults to `587` |
 | `SMTP_SECURE` | No | `true` = implicit TLS (typically port `465`); defaults to `false`, using STARTTLS when the server offers it |
 | `SMTP_USER` | Required with auth | SMTP username; omit for unauthenticated relays |
-| `SMTP_PASSWORD` | Required with auth | SMTP password; never logged |
+| `SMTP_PASSWORD` | Required with auth | SMTP password; never sent over plaintext — with `SMTP_USER`/`SMTP_PASSWORD` the client requires TLS (implicit or via STARTTLS) unless `SMTP_ALLOW_INSECURE_AUTH=true` |
 | `SMTP_FROM` | Required for email | Envelope/From address, e.g. `Taskito <noreply@example.com>`; required to enable sending |
 | `SMTP_TLS_REJECT_UNAUTHORIZED` | No | Set `false` only for self-signed certificates; defaults to `true` |
+| `SMTP_ALLOW_INSECURE_AUTH` | No | Must be exactly `true` to allow SMTP AUTH over a connection without TLS; defaults to `false` (refuse instead of leaking credentials) |
 | `SCHEDULER_ENABLED` | No | In-process scheduler for recurrences + due-date automation; defaults to `true` — set `false` to rely only on the external cron endpoint |
 | `SCHEDULER_INTERVAL_MS` | No | Scheduler tick interval in milliseconds; defaults to `60000` (values below 1000 clamp to 1000) |
+| `SCHEDULER_DIGEST_HOUR_UTC` | No | Earliest UTC hour for the daily due-soon digest email; defaults to `7` (0–23) |
 | `CRON_SECRET` | No | Bearer token for `POST /api/cron/process-recurring`; unset keeps that endpoint disabled (503) |
 
 ### Rotating the secret encryption key (`AI_SECRET_MASTER_KEY`)

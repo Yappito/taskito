@@ -2,14 +2,16 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
+import { runDailyDigestJob } from "@/server/services/email/digest";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
 
 /**
  * In-process background scheduler ("cron inside the app").
  *
- * Drives the two time-based features that used to require an external trigger:
+ * Drives the three time-based features that used to require an external trigger:
  *  - recurrence processing (creating the next occurrence of recurring tasks)
  *  - due-date automation rules (`dueDatePassed` trigger)
+ *  - the daily due-soon digest email (from SCHEDULER_DIGEST_HOUR_UTC onwards)
  *
  * Multi-replica safety: every tick opens one interactive transaction and takes
  * a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`)
@@ -31,6 +33,7 @@ const SCHEDULER_LOG_PREFIX = "[scheduler]";
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 1_000;
 const DEFAULT_TICK_TIMEOUT_MS = 600_000;
+const DEFAULT_DIGEST_HOUR_UTC = 7;
 const TRANSACTION_MAX_WAIT_MS = 5_000;
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
@@ -79,6 +82,25 @@ function getTickTimeoutMs() {
     );
   }
   return DEFAULT_TICK_TIMEOUT_MS;
+}
+
+/**
+ * Earliest UTC hour at which the daily digest job may run
+ * (SCHEDULER_DIGEST_HOUR_UTC, default 7). Values outside 0-23 fall back to the
+ * default so a typo cannot disable or over-fire the digest.
+ */
+export function getSchedulerDigestHourUtc() {
+  const raw = process.env.SCHEDULER_DIGEST_HOUR_UTC;
+  const parsed = Number(raw);
+  if (raw && Number.isInteger(parsed) && parsed >= 0 && parsed <= 23) {
+    return parsed;
+  }
+  if (raw) {
+    console.warn(
+      `${SCHEDULER_LOG_PREFIX} invalid SCHEDULER_DIGEST_HOUR_UTC "${raw}", using ${DEFAULT_DIGEST_HOUR_UTC}`,
+    );
+  }
+  return DEFAULT_DIGEST_HOUR_UTC;
 }
 
 async function runRecurrenceJob() {
@@ -133,9 +155,27 @@ async function runDueDateAutomationJob() {
 }
 
 /**
+ * Daily due-soon digest: only runs from SCHEDULER_DIGEST_HOUR_UTC onwards.
+ * runDailyDigestJob itself is double-send guarded — a per-process fast path
+ * plus a DB-backed per-user lastDigestSentAt check in User.settings — so
+ * repeated ticks and other replicas cannot resend for the same UTC day.
+ */
+async function runDigestJob() {
+  const now = new Date();
+  const digestHour = getSchedulerDigestHourUtc();
+  if (now.getUTCHours() < digestHour) {
+    return;
+  }
+  const result = await runDailyDigestJob(now);
+  if ("sent" in result && result.sent > 0) {
+    console.info(`${SCHEDULER_LOG_PREFIX} daily digest sent to ${result.sent} user(s)`);
+  }
+}
+
+/**
  * One scheduler tick: open a transaction, take the transaction-scoped advisory
- * lock inside it, and run both jobs while the transaction (and therefore the
- * lock) is held. Each job is isolated so a failure cannot abort the others;
+ * lock inside it, and run all three jobs while the transaction (and therefore
+ * the lock) is held. Each job is isolated so a failure cannot abort the others;
  * the lock itself is released automatically when the transaction commits.
  */
 export async function runScheduledJobs() {
@@ -150,7 +190,7 @@ export async function runScheduledJobs() {
           return { ran: false };
         }
 
-        for (const job of [runRecurrenceJob, runDueDateAutomationJob]) {
+        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob]) {
           try {
             await job();
           } catch (error) {
