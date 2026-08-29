@@ -67,6 +67,8 @@ function createRule(overrides: Record<string, unknown> = {}) {
     dayOfMonth: null,
     endDate: null,
     nextDueDate: new Date("2026-05-19T09:00:00.000Z"),
+    updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+    retiredAt: null,
     task: createSourceTask(),
     ...overrides,
   };
@@ -284,7 +286,14 @@ describe("recurrence processor", () => {
     // excludes the rule from selection forever).
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
-      where: { id: RULE_ID, nextDueDate: current },
+      // Wave-10 finding 3: the CAS reasserts the exact observed state
+      // (retiredAt:null + the read nextDueDate + the read updatedAt).
+      where: {
+        id: RULE_ID,
+        nextDueDate: current,
+        retiredAt: null,
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
       data: { retiredAt: now },
     });
   });
@@ -327,7 +336,12 @@ describe("recurrence processor", () => {
     expect(result.processed).toBe(2);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
-      where: { id: deadRuleId, nextDueDate: deadCurrent },
+      where: {
+        id: deadRuleId,
+        nextDueDate: deadCurrent,
+        retiredAt: null,
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
       data: { retiredAt: new Date("2026-05-19T10:00:00.000Z") },
     });
     // The healthy rule's claim ran on the transaction client as usual.
@@ -433,7 +447,116 @@ describe("recurrence processor", () => {
     // One-step terminal retirement — nextDueDate is NOT advanced (the flag
     // alone removes the rule from every future selection).
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
-      where: { id: RULE_ID, nextDueDate: current },
+      where: {
+        id: RULE_ID,
+        nextDueDate: current,
+        retiredAt: null,
+        updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      },
+      data: { retiredAt: now },
+    });
+  });
+
+  // Wave-10 finding 3: a router `set` reactivation (clears retiredAt,
+  // rewrites the schedule, Prisma auto-touches updatedAt) racing the
+  // scheduler between the processor's read and its retirement update must
+  // WIN: the retirement CAS reasserts the observed state, matches 0 rows,
+  // and does NOT retire the reactivated rule. The old predicate (id +
+  // nextDueDate) still matched a same-due-date reactivation and clobbered it
+  // with a stale retirement.
+  it("does not retire a rule reactivated between the processor's read and the retirement CAS (wave-10 finding 3)", async () => {
+    const prisma = createPrismaMock();
+    const observedUpdatedAt = new Date("2026-05-01T00:00:00.000Z");
+    const current = new Date("2026-05-21T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T23:59:59.999Z"),
+        updatedAt: observedUpdatedAt,
+      }),
+    ]);
+
+    // A tiny in-memory row models the durable rule so the CAS predicate can
+    // be evaluated the way Postgres would. The "router set" below mutates it
+    // BETWEEN the read and the retirement write, exactly like a racing
+    // reactivation.
+    const row = {
+      id: RULE_ID,
+      nextDueDate: current,
+      retiredAt: null as Date | null,
+      updatedAt: observedUpdatedAt,
+    };
+    prisma.recurrenceRule.updateMany.mockImplementation(async (args: {
+      where: { id: string; nextDueDate: Date; retiredAt: Date | null; updatedAt: Date };
+      data: { retiredAt: Date };
+    }) => {
+      // The concurrent reactivation lands FIRST (racing the scheduler): the
+      // router clears retiredAt, moves nextDueDate (still validating), and
+      // Prisma's @updatedAt touch rewrites updatedAt.
+      row.retiredAt = null;
+      row.nextDueDate = new Date("2026-06-01T09:00:00.000Z");
+      row.updatedAt = new Date("2026-05-19T09:59:59.000Z");
+      // Now the CAS is evaluated against the mutated row:
+      const matches =
+        args.where.id === row.id &&
+        (args.where.nextDueDate?.getTime() ?? -1) === (row.nextDueDate?.getTime() ?? -1) &&
+        args.where.retiredAt === null && row.retiredAt === null &&
+        (args.where.updatedAt?.getTime() ?? -1) === (row.updatedAt?.getTime() ?? -1);
+      if (matches) {
+        row.retiredAt = args.data.retiredAt;
+        return { count: 1 };
+      }
+      return { count: 0 };
+    });
+
+    const now = new Date("2026-05-21T10:00:00.000Z");
+    const result = await processDueRecurrences(prisma as never, { now });
+
+    expect(result.createdTaskIds).toEqual([]);
+    // The retirement CAS was attempted with reasserted state...
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: RULE_ID,
+        nextDueDate: current,
+        retiredAt: null,
+        updatedAt: observedUpdatedAt,
+      },
+      data: { retiredAt: now },
+    });
+    // ...but matched 0 rows (the reactivation touched the row), and the
+    // reactivated rule STAYS ACTIVE: not retired, nextDueDate preserved.
+    expect(row.retiredAt).toBeNull();
+    expect(row.nextDueDate).toEqual(new Date("2026-06-01T09:00:00.000Z"));
+    expect(row.updatedAt).toEqual(new Date("2026-05-19T09:59:59.000Z"));
+  });
+
+  it("still retires a genuinely dead rule when nothing races it (exact observed state matches)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-21T09:00:00.000Z");
+    const observedUpdatedAt = new Date("2026-05-01T00:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T23:59:59.999Z"),
+        updatedAt: observedUpdatedAt,
+      }),
+    ]);
+
+    const now = new Date("2026-05-21T10:00:00.000Z");
+    await processDueRecurrences(prisma as never, { now });
+
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: RULE_ID,
+        nextDueDate: current,
+        retiredAt: null,
+        updatedAt: observedUpdatedAt,
+      },
       data: { retiredAt: now },
     });
   });

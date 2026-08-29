@@ -6,6 +6,8 @@ import {
   DEFAULT_WEBHOOK_LEASE_MARGIN_MS,
   DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS,
   DEFAULT_WEBHOOK_TIMEOUT_MS,
+  MAX_WEBHOOK_LEASE_MARGIN_MS,
+  MIN_WEBHOOK_LEASE_MARGIN_MS,
   WEBHOOK_TIMEOUT_MS,
   webhookDeliveryLeaseFloorMs,
   webhookDeliveryLeaseMs,
@@ -68,20 +70,43 @@ describe("webhook delivery limits", () => {
     expect(webhookDeliveryQueueMaxDepth()).toBe(DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH);
   });
 
-  it("defaults the lease-renewal margin to 5s and clamps invalid values (wave-9 finding 1)", () => {
-    expect(DEFAULT_WEBHOOK_LEASE_MARGIN_MS).toBe(5_000);
-    delete process.env.WEBHOOK_LEASE_MARGIN_MS;
-    expect(webhookLeaseMarginMs()).toBe(5_000);
-    // 0 is legal (lease exactly equals the POST timeout) but negatives and
-    // out-of-range values fall back to the default.
-    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "0");
-    expect(webhookLeaseMarginMs()).toBe(0);
-    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "-5");
-    expect(webhookLeaseMarginMs()).toBe(5_000);
-    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "60001");
-    expect(webhookLeaseMarginMs()).toBe(5_000);
-    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "20000");
-    expect(webhookLeaseMarginMs()).toBe(20_000);
+  it("defaults the lease-renewal margin to 5s and clamps it to the sane [2s, 60s] window (wave-9 finding 1 + wave-10 finding 1)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(DEFAULT_WEBHOOK_LEASE_MARGIN_MS).toBe(5_000);
+      expect(MIN_WEBHOOK_LEASE_MARGIN_MS).toBe(2_000);
+      expect(MAX_WEBHOOK_LEASE_MARGIN_MS).toBe(60_000);
+      delete process.env.WEBHOOK_LEASE_MARGIN_MS;
+      expect(webhookLeaseMarginMs()).toBe(5_000);
+      expect(warnSpy).not.toHaveBeenCalled();
+      // Floor (wave-10 finding 1): 0 and tiny values are RAISED to the 2s
+      // minimum with a logged warning — a margin below the minimum cannot
+      // reliably cover the finalize DB round-trip plus the POST start.
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "0");
+      expect(webhookLeaseMarginMs()).toBe(2_000);
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "250");
+      expect(webhookLeaseMarginMs()).toBe(2_000);
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "1999");
+      expect(webhookLeaseMarginMs()).toBe(2_000);
+      expect(warnSpy).toHaveBeenCalledTimes(3);
+      // In-range values pass through unchanged.
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "5000");
+      expect(webhookLeaseMarginMs()).toBe(5_000);
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "30000");
+      expect(webhookLeaseMarginMs()).toBe(30_000);
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "60000");
+      expect(webhookLeaseMarginMs()).toBe(60_000);
+      // Above the cap the value is CLAMPED down to 60000 (with a warning).
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "60001");
+      expect(webhookLeaseMarginMs()).toBe(60_000);
+      expect(warnSpy).toHaveBeenCalledTimes(4);
+      // Unparseable values still fail closed to the documented default.
+      vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "banana");
+      expect(webhookLeaseMarginMs()).toBe(5_000);
+      expect(warnSpy).toHaveBeenCalledTimes(5);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("ships the queue-depth default the .env.example documents (100) so code and docs agree", () => {

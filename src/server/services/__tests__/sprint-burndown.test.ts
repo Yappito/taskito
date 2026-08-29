@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { computeBurndownDays } from "@/server/services/burndown";
 import { recordSprintSnapshots, upsertSprintSnapshot, utcDay, utcDayKey } from "@/server/services/sprint-snapshot";
+import { TickDeadlineExceededError } from "@/server/services/scheduler-deadline";
 import { createPrismaMock } from "@/test/prisma-mock";
 
 describe("sprint snapshot service", () => {
@@ -80,6 +81,35 @@ describe("sprint snapshot service", () => {
         create: expect.objectContaining({ remainingCount: 0, completedCount: 1 }),
       })
     );
+  });
+
+  // Wave-10 finding 2b: the per-sprint loop must check the caller's abort
+  // signal BETWEEN sprints (before each sprint's task query/upsert), so a
+  // large active-sprint population stops at the tick deadline instead of
+  // running unbounded past it.
+  it("stops between sprints when the signal aborts (tick deadline)", async () => {
+    const prisma = createPrismaMock();
+    prisma.sprint.findMany.mockResolvedValue([{ id: "sprint-1" }, { id: "sprint-2" }, { id: "sprint-3" }]);
+    prisma.task.findMany.mockResolvedValue([{ status: { category: "todo" } }]);
+    const controller = new AbortController();
+    // The abort fires while sprint-1's work is in flight: sprint-1 completes
+    // (recorded), then the loop throws BEFORE touching sprint-2 or sprint-3.
+    prisma.task.findMany.mockImplementationOnce(async () => {
+      controller.abort();
+      return [{ status: { category: "todo" } }];
+    });
+
+    const now = new Date("2026-05-19T09:00:00.000Z");
+    await expect(recordSprintSnapshots(prisma as never, now, { signal: controller.signal })).rejects.toBeInstanceOf(
+      TickDeadlineExceededError,
+    );
+
+    // Only the sprint processed BEFORE the abort was touched; the remaining
+    // ones are deferred to the next tick (the upsert is idempotent, so a
+    // partially recorded day is completed later).
+    expect(prisma.task.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.task.findMany.mock.calls[0][0].where).toEqual({ sprintId: "sprint-1" });
+    expect(prisma.sprintSnapshot.upsert).toHaveBeenCalledTimes(1);
   });
 });
 

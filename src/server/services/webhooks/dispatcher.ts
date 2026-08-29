@@ -90,10 +90,14 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *    round-trip, DNS, queue latency), so the static floor alone can be
  *    outlasted by a still-pending POST. Renewing right before `postWebhookRequest`
  *    stamps `leaseExpiresAt = now + webhookRequestTimeoutMs() + margin`, so
- *    the lease covers EXACTLY the POST window regardless of how long the
- *    preceding stages took. If the renewal matches 0 rows the claim was
- *    already stolen (expired + recovered or redelivered) — the delivery is
- *    skipped and never POSTed after losing its claim.
+ *    under normal clock/latency conditions the lease covers the whole POST
+ *    window plus the margin (which is floored at 2s to absorb the finalize
+ *    DB round-trip) regardless of how long the preceding stages took;
+ *    adversarial inter-replica clock skew beyond the margin is an accepted
+ *    residual bounded by the token-gated finalization below. If the renewal
+ *    matches 0 rows the claim was already stolen (expired + recovered or
+ *    redelivered) — the delivery is skipped and never POSTed after losing
+ *    its claim.
  *  - target URLs are re-validated (same SSRF policy as at create time) AND
  *    the connection is PINNED to the validated address: the dispatcher
  *    resolves once, checks every A/AAAA answer against the block rules, then
@@ -430,8 +434,13 @@ export async function deliverWebhook(
   // query, decrypt/sign, and the DNS preflight all consume that window
   // BEFORE the POST starts, so the POST could still survive past
   // `leaseExpiresAt` and a recovery pass could start a second POST while the
-  // first is live. Re-stamping here makes the lease cover exactly the POST
-  // window regardless of how long the preceding stages took.
+  // first is live. Re-stamping here makes the renewed lease cover the POST
+  // window (POST timeout + margin, floored by webhookLeaseMarginMs so the
+  // finalize round-trip stays covered) under normal clock/latency
+  // conditions. Adversarial clock skew beyond the margin between replicas
+  // remains an accepted residual: every state-changing write is token-gated
+  // (this renewal, the finalize below), so a worker whose lease was recovered
+  // can never overwrite a newer claim's durable outcome.
   const renewedAt = new Date();
   const renewal = (await prisma.webhookDelivery.updateMany({
     where: { id: delivery.id, status: "processing", claimToken },

@@ -135,8 +135,25 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
       //    next tick; a lost CAS (raced re-activation) matches 0 rows and
       //    is retried from the freshly read state.
       if (rule.endDate && dayKey(rule.nextDueDate) > dayKey(rule.endDate)) {
+        // Wave-10 finding 3: the retirement CAS must REASSERT the exact state
+        // it observed — `retiredAt: null`, the `nextDueDate` it read, AND the
+        // `updatedAt` it read. The router's `set` reactivation (clears
+        // `retiredAt`, rewrites the schedule, and Prisma auto-touches
+        // `updatedAt` on every write) racing this tick would previously be
+        // CLOBBERED by this stale retirement whenever the reactivation kept
+        // the same due date: the old predicate (id + nextDueDate) still
+        // matched, and the freshly reactivated rule was retired by a
+        // decision made on pre-reactivation data. With the full predicate a
+        // rule reconfigured since the read matches 0 rows (count 0) and is
+        // left active; the retirement itself is retried from freshly read
+        // state on a later tick if the rule really is still dead.
         await prisma.recurrenceRule.updateMany({
-          where: { id: rule.id, nextDueDate: rule.nextDueDate },
+          where: {
+            id: rule.id,
+            nextDueDate: rule.nextDueDate,
+            retiredAt: null,
+            updatedAt: rule.updatedAt,
+          },
           data: { retiredAt: now },
         });
         continue;
