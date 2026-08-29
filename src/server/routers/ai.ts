@@ -20,6 +20,7 @@ import { completeWithAnthropicProvider } from "@/server/services/ai/provider-ant
 import { completeWithOpenAiCompatibleProvider } from "@/server/services/ai/provider-openai-compatible";
 import { resolveAiProvider } from "@/server/services/ai/provider-registry";
 import { AiProviderError } from "@/server/services/ai/provider-request";
+import { withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
 import { getRequiredPermissionsForActionPayload, resolveAiActionPayload } from "@/server/services/ai/tools";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
@@ -426,19 +427,23 @@ export const aiRouter = createTRPCRouter({
       const normalizedHeaders = normalizeAiProviderHeaders(input.defaultHeaders);
       const model = normalizeAiProviderModel(input.model);
 
-      return ctx.prisma.aiProviderConnection.create({
-        data: {
-          scope: "shared",
-          label: input.label,
-          adapter: input.adapter,
-          baseUrl: normalizedBaseUrl,
-          model,
-          encryptedSecret: encryptAiSecret(input.secret),
-          defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
-          isEnabled: input.isEnabled,
-          isDefault: false,
-        },
-      });
+      // M6: serialize with secret rotation — the encryptedSecret write takes
+      // the re-encryption advisory lock inside its own transaction.
+      return withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.aiProviderConnection.create({
+          data: {
+            scope: "shared",
+            label: input.label,
+            adapter: input.adapter,
+            baseUrl: normalizedBaseUrl,
+            model,
+            encryptedSecret: encryptAiSecret(input.secret),
+            defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
+            isEnabled: input.isEnabled,
+            isDefault: false,
+          },
+        }),
+      );
     }),
 
   createUserProvider: protectedProcedure
@@ -455,20 +460,24 @@ export const aiRouter = createTRPCRouter({
         });
       }
 
-      return ctx.prisma.aiProviderConnection.create({
-        data: {
-          scope: "user",
-          ownerUserId: ctx.session.user.id,
-          label: input.label,
-          adapter: input.adapter,
-          baseUrl: normalizedBaseUrl,
-          model,
-          encryptedSecret: encryptAiSecret(input.secret),
-          defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
-          isEnabled: input.isEnabled,
-          isDefault: input.isDefault,
-        },
-      });
+      // M6: serialize with secret rotation (the encryptedSecret write must not
+      // interleave with a key rotation run).
+      return withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.aiProviderConnection.create({
+          data: {
+            scope: "user",
+            ownerUserId: ctx.session.user.id,
+            label: input.label,
+            adapter: input.adapter,
+            baseUrl: normalizedBaseUrl,
+            model,
+            encryptedSecret: encryptAiSecret(input.secret),
+            defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
+            isEnabled: input.isEnabled,
+            isDefault: input.isDefault,
+          },
+        }),
+      );
     }),
 
   createProjectProvider: protectedProcedure
@@ -487,20 +496,23 @@ export const aiRouter = createTRPCRouter({
         });
       }
 
-      const provider = await ctx.prisma.aiProviderConnection.create({
-        data: {
-          scope: "project",
-          projectId: input.projectId,
-          label: input.label,
-          adapter: input.adapter,
-          baseUrl: normalizedBaseUrl,
-          model,
-          encryptedSecret: encryptAiSecret(input.secret),
-          defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
-          isEnabled: input.isEnabled,
-          isDefault: input.isDefault,
-        },
-      });
+      // M6: serialize with secret rotation (writes the encryptedSecret).
+      const provider = await withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.aiProviderConnection.create({
+          data: {
+            scope: "project",
+            projectId: input.projectId,
+            label: input.label,
+            adapter: input.adapter,
+            baseUrl: normalizedBaseUrl,
+            model,
+            encryptedSecret: encryptAiSecret(input.secret),
+            defaultHeaders: normalizedHeaders as Prisma.InputJsonValue,
+            isEnabled: input.isEnabled,
+            isDefault: input.isDefault,
+          },
+        }),
+      );
 
       if (input.isDefault) {
         await ctx.prisma.aiProjectPolicy.upsert({
@@ -549,19 +561,21 @@ export const aiRouter = createTRPCRouter({
         });
       }
 
-      const updatedProvider = await ctx.prisma.aiProviderConnection.update({
-        where: { id: input.id },
-        data: {
-          ...(input.label !== undefined ? { label: input.label } : {}),
-          ...(input.adapter !== undefined ? { adapter: input.adapter } : {}),
-          ...(baseUrl !== undefined ? { baseUrl } : {}),
-          ...(model !== undefined ? { model } : {}),
-          ...(secret ? { encryptedSecret: encryptAiSecret(secret) } : {}),
-          ...(defaultHeaders !== undefined ? { defaultHeaders: defaultHeaders as Prisma.InputJsonValue } : {}),
-          ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
-          ...(provider.scope !== "shared" && input.isDefault !== undefined ? { isDefault: input.isDefault } : {}),
-        },
-      });
+      const updatedProvider = await withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.aiProviderConnection.update({
+          where: { id: input.id },
+          data: {
+            ...(input.label !== undefined ? { label: input.label } : {}),
+            ...(input.adapter !== undefined ? { adapter: input.adapter } : {}),
+            ...(baseUrl !== undefined ? { baseUrl } : {}),
+            ...(model !== undefined ? { model } : {}),
+            ...(secret ? { encryptedSecret: encryptAiSecret(secret) } : {}),
+            ...(defaultHeaders !== undefined ? { defaultHeaders: defaultHeaders as Prisma.InputJsonValue } : {}),
+            ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
+            ...(provider.scope !== "shared" && input.isDefault !== undefined ? { isDefault: input.isDefault } : {}),
+          },
+        }),
+      );
 
       if (provider.scope === "project" && provider.projectId) {
         if (input.isDefault === true) {

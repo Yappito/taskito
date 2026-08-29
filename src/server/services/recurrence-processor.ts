@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { createTaskWithNextNumber } from "@/server/routers/task";
 import { createTaskActivity } from "@/server/services/task-activity";
+import { assertTickAlive } from "@/server/services/scheduler-deadline";
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 type Frequency = "daily" | "weekly" | "monthly" | "yearly";
@@ -49,7 +50,7 @@ function addInterval(
   return next;
 }
 
-export async function processDueRecurrences(prisma: PrismaClient, options: { projectId?: string; now?: Date; limit?: number } = {}) {
+export async function processDueRecurrences(prisma: PrismaClient, options: { projectId?: string; now?: Date; limit?: number; signal?: AbortSignal } = {}) {
   const now = options.now ?? new Date();
   const rules = await prisma.recurrenceRule.findMany({
     where: {
@@ -68,9 +69,14 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
     orderBy: { nextDueDate: "asc" },
     take: options.limit ?? 50,
   });
+  if (!Array.isArray(rules)) {
+    return { processed: 0, createdTaskIds: [] as string[] };
+  }
 
   const createdTaskIds: string[] = [];
   for (const rule of rules) {
+    // Stop promptly at the tick deadline (checked between units of work).
+    assertTickAlive(options.signal);
     try {
       const source = rule.task;
       const nextDueDate = addInterval(
@@ -80,44 +86,68 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
         rule.dayOfWeek ?? null,
         rule.dayOfMonth ?? null,
       );
-      if (rule.endDate && nextDueDate > rule.endDate) {
-        await prisma.recurrenceRule.update({ where: { id: rule.id }, data: { nextDueDate } });
+
+      // M8: claim this occurrence with a compare-and-swap on nextDueDate
+      // BEFORE creating the task. nextDueDate doubles as the occurrence's
+      // version: the atomic updateMany only succeeds for one concurrent
+      // caller (`count === 1`), so the loser never creates a duplicate task.
+      const claim = await prisma.recurrenceRule.updateMany({
+        where: { id: rule.id, nextDueDate: rule.nextDueDate },
+        data: { nextDueDate },
+      });
+      if (!claim || claim.count !== 1) {
         continue;
       }
 
-      const created = await createTaskWithNextNumber(prisma, source.projectId, (tx, taskNumber) => tx.task.create({
-        data: {
-          projectId: source.projectId,
-          taskNumber,
-          creatorId: source.creatorId,
-          assigneeId: source.assigneeId,
-          title: source.title,
-          description: source.description ?? Prisma.JsonNull,
-          body: source.body,
-          statusId: source.statusId,
-          priority: source.priority,
-          dueDate: rule.nextDueDate,
-          startDate: source.startDate,
-          sprintId: source.sprintId,
-          tags: source.tags.length ? { create: source.tags.map(({ tagId }) => ({ tagId })) } : undefined,
-          customFieldValues: source.customFieldValues.length
-            ? {
-                create: source.customFieldValues.map((entry) => ({
-                  customFieldId: entry.customFieldId,
-                  value: entry.value as Prisma.InputJsonValue,
-                })),
-              }
-            : undefined,
-        },
-      }));
-      createdTaskIds.push(created.id);
-      await prisma.recurrenceRule.update({ where: { id: rule.id }, data: { nextDueDate } });
-      createTaskActivity({
-        taskId: created.id,
-        actorId: source.creatorId,
-        action: "created",
-        details: { recurringFromTaskId: source.id, recurrenceRuleId: rule.id },
-      }).catch(() => {});
+      if (rule.endDate && nextDueDate > rule.endDate) {
+        // The next occurrence would be past the end date: the advance
+        // (already committed by the CAS above) retires this occurrence.
+        continue;
+      }
+
+      try {
+        const created = await createTaskWithNextNumber(prisma, source.projectId, (tx, taskNumber) => tx.task.create({
+          data: {
+            projectId: source.projectId,
+            taskNumber,
+            creatorId: source.creatorId,
+            assigneeId: source.assigneeId,
+            title: source.title,
+            description: source.description ?? Prisma.JsonNull,
+            body: source.body,
+            statusId: source.statusId,
+            priority: source.priority,
+            dueDate: rule.nextDueDate,
+            startDate: source.startDate,
+            sprintId: source.sprintId,
+            tags: source.tags.length ? { create: source.tags.map(({ tagId }) => ({ tagId })) } : undefined,
+            customFieldValues: source.customFieldValues.length
+              ? {
+                  create: source.customFieldValues.map((entry) => ({
+                    customFieldId: entry.customFieldId,
+                    value: entry.value as Prisma.InputJsonValue,
+                  })),
+                }
+              : undefined,
+          },
+        }));
+        createdTaskIds.push(created.id);
+        createTaskActivity({
+          taskId: created.id,
+          actorId: source.creatorId,
+          action: "created",
+          details: { recurringFromTaskId: source.id, recurrenceRuleId: rule.id },
+        }).catch(() => {});
+      } catch (createError) {
+        // The claim succeeded but the task creation failed — roll the advance
+        // back so the occurrence is retried on the next tick instead of being
+        // silently skipped.
+        await prisma.recurrenceRule.updateMany({
+          where: { id: rule.id, nextDueDate },
+          data: { nextDueDate: rule.nextDueDate },
+        }).catch(() => {});
+        throw createError;
+      }
     } catch {
       // Continue processing other recurrence rules; a single bad rule should not block the batch.
     }

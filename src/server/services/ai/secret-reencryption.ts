@@ -12,16 +12,23 @@
  *
  * Safety properties:
  *   - the rotation runs inside a single interactive transaction (atomic);
- *   - the transaction holds `pg_advisory_xact_lock` and re-counts sensitive
- *     rows at the end, aborting loudly if rows were added or removed while it
- *     was running (run it in a maintenance window for full exclusivity: the
- *     lock does not block ordinary writers);
+ *   - the transaction holds `pg_advisory_xact_lock` and re-compares per-row
+ *     fingerprints (id + ciphertext) at the end, aborting loudly if any row
+ *     was added, removed, or changed while it was running — including
+ *     same-count in-place rewrites a plain row-count comparison would miss;
+ *   - every secret writer (AI provider create/update, OIDC provider
+ *     create/update, storage settings save) takes the same advisory lock via
+ *     withSecretRotationLock inside its own transaction, so ordinary writes
+ *     serialize with a rotation and cannot overwrite fresh ciphertext with
+ *     plaintext encrypted under the old key mid-run;
  *   - interactive transaction timeouts are configurable via
  *     REENCRYPT_TX_TIMEOUT_MS (default 300s) because three table scans plus
  *     per-row updates can exceed the Prisma 5s default;
  *   - versioned rows are never rewritten when old and new key material are
  *     identical (a fresh IV would produce a different ciphertext every run).
  */
+
+import type { Prisma } from "@prisma/client";
 
 import {
   decryptWithKey,
@@ -50,11 +57,42 @@ export type TableStats = {
 export type EncryptedRow = { id: string; encrypted: string | null };
 
 /**
- * Arbitrary application-specific key for the Postgres advisory lock. It only
- * needs to be stable across runs so a re-encryption run excludes itself from
- * concurrent re-encryption runs, not normal application traffic.
+ * Arbitrary application-specific key for the Postgres advisory lock.
+ *
+ * The rotation takes an exclusive transaction-scoped lock under this key and,
+ * since the writer lock was introduced, every normal secret writer (AI
+ * provider create/update, OIDC provider create/update, storage settings save)
+ * takes the same lock inside its own transaction — so the rotation serialises
+ * against all writers and its row fingerprints can no longer be stale.
  */
-const REENCRYPT_ADVISORY_LOCK_KEY = 7_381_254_996_121;
+export const REENCRYPT_ADVISORY_LOCK_KEY = 7_381_254_996_121;
+
+/** A client able to open the transaction the writer lock lives in. */
+export interface SecretRotationLockClient {
+  $transaction: <T>(
+    callback: (tx: Prisma.TransactionClient) => Promise<T>,
+  ) => Promise<T>;
+}
+
+/**
+ * Runs `run` inside a transaction that first takes the shared re-encryption
+ * advisory lock (`pg_advisory_xact_lock(REENCRYPT_ADVISORY_LOCK_KEY)`).
+ *
+ * Secret writers (AI provider create/update, OIDC provider create/update,
+ * storage settings save) must route all writes of encrypted key material
+ * through this helper so they never interleave with a key rotation: without
+ * it, a secret written after the rotation's scan was overwritten with stale
+ * plaintext, or old-key ciphertext was written after the rotation (M6).
+ */
+export async function withSecretRotationLock<T>(
+  client: SecretRotationLockClient,
+  run: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return client.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${REENCRYPT_ADVISORY_LOCK_KEY})`;
+    return run(tx);
+  });
+}
 
 const DEFAULT_REENCRYPT_TX_TIMEOUT_MS = 300_000;
 const MAX_REENCRYPT_TX_MAX_WAIT_MS = 10_000;
@@ -141,7 +179,7 @@ export async function reencryptRows(
   oldResolved: ResolvedKey,
   newResolved: ResolvedKey,
   options: { dryRun: boolean },
-) {
+): Promise<Map<string, string>> {
   const failures: { id: string; reason: string }[] = [];
   const pendingUpdates: { id: string; encrypted: string }[] = [];
 
@@ -159,6 +197,8 @@ export async function reencryptRows(
     }
     pendingUpdates.length = 0;
   };
+
+  const appliedUpdates = new Map<string, string>();
 
   for (const row of rows) {
     stats.scanned += 1;
@@ -194,6 +234,7 @@ export async function reencryptRows(
         // rewrite it so the format is normalized.
         const normalized = encryptWithKey(current, newResolved.key);
         pendingUpdates.push({ id: row.id, encrypted: normalized });
+        appliedUpdates.set(row.id, normalized);
         stats.reencrypted += 1;
       }
       continue;
@@ -209,6 +250,7 @@ export async function reencryptRows(
 
     const reencrypted = encryptWithKey(plaintext, newResolved.key);
     pendingUpdates.push({ id: row.id, encrypted: reencrypted });
+    appliedUpdates.set(row.id, reencrypted);
     stats.reencrypted += 1;
   }
 
@@ -223,6 +265,7 @@ export async function reencryptRows(
   }
 
   await flushPendingUpdates();
+  return appliedUpdates;
 }
 
 /**
@@ -239,7 +282,6 @@ export interface ReencryptTransactionClient {
 export interface ReencryptDelegate {
   findMany(args: unknown): Promise<Array<{ id: string; [key: string]: unknown }>>;
   update(args: unknown): Promise<unknown>;
-  count(args: unknown): Promise<number>;
 }
 
 /**
@@ -264,13 +306,63 @@ interface TablePlan {
   label: string;
   readRows: (tx: ReencryptTransactionClient) => Promise<EncryptedRow[]>;
   updateRow: (tx: ReencryptTransactionClient, id: string, encrypted: string) => Promise<unknown>;
-  countRows: (tx: ReencryptTransactionClient) => Promise<number>;
+}
+
+/** Per-row fingerprint: id + the current ciphertext, joined. */
+function rowFingerprint(id: string, encrypted: string | null | undefined) {
+  return `${id}:${encrypted ?? ""}`;
+}
+
+/**
+ * Compares the final rescan against the expected fingerprints (initial rows
+ * plus this run's own re-encryption writes) and throws when anything was
+ * added, removed, or rewritten concurrently. Unlike a row-count comparison,
+ * this also catches same-count in-place secret changes — e.g. a secret
+ * replaced after the initial scan — that would otherwise leave stale
+ * plaintext or old-key ciphertext behind (M6).
+ */
+function assertFingerprintsUnchanged(planLabel: string, initial: Map<string, string>, appliedUpdates: Map<string, string>, finalRows: EncryptedRow[]) {
+  const expected = new Map(initial);
+  for (const [id, encrypted] of appliedUpdates) {
+    expected.set(id, rowFingerprint(id, encrypted));
+  }
+
+  const finalFingerprints = new Map(finalRows.map((row) => [row.id, rowFingerprint(row.id, row.encrypted)]));
+  if (finalFingerprints.size !== expected.size) {
+    const added = [...finalFingerprints.keys()].filter((id) => !expected.has(id));
+    const removed = [...expected.keys()].filter((id) => !finalFingerprints.has(id));
+    throw concurrentWritesError(planLabel, added, removed, []);
+  }
+
+  const changed: string[] = [];
+  for (const [id, fingerprint] of finalFingerprints) {
+    if (expected.get(id) !== fingerprint) {
+      changed.push(id);
+    }
+  }
+  if (changed.length > 0) {
+    throw concurrentWritesError(planLabel, [], [], changed);
+  }
+}
+
+function concurrentWritesError(label: string, added: string[], removed: string[], changed: string[]) {
+  const detail = [
+    added.length ? `added: ${added.join(", ")}` : null,
+    removed.length ? `removed: ${removed.join(", ")}` : null,
+    changed.length ? `ciphertext changed: ${changed.join(", ")}` : null,
+  ].filter(Boolean).join("; ");
+  return new Error(
+    `Concurrent writes detected while re-encrypting ${label}: sensitive rows changed during the run (${detail}). ` +
+      "Nothing was committed. Run the rotation in a maintenance window " +
+      "(stop Taskito, or make AI/storage settings temporarily read-only) and run it again.",
+  );
 }
 
 /**
  * Runs the whole rotation against the given Prisma client (or transaction
  * mock). Returns per-table statistics; throws (rolling back the transaction)
- * when any row fails to decrypt or a concurrent write changed row counts.
+ * when any row fails to decrypt or a sensitive row was added, removed, or
+ * rewritten (fingerprint change) while the run was in flight.
  */
 export async function reencryptAiSecrets(
   prisma: ReencryptPrismaClient,
@@ -296,7 +388,6 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.aiProviderConnection.update({ where: { id }, data: { encryptedSecret: encrypted } }),
-          countRows: (tx) => tx.aiProviderConnection.count({ where: { encryptedSecret: { not: null } } }),
         },
         {
           label: "OidcProviderConnection.encryptedClientSecret",
@@ -306,7 +397,6 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.oidcProviderConnection.update({ where: { id }, data: { encryptedClientSecret: encrypted } }),
-          countRows: (tx) => tx.oidcProviderConnection.count({ where: { encryptedClientSecret: { not: null } } }),
         },
         {
           label: "StorageSettings.encryptedS3SecretAccessKey",
@@ -316,7 +406,6 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.storageSettings.update({ where: { id }, data: { encryptedS3SecretAccessKey: encrypted } }),
-          countRows: (tx) => tx.storageSettings.count({ where: { encryptedS3SecretAccessKey: { not: null } } }),
         },
         {
           label: "StorageSettings.encryptedS3SessionToken",
@@ -326,36 +415,41 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.storageSettings.update({ where: { id }, data: { encryptedS3SessionToken: encrypted } }),
-          countRows: (tx) => tx.storageSettings.count({ where: { encryptedS3SessionToken: { not: null } } }),
         },
       ];
 
-      const initialCounts: number[] = [];
-      for (const plan of plans) {
-        initialCounts.push(await plan.countRows(tx));
+      interface PlanSnapshot {
+        plan: TablePlan;
+        initial: Map<string, string>;
+        appliedUpdates: Map<string, string>;
       }
+      const snapshots: PlanSnapshot[] = [];
 
       for (const plan of plans) {
         const tableStats = stats(plan.label);
         const rows = await plan.readRows(tx);
-        await reencryptRows(rows, (id, encrypted) => plan.updateRow(tx, id, encrypted), tableStats, oldResolved, newResolved, { dryRun });
+        const initial = new Map(rows.map((row) => [row.id, rowFingerprint(row.id, row.encrypted)]));
+        const appliedUpdates = await reencryptRows(
+          rows,
+          (id, encrypted) => plan.updateRow(tx, id, encrypted),
+          tableStats,
+          oldResolved,
+          newResolved,
+          { dryRun },
+        );
+        snapshots.push({ plan, initial, appliedUpdates });
         allStats.push(tableStats);
       }
 
-      // Final locked rescan: abort with a clear message when rows were added
-      // or removed while the run was in flight (the transaction's changes are
-      // rolled back together with those writes' consistency assumptions).
-      for (let index = 0; index < plans.length; index += 1) {
-        const plan = plans[index];
-        const finalCount = await plan.countRows(tx);
-        if (finalCount !== initialCounts[index]) {
-          throw new Error(
-            `Concurrent writes detected while re-encrypting ${plan.label}: ` +
-              `${initialCounts[index]} row(s) before the run, ${finalCount} after. ` +
-              "Nothing was committed. Run the rotation in a maintenance window " +
-              "(stop Taskito, or make AI/storage settings temporarily read-only) and run it again.",
-          );
-        }
+      // Final locked rescan: instead of comparing row counts (which misses
+      // same-count secret rewrites), compare per-row fingerprints (id +
+      // ciphertext) against the scan results — this run's own updates are
+      // accounted for. Abort with a clear message when anything else changed
+      // while the run was in flight; the transaction (and every assumption
+      // those writes broke) rolls back together.
+      for (const snapshot of snapshots) {
+        const finalRows = await snapshot.plan.readRows(tx);
+        assertFingerprintsUnchanged(snapshot.plan.label, snapshot.initial, snapshot.appliedUpdates, finalRows);
       }
     },
     reencryptTxOptions(txTimeoutMs),

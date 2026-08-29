@@ -347,19 +347,29 @@ export function validateAiProviderBaseUrl(rawUrl: string) {
 export async function assertAiProviderBaseUrlFetchAllowed(rawUrl: string) {
   const normalizedUrl = normalizeBaseUrl(rawUrl);
   const parsed = new URL(normalizedUrl);
+  // L11: URL.hostname keeps the brackets of an IPv6 literal (`[::1]`); the
+  // DNS lookup must receive the bare address, or `http://[::1]:11434` fails
+  // with a resolver error instead of being evaluated normally.
+  const hostname = normalizeHostname(parsed.hostname);
 
-  const addresses = await lookup(parsed.hostname, { all: true, verbatim: true });
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
   if (addresses.length === 0) {
     throw new AiProviderUrlValidationError("Provider host could not be resolved");
   }
 
+  // M5: when DNS resolves into private/reserved space, a bare (host-only)
+  // allowlist entry is NOT enough — the exact `host:port` entry is required
+  // (or the global AI_PROVIDER_ALLOW_PRIVATE_HOSTS override). A hostname-only
+  // match must never suppress the resolved-address check, otherwise a bare
+  // entry plus a private DNS answer re-opens every port on an internal host.
   const port = effectiveUrlPort(parsed);
-  const hostIsAllowlisted = matchingAllowlistEntry(getAllowlistEntries(), normalizeHostname(parsed.hostname), port) !== null;
-  if (!allowPrivateProviderHosts() && !hostIsAllowlisted) {
+  const entries = getAllowlistEntries();
+  const explicitlyAllowedPort = allowlistExplicitlyAllowsPort(entries, hostname, port);
+  if (!allowPrivateProviderHosts() && !explicitlyAllowedPort) {
     for (const { address } of addresses) {
       if (isPrivateIpv4Address(address) || isPrivateIpv6Address(address)) {
         throw new AiProviderUrlValidationError(
-          `Provider host resolves to a private, loopback, or link-local address (${address}). Enable AI_PROVIDER_ALLOW_PRIVATE_HOSTS or allowlist the host explicitly (use a \`host:port\` entry for private hosts) for self-hosted providers`,
+          `Provider host resolves to a private, loopback, or link-local address (${address}). Enable AI_PROVIDER_ALLOW_PRIVATE_HOSTS or allowlist the host with an exact \`host:port\` entry (e.g. ${hostname}:${port}) for self-hosted providers`,
         );
       }
     }

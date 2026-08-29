@@ -52,6 +52,7 @@ model User {
   rolledBackAiActionExecutions AiActionExecution[] @relation("RolledBackAiActions")
   timeLogs      TimeLog[]
   apiTokens     ApiToken[]
+  createdAutomationRules AutomationRule[] @relation("AutomationRuleCreator")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }
@@ -423,6 +424,7 @@ model Task {
   timeLogs         TimeLog[]
   recurrenceRule   RecurrenceRule?
   automationRuns   AutomationRun[]
+  automationRuleFirings AutomationRuleFiring[]
 
   @@unique([projectId, taskNumber])
   @@index([projectId, dueDate])
@@ -502,6 +504,7 @@ enum AutomationRunStatus {
 model AutomationRule {
   id               String            @id @default(cuid())
   projectId        String
+  createdByUserId  String?
   name             String
   isEnabled        Boolean           @default(true)
   trigger          AutomationTrigger
@@ -512,11 +515,33 @@ model AutomationRule {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  runs    AutomationRun[]
+  project   Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User?                   @relation("AutomationRuleCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  runs      AutomationRun[]
+  firings   AutomationRuleFiring[]
 
   @@index([projectId, isEnabled])
   @@index([projectId, trigger])
+  @@index([createdByUserId])
+}
+
+// One row per executed (rule, task, due-date occurrence) for `dueDatePassed`
+// rules. The UNIQUE constraint is claimed *before* the action runs so a
+// rule fires at most once per overdue occurrence — an addComment rule cannot
+// re-fire on every scheduler tick while a task stays overdue.
+model AutomationRuleFiring {
+  id        String   @id @default(cuid())
+  ruleId    String
+  taskId    String
+  dueDate   DateTime
+  firedAt   DateTime @default(now())
+
+  rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  task Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, taskId, dueDate])
+  @@index([taskId])
+  @@index([dueDate])
 }
 
 model AutomationRun {

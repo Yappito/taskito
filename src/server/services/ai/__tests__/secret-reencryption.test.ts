@@ -144,20 +144,26 @@ describe("secret re-encryption core", () => {
 
   describe("rotation behaviour with a mocked prisma", () => {
     /**
-     * A tiny backing store behind the prisma delegates so mutations are
-     * observable and findMany reflects the post-update state.
+     * A tiny backing store behind one prisma delegate so mutations are
+     * observable and findMany reflects the post-update state. The final
+     * fingerprint rescan therefore sees the rotation's own writes.
      */
-    function useStore(initialRows: EncryptedRow[]) {
+    function useStore(
+      delegate: keyof PrismaMock,
+      column: string,
+      initialRows: EncryptedRow[],
+    ) {
       const store = new Map<string, string>();
       for (const row of initialRows) {
         store.set(row.id, row.encrypted ?? "");
       }
-      prisma.aiProviderConnection.findMany.mockImplementation(() =>
-        Promise.resolve([...store.entries()].map(([id, encryptedSecret]) => ({ id, encryptedSecret }))),
+      const model = prisma[delegate] as unknown as Record<string, ReturnType<typeof vi.fn>>;
+      model.findMany.mockImplementation(() =>
+        Promise.resolve([...store.entries()].map(([id, value]) => ({ id, [column]: value }))),
       );
-      prisma.aiProviderConnection.update.mockImplementation(
-        (args: { where: { id: string }; data: { encryptedSecret: string } }) => {
-          store.set(args.where.id, args.data.encryptedSecret);
+      model.update.mockImplementation(
+        (args: { where: { id: string }; data: Record<string, string> }) => {
+          store.set(args.where.id, args.data[column]);
           return Promise.resolve({});
         },
       );
@@ -167,7 +173,7 @@ describe("secret re-encryption core", () => {
     it("re-encrypts legacy rows and counts versioned rows as current without rewriting (same keys)", async () => {
       const versioned = encryptWithKey("alpha-provider-secret", MASTER_KEY);
       const legacy = buildLegacyUnprefixed("beta-provider-secret", MASTER_KEY);
-      const store = useStore([
+      const store = useStore("aiProviderConnection", "encryptedSecret", [
         { id: "row-a", encrypted: versioned },
         { id: "row-b", encrypted: legacy },
         { id: "row-c", encrypted: null },
@@ -193,7 +199,7 @@ describe("secret re-encryption core", () => {
     it("is idempotent: a second same-key run rewrites nothing", async () => {
       const versioned = encryptWithKey("alpha-provider-secret", MASTER_KEY);
       const legacy = buildLegacyUnprefixed("beta-provider-secret", MASTER_KEY);
-      const store = useStore([
+      const store = useStore("aiProviderConnection", "encryptedSecret", [
         { id: "row-a", encrypted: versioned },
         { id: "row-b", encrypted: legacy },
       ]);
@@ -219,7 +225,7 @@ describe("secret re-encryption core", () => {
       for (let index = 0; index < rowCount; index += 1) {
         rows.push({ id: `row-${index}`, encrypted: buildLegacyUnprefixed(`secret-${index}`, MASTER_KEY) });
       }
-      const store = useStore(rows);
+      const store = useStore("aiProviderConnection", "encryptedSecret", rows);
       const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
       const newResolved: ResolvedKey = { key: otherKey, source: "AI_SECRET_MASTER_KEY" };
 
@@ -236,14 +242,23 @@ describe("secret re-encryption core", () => {
       expect(aiStats).toMatchObject({ scanned: rowCount, reencrypted: rowCount, failed: 0 });
     });
 
-    it("takes the advisory lock and aborts when row counts change during the run", async () => {
-      useStore([
+    it("takes the advisory lock and aborts when a row's ciphertext changes between scan and final rescan (M6)", async () => {
+      const initialRows = [
         { id: "row-a", encrypted: buildLegacyUnprefixed("secret-a", MASTER_KEY) },
         { id: "row-b", encrypted: buildLegacyUnprefixed("secret-b", MASTER_KEY) },
-      ]);
-      prisma.aiProviderConnection.count
-        .mockResolvedValueOnce(2) // initial count
-        .mockResolvedValue(3); // final rescan sees an inserted row
+      ];
+      useStore("aiProviderConnection", "encryptedSecret", initialRows);
+      // Simulate a concurrent same-count secret replacement: after the scan
+      // but before the final rescan, row-b is rewritten in place. A row-count
+      // comparison would miss this; the per-row fingerprint must not.
+      prisma.aiProviderConnection.findMany
+        .mockResolvedValueOnce(initialRows.map((row) => ({ id: row.id, encryptedSecret: row.encrypted })))
+        .mockImplementationOnce(() =>
+          Promise.resolve([
+            { id: "row-a", encryptedSecret: initialRows[0].encrypted },
+            { id: "row-b", encryptedSecret: buildLegacyUnprefixed("secret-b-REPLACED", MASTER_KEY) },
+          ]),
+        );
       const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
       const newResolved: ResolvedKey = { key: Buffer.alloc(32, 9), source: "AI_SECRET_MASTER_KEY" };
 
@@ -252,19 +267,50 @@ describe("secret re-encryption core", () => {
       );
       // The advisory lock is acquired inside the transaction.
       expect(queryRawMock).toHaveBeenCalled();
+      const lockSql = (queryRawMock.mock.calls[0][0] as unknown as string[]).join("");
+      expect(lockSql).toContain("pg_advisory_xact_lock");
     });
 
-    it("reports each sensitive table's statistics", async () => {
-      prisma.oidcProviderConnection.findMany.mockResolvedValue([
-        { id: "oidc-1", encryptedClientSecret: buildLegacyUnprefixed("oidc-secret", MASTER_KEY) },
-      ]);
-      prisma.oidcProviderConnection.count.mockResolvedValue(1);
-      prisma.storageSettings.findMany.mockResolvedValue([
-        { id: "storage-1", encryptedS3SecretAccessKey: buildLegacyUnprefixed("s3-secret", MASTER_KEY), encryptedS3SessionToken: null },
-      ]);
-      prisma.storageSettings.count.mockResolvedValue(1);
+    /**
+     * StorageSettings is scanned twice (access-key column and session-token
+     * column), so its store carries both columns on the same rows.
+     */
+    function useTwoColumnStore(initialRows: Array<{ id: string; encryptedS3SecretAccessKey: string | null; encryptedS3SessionToken: string | null }>) {
+      const store = new Map<string, { encryptedS3SecretAccessKey: string | null; encryptedS3SessionToken: string | null }>();
+      for (const row of initialRows) {
+        store.set(row.id, { encryptedS3SecretAccessKey: row.encryptedS3SecretAccessKey, encryptedS3SessionToken: row.encryptedS3SessionToken });
+      }
+      prisma.storageSettings.findMany.mockImplementation(() =>
+        Promise.resolve([...store.entries()].map(([id, columns]) => ({ id, ...columns }))),
+      );
+      prisma.storageSettings.update.mockImplementation(
+        (args: { where: { id: string }; data: { encryptedS3SecretAccessKey?: string; encryptedS3SessionToken?: string } }) => {
+          const row = store.get(args.where.id);
+          if (row) {
+            if (args.data.encryptedS3SecretAccessKey !== undefined) row.encryptedS3SecretAccessKey = args.data.encryptedS3SecretAccessKey;
+            if (args.data.encryptedS3SessionToken !== undefined) row.encryptedS3SessionToken = args.data.encryptedS3SessionToken;
+          }
+          return Promise.resolve({});
+        },
+      );
+      return store;
+    }
 
-      useStore([{ id: "ai-1", encrypted: buildLegacyUnprefixed("ai-secret", MASTER_KEY) }]);
+    it("reports each sensitive table's statistics", async () => {
+      useStore("oidcProviderConnection", "encryptedClientSecret", [
+        { id: "oidc-1", encrypted: buildLegacyUnprefixed("oidc-secret", MASTER_KEY) },
+      ]);
+      useTwoColumnStore([
+        {
+          id: "storage-1",
+          encryptedS3SecretAccessKey: buildLegacyUnprefixed("s3-secret", MASTER_KEY),
+          encryptedS3SessionToken: null,
+        },
+      ]);
+
+      useStore("aiProviderConnection", "encryptedSecret", [
+        { id: "ai-1", encrypted: buildLegacyUnprefixed("ai-secret", MASTER_KEY) },
+      ]);
       const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
       const newResolved: ResolvedKey = { key: Buffer.alloc(32, 9), source: "AI_SECRET_MASTER_KEY" };
 
@@ -277,7 +323,7 @@ describe("secret re-encryption core", () => {
     });
 
     it("aborts with a clear error when a row decrypts under neither key", async () => {
-      useStore([{ id: "row-a", encrypted: "bm90LWEtY2lwaGVydGV4dA==" }]);
+      useStore("aiProviderConnection", "encryptedSecret", [{ id: "row-a", encrypted: "bm90LWEtY2lwaGVydGV4dA==" }]);
       const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
       const newResolved: ResolvedKey = { key: Buffer.alloc(32, 9), source: "AI_SECRET_MASTER_KEY" };
 

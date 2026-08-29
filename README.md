@@ -251,7 +251,7 @@ The production container runs a small in-process scheduler via Next.js instrumen
 
 1. Opens an interactive transaction and takes a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`, `src/server/services/scheduler.ts`) inside it, so in multi-replica deployments only one instance actually runs jobs — the others skip the tick. The lock lives on the transaction's own connection and is released automatically at commit/rollback, so it cannot leak on a pool connection.
 2. Processes due recurrence rules (creates the next recurring tasks).
-3. Runs `dueDatePassed` automation rules for every project that has them enabled. Actions are attributed to the project owner (the `owner`-role project member), since automation rules do not store a creator.
+3. Runs `dueDatePassed` automation rules for every project that has them enabled. Each action is attributed to the **rule's creator** (`AutomationRule.createdByUserId`): the scheduled run impersonates that user, so a rule can never do more than its author could do by hand. A rule is skipped (with a `[automation]` warning) when its creator is missing, has been disabled, or no longer holds both `automation_manage` and the action's underlying project permission. Every firing is recorded in `AutomationRun` and — since the firing-claim migration — deduplicated per (rule, task, due-date) so repeated ticks and changed due dates don't re-fire the same occurrence.
 4. Sends the daily due-soon digest (see Notifications) once the current UTC hour reaches `SCHEDULER_DIGEST_HOUR_UTC`. Per-user bookkeeping in `User.settings` (`emailChannel.lastDigestSentAt`) prevents restarts or other replicas from double-sending.
 
 Failures are logged with a `[scheduler]` prefix (without secrets) and never abort the remaining jobs. The scheduler is enabled by default and can be configured with:
@@ -280,6 +280,22 @@ curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://your-taskito-host/a
 Both task recurrence and due-date automation can also be triggered manually from Project settings → Automation ("Process due-date rules") and from the recurring-task controls. The external cron endpoint does not trigger the daily digest — that one is owned by the built-in scheduler.
 
 Prefer running exactly one path: leave the built-in scheduler on and skip the cron job, or disable the built-in scheduler with `SCHEDULER_ENABLED=false` and drive jobs externally.
+
+### Automation rules: permissions and attribution
+
+Automation rules (`dueDatePassed` triggers) execute scheduled actions **as the user who created the rule**, not as a service account or the project owner. That keeps scheduled runs inside the author's own authority:
+
+- Creating or editing a rule requires the project's `automation_manage` permission **plus** the underlying permission of the chosen action, at save time and again at run time:
+
+  | Action | Required project permission |
+  |---|---|
+  | Move status, assign task, add/remove tag | `task_update` |
+  | Add comment | `task_comment` |
+  | Archive / unarchive task | `task_archive` |
+
+- Stored rule payloads (target task, status, tag, assignee) are validated to belong to the rule's project — both when the rule is saved and when it fires. A payload pointing into another project fails the run instead of executing.
+- A rule is skipped when its creator is missing or disabled, or no longer holds the permissions above. Nothing falls back to another identity.
+- Each (rule, task, due-date) occurrence fires at most once; a failed action releases its claim so the next tick can retry, and a snoozed task's new due date is a new occurrence.
 
 ## API access
 
@@ -346,7 +362,7 @@ Useful commands from the repository root:
 | `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated allowlist for AI provider endpoints. Entries are `host` or `host:port` (IPv6 literals bracketed). Public hosts may use a bare `host` entry (any port); private/loopback hosts require an exact `host:port` entry (e.g. `localhost:11434`) or the global `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true` override, so an entry can never open every TCP port on a host |
 | `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | No | Set `true` only to allow AI provider base URLs that point at loopback/private/link-local addresses (self-hosted Ollama, LM Studio, etc.); defaults to `false`, which rejects any provider host that is or resolves to a private address |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |
-| `REENCRYPT_TX_TIMEOUT_MS` | No | Interactive-transaction timeout (ms) for the `db:reencrypt-ai-secrets` rotation script; defaults to `300000` because three table scans plus per-row updates can exceed the Prisma 5s default. Run the rotation in a maintenance window: the transaction holds an advisory lock and aborts if row counts change mid-run |
+| `REENCRYPT_TX_TIMEOUT_MS` | No | Interactive-transaction timeout (ms) for the `db:reencrypt-ai-secrets` rotation script; defaults to `300000` because three table scans plus per-row updates can exceed the Prisma 5s default. Run the rotation in a maintenance window: the transaction holds an advisory lock, and every secret-writing code path (AI provider create/update, OIDC provider create/update, storage settings save) takes the same lock, so it cannot interleave with a rotation run. The rotation also snapshots a per-row ciphertext fingerprint and aborts if any row's ciphertext changed mid-run |
 | `STORAGE_PROVIDER` | No | `local` or `s3`; defaults to `local` |
 | `STORAGE_S3_BUCKET` | Required for S3 | Bucket used for attachments and profile images |
 | `STORAGE_S3_REGION` | No | S3 region; defaults to `us-east-1` |
@@ -374,11 +390,11 @@ Useful commands from the repository root:
 Stored AI provider secrets, OIDC client secrets, and S3 storage credentials are encrypted at rest. New ciphertext is written as `v1:<payload>`; legacy unprefixed ciphertext keeps decrypting. Rotating `AUTH_SECRET` no longer silently breaks those secrets if a dedicated master key is configured — and if it ever does, the re-encryption script restores access:
 
 1. Generate a new key: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
-2. Pick a maintenance window and **stop the app (or make AI/provider and storage settings temporarily read-only) for the duration of the rotation**. The re-encryption script re-counts sensitive rows inside a locked transaction and aborts if rows were added or removed mid-run, but a fully idle deployment is the only way to also rule out in-place secret changes during the run.
+2. Pick a maintenance window if your tables are large (the scan + rewrite happens in one long transaction). All in-app secret writers take the same Postgres advisory lock the re-encryption script uses (`pg_advisory_xact_lock`), so normal operation cannot interleave with a run; the script additionally snapshots a per-row ciphertext fingerprint and aborts with nothing committed if any row's ciphertext changed mid-run (including same-count in-place replacements).
 3. Dry run (always start here):
    `AI_SECRET_MASTER_KEY=<new key> AI_SECRET_MASTER_KEY_OLD=<old master key> npm run db:reencrypt-ai-secrets -- --dry-run`
    Omit `AI_SECRET_MASTER_KEY_OLD` when the old ciphertext was produced by the legacy `sha256(AUTH_SECRET)` fallback (keep `AUTH_SECRET` set so the old key can be derived).
-4. Apply: run the same command again without `--dry-run`. The script re-encrypts in a single transaction (holding a Postgres advisory lock) and prints per-table counts; it aborts with nothing committed if any row fails to decrypt or row counts change during the run.
+4. Apply: run the same command again without `--dry-run`. The script re-encrypts in a single transaction (holding a Postgres advisory lock) and prints per-table counts; it aborts with nothing committed if any row fails to decrypt or any row's ciphertext changed during the run.
 5. Re-check: run the same command once more (no `--dry-run`). It should report every row as "already current" with zero re-encryptions — that confirms the first pass caught everything and that nothing was written under the old key afterwards.
 6. Update the deployment environment to `AI_SECRET_MASTER_KEY=<new key>` and restart. Only then (optionally) rotate `AUTH_SECRET`.
 

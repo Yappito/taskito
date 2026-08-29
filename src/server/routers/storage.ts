@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { adminProcedure, createTRPCRouter } from "@/server/trpc";
+import { withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
 import {
   STORAGE_SETTINGS_ID,
   encryptStorageSecret,
@@ -54,24 +55,29 @@ export const storageRouter = createTRPCRouter({
       const existing = await ctx.prisma.storageSettings.findUnique({ where: { id: STORAGE_SETTINGS_ID } });
 
       if (input.provider === "local") {
-        await ctx.prisma.storageSettings.upsert({
-          where: { id: STORAGE_SETTINGS_ID },
-          create: {
-            id: STORAGE_SETTINGS_ID,
-            provider: "local",
-          },
-          update: {
-            provider: "local",
-            s3Bucket: null,
-            s3Region: null,
-            s3Endpoint: null,
-            s3AccessKeyId: null,
-            encryptedS3SecretAccessKey: null,
-            encryptedS3SessionToken: null,
-            s3ForcePathStyle: false,
-            s3Prefix: null,
-          },
-        });
+        // M6: the encryptedS3* columns are cleared here; serialize with the
+        // rotation lock so a concurrent re-encryption never resurrects a
+        // cleared ciphertext.
+        await withSecretRotationLock(ctx.prisma, (tx) =>
+          tx.storageSettings.upsert({
+            where: { id: STORAGE_SETTINGS_ID },
+            create: {
+              id: STORAGE_SETTINGS_ID,
+              provider: "local",
+            },
+            update: {
+              provider: "local",
+              s3Bucket: null,
+              s3Region: null,
+              s3Endpoint: null,
+              s3AccessKeyId: null,
+              encryptedS3SecretAccessKey: null,
+              encryptedS3SessionToken: null,
+              s3ForcePathStyle: false,
+              s3Prefix: null,
+            },
+          }),
+        );
         return getStoragePayload();
       }
 
@@ -91,40 +97,45 @@ export const storageRouter = createTRPCRouter({
         throw new Error("S3 access key ID is required when access secrets are set");
       }
 
-      await ctx.prisma.storageSettings.upsert({
-        where: { id: STORAGE_SETTINGS_ID },
-        create: {
-          id: STORAGE_SETTINGS_ID,
-          provider: "s3",
-          s3Bucket,
-          s3Region: clean(input.s3Region) ?? "us-east-1",
-          s3Endpoint: normalizeS3Endpoint(input.s3Endpoint),
-          s3AccessKeyId,
-          encryptedS3SecretAccessKey: s3SecretAccessKey ? encryptStorageSecret(s3SecretAccessKey) : null,
-          encryptedS3SessionToken: s3SessionToken ? encryptStorageSecret(s3SessionToken) : null,
-          s3ForcePathStyle: input.s3ForcePathStyle,
-          s3Prefix: normalizeS3Prefix(input.s3Prefix),
-        },
-        update: {
-          provider: "s3",
-          s3Bucket,
-          s3Region: clean(input.s3Region) ?? "us-east-1",
-          s3Endpoint: normalizeS3Endpoint(input.s3Endpoint),
-          s3AccessKeyId,
-          encryptedS3SecretAccessKey: s3AccessKeyId
-            ? s3SecretAccessKey
-              ? encryptStorageSecret(s3SecretAccessKey)
-              : existing?.encryptedS3SecretAccessKey ?? null
-            : null,
-          encryptedS3SessionToken: input.clearS3SessionToken
-            ? null
-            : s3SessionToken
-              ? encryptStorageSecret(s3SessionToken)
-              : existing?.encryptedS3SessionToken ?? null,
-          s3ForcePathStyle: input.s3ForcePathStyle,
-          s3Prefix: normalizeS3Prefix(input.s3Prefix),
-        },
-      });
+      // M6: serialize with secret rotation — this writes fresh
+      // encryptedS3SecretAccessKey / encryptedS3SessionToken ciphertext and
+      // must not interleave with a key rotation run.
+      await withSecretRotationLock(ctx.prisma, (tx) =>
+        tx.storageSettings.upsert({
+          where: { id: STORAGE_SETTINGS_ID },
+          create: {
+            id: STORAGE_SETTINGS_ID,
+            provider: "s3",
+            s3Bucket,
+            s3Region: clean(input.s3Region) ?? "us-east-1",
+            s3Endpoint: normalizeS3Endpoint(input.s3Endpoint),
+            s3AccessKeyId,
+            encryptedS3SecretAccessKey: s3SecretAccessKey ? encryptStorageSecret(s3SecretAccessKey) : null,
+            encryptedS3SessionToken: s3SessionToken ? encryptStorageSecret(s3SessionToken) : null,
+            s3ForcePathStyle: input.s3ForcePathStyle,
+            s3Prefix: normalizeS3Prefix(input.s3Prefix),
+          },
+          update: {
+            provider: "s3",
+            s3Bucket,
+            s3Region: clean(input.s3Region) ?? "us-east-1",
+            s3Endpoint: normalizeS3Endpoint(input.s3Endpoint),
+            s3AccessKeyId,
+            encryptedS3SecretAccessKey: s3AccessKeyId
+              ? s3SecretAccessKey
+                ? encryptStorageSecret(s3SecretAccessKey)
+                : existing?.encryptedS3SecretAccessKey ?? null
+              : null,
+            encryptedS3SessionToken: input.clearS3SessionToken
+              ? null
+              : s3SessionToken
+                ? encryptStorageSecret(s3SessionToken)
+                : existing?.encryptedS3SessionToken ?? null,
+            s3ForcePathStyle: input.s3ForcePathStyle,
+            s3Prefix: normalizeS3Prefix(input.s3Prefix),
+          },
+        }),
+      );
 
       return getStoragePayload();
     }),
