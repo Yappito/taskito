@@ -29,12 +29,17 @@ export async function createTaskComment(
     throw new Error("Comment content or attachments are required");
   }
 
-  const comment = await prisma.comment.create({
-    data: {
-      taskId: input.taskId,
-      authorId: input.authorId,
-      content: finalContent,
-      ...(attachments.length > 0
+  // CITADEL-e10 (finding 5): bump the durable comment-thread version in the
+  // same transaction as the create so the AI summary cache compare-and-swap
+  // always observes the new comment. (Prisma's create-side nested relation
+  // input cannot update the parent, hence the explicit transaction.)
+  const [comment] = await prisma.$transaction([
+    prisma.comment.create({
+      data: {
+        taskId: input.taskId,
+        authorId: input.authorId,
+        content: finalContent,
+        ...(attachments.length > 0
         ? {
             attachments: {
               create: attachments.map((attachment) => ({
@@ -49,21 +54,26 @@ export async function createTaskComment(
             },
           }
         : {}),
-    },
-    include: {
-      author: { select: { id: true, name: true, image: true } },
-      attachments: {
-        select: {
-          id: true,
-          originalName: true,
-          mimeType: true,
-          sizeBytes: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "asc" },
       },
-    },
-  });
+      include: {
+        author: { select: { id: true, name: true, image: true } },
+        attachments: {
+          select: {
+            id: true,
+            originalName: true,
+            mimeType: true,
+            sizeBytes: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    }),
+    prisma.task.update({
+      where: { id: input.taskId },
+      data: { commentThreadVersion: { increment: 1 } },
+    }),
+  ]);
 
   createTaskActivity({
     taskId: input.taskId,
@@ -154,7 +164,14 @@ export async function updateTaskComment(
   const previousBody = getCommentBody(existingComment.content, existingComment.attachments);
   const updatedComment = await prisma.comment.update({
     where: { id: input.commentId },
-    data: { content },
+    data: {
+      content,
+      // CITADEL-e10 (finding 5): an in-place edit keeps the comment's
+      // createdAt, so the durable thread version — not any comment timestamp
+      // — is what invalidates stale AI summary caches. Bumped in the same
+      // write (single statement, atomic with the edit).
+      task: { update: { commentThreadVersion: { increment: 1 } } },
+    },
     include: {
       author: { select: { id: true, name: true, image: true } },
       attachments: {
@@ -201,4 +218,40 @@ export async function updateTaskComment(
   }).catch(() => {});
 
   return updatedComment;
+}
+
+export async function deleteTaskComment(
+  prisma: typeof import("@/lib/prisma").prisma,
+  input: {
+    taskId: string;
+    commentId: string;
+    actorId: string;
+  }
+) {
+  await requireTaskAccess(prisma, input.actorId, input.taskId, { permission: "task_comment" });
+  const existingComment = await prisma.comment.findUnique({
+    where: { id: input.commentId },
+    select: { id: true, taskId: true, authorId: true },
+  });
+
+  if (!existingComment || existingComment.taskId !== input.taskId) {
+    throw new Error("Comment not found");
+  }
+
+  if (existingComment.authorId !== input.actorId) {
+    throw new Error("You can only delete your own comments");
+  }
+
+  // CITADEL-e10 (finding 5): the comment-thread version bump commits
+  // atomically with the delete, so the AI summary cache compare-and-swap can
+  // never miss a deletion. (No outbound webhook yet: comment.deleted is not
+  // a subscribable event name — see src/lib/webhook-events.ts.)
+  return prisma.$transaction(async (tx) => {
+    const comment = await tx.comment.delete({ where: { id: input.commentId } });
+    await tx.task.update({
+      where: { id: input.taskId },
+      data: { commentThreadVersion: { increment: 1 } },
+    });
+    return comment;
+  });
 }

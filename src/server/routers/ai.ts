@@ -1431,30 +1431,34 @@ export const aiRouter = createTRPCRouter({
       const generatedAt = new Date().toISOString();
 
       // CITADEL-amv (finding 11): the provider call above can take a long
-      // time. Instead of unconditionally writing the summary and restoring
-      // the pre-call updatedAt (which rolled concurrent edits BACK and then
-      // served the stale summary off the restored cache key), the write is a
+      // time. Instead of unconditionally writing the summary, the write is a
       // compare-and-swap: it only lands while the task row still carries the
-      // exact updatedAt AND the exact newest comment observed at read time.
-      // On count 0 the task (or thread) changed under us — the just-computed
-      // summary is discarded without persisting and returned as uncached;
-      // the next request recomputes against the fresh content. updatedAt is
-      // set to its own current value to suppress the Prisma @updatedAt bump
-      // (storing a summary is not a task edit) — the CAS guarantees this is
-      // never a rollback. Content-hash keying means even a racing write
-      // could not serve a stale entry afterwards: validity is re-checked
-      // against current content on every read.
-      const latestComment = task.comments[0] ?? null;
+      // exact state observed at read time. On count 0 the task (or thread)
+      // changed under us — the just-computed summary is discarded without
+      // persisting and returned as uncached; the next request recomputes
+      // against the fresh content. updatedAt is pinned to its own current
+      // value to suppress the Prisma @updatedAt bump (storing a summary is
+      // not a task edit) — the CAS guarantees this is never a rollback.
+      // Content-hash keying means even a racing write could not serve a
+      // stale entry afterwards: validity is re-checked against current
+      // content on every read.
+      //
+      // CITADEL-e10 (finding 5): the thread half of the CAS is now the
+      // durable Task.commentThreadVersion counter (bumped by every comment
+      // create, edit, AND delete). The previous predicate — some comment
+      // still had the old newest createdAt and none a greater one — missed
+      // in-place edits of the newest comment (createdAt unchanged) and
+      // deletions of older comments, letting a summary computed from a
+      // since-changed thread land with persisted:true. updatedAt stays in
+      // the predicate because plain task edits (title/body/…) do not move
+      // the thread version; the version is additionally folded into the
+      // content hash so a persisted entry can never outlive the thread it
+      // was computed from.
       const cacheWrite = await ctx.prisma.task.updateMany({
         where: {
           id: input.taskId,
           updatedAt: task.updatedAt,
-          comments: latestComment
-            ? {
-                some: { createdAt: latestComment.createdAt },
-                none: { createdAt: { gt: latestComment.createdAt } },
-              }
-            : { none: {} },
+          commentThreadVersion: task.commentThreadVersion,
         },
         data: {
           aiSummary: {

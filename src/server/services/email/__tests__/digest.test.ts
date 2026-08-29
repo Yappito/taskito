@@ -284,7 +284,7 @@ describe("sendDueSoonDigests", () => {
     expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 
-  it("creates a durable pending claim before sending and closes it as succeeded", async () => {
+  it("creates a durable pending claim, flips it to sending before SMTP, and closes it as succeeded", async () => {
     const prisma = makePrisma({
       users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
       user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
@@ -295,9 +295,16 @@ describe("sendDueSoonDigests", () => {
 
     await sendDueSoonDigests(NOW, prisma as never);
 
-    // The claim row is created BEFORE the send — the uniqueness boundary.
+    // The claim row is created BEFORE the send — the uniqueness boundary —
+    // as pending: everything before SMTP is retry-safe.
     expect(prisma.emailDigestClaim.create).toHaveBeenCalledWith({
       data: { userId: "u1", dayUtc: "2026-08-29", status: "pending", attempts: 1 },
+    });
+    // CITADEL-e10 (finding 6): immediately before the SMTP call the claim
+    // enters the ambiguous "sending" state.
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29", status: "pending" },
+      data: { status: "sending" },
     });
     // …and durably closed out once SMTP accepted the message.
     expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
@@ -377,6 +384,77 @@ describe("sendDueSoonDigests", () => {
 
     expect(second).toEqual({ sent: 0, skipped: 1, retryable: 0 });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  // CITADEL-e10 (finding 6): SMTP is an external side effect a DB row cannot
+  // prove. If the durable succeeded-finalize write fails after SMTP accepted,
+  // the claim is stuck in "sending" — AMBIGUOUS. The chosen semantics are
+  // at-most-once: the next sweep must abandon the stale sending claim (failed
+  // at the attempt cap) instead of resending.
+  it("does not resend when the durable claim finalize fails after SMTP success — the stale sending claim is abandoned", async () => {
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+    // The durable claim finalize fails AFTER SMTP accepted the message.
+    prisma.emailDigestClaim.updateMany
+      .mockResolvedValueOnce({ count: 1 }) // pending → sending flip
+      .mockRejectedValueOnce(new Error("db down")); // succeeded finalize
+
+    const first = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(first).toEqual({ sent: 1, skipped: 0, retryable: 0 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // The claim is now stuck in "sending" — ambiguous.
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29", status: "pending" },
+      data: { status: "sending" },
+    });
+
+    // A later run the SAME day (past the stale window) finds the stale
+    // "sending" claim. It must NOT resend: at-most-once for the ambiguous
+    // case — the claim is abandoned (failed at the attempt cap) with a
+    // logged warning instead.
+    const staleSending = { userId: "u1", status: "sending", attempts: 1, updatedAt: new Date(NOW.getTime() - 1000) };
+    const later = new Date(NOW.getTime() + 3600_000);
+    prisma.emailDigestClaim.updateMany.mockReset();
+    prisma.emailDigestClaim.updateMany.mockResolvedValue({ count: 1 });
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([staleSending]) // claim preload
+      .mockResolvedValueOnce([]); // retryable sweep: the abandoned claim is terminal
+
+    const second = await sendDueSoonDigests(later, prisma as never);
+
+    expect(second).toEqual({ sent: 0, skipped: 1, retryable: 0 });
+    // Still exactly one send for this user/day — no duplicate digest.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(prisma.emailDigestClaim.updateMany).toHaveBeenCalledWith({
+      where: { userId: "u1", dayUtc: "2026-08-29", status: "sending" },
+      data: {
+        status: "failed",
+        attempts: DIGEST_CLAIM_MAX_ATTEMPTS,
+        lastError: expect.stringContaining("abandoned"),
+      },
+    });
+  });
+
+  it("skips a recipient whose fresh sending claim is owned by another replica", async () => {
+    const sendingClaim = { userId: "u1", status: "sending", attempts: 1, updatedAt: NOW };
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      claims: [sendingClaim],
+    });
+    prisma.emailDigestClaim.findMany
+      .mockResolvedValueOnce([sendingClaim]) // claim preload
+      .mockResolvedValueOnce([sendingClaim]); // retryable sweep: mid-flight elsewhere keeps the day open
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1, retryable: 1 });
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it("reclaims a failed claim on a later run of the same day and retries the send", async () => {

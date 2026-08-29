@@ -31,7 +31,7 @@ vi.mock("@/server/services/notifications", () => ({
   resolveMentionedUserIds,
 }));
 
-import { createTaskComment, updateTaskComment } from "../comment-service";
+import { createTaskComment, deleteTaskComment, updateTaskComment } from "../comment-service";
 
 describe("comment service", () => {
   beforeEach(() => {
@@ -57,6 +57,10 @@ describe("comment service", () => {
       comment: {
         create: vi.fn().mockResolvedValue(createdComment),
       },
+      // CITADEL-e10 (finding 5): the thread-version bump is a second op in
+      // the same array transaction as the create.
+      $transaction: vi.fn(async (ops: Array<Promise<unknown>>) => Promise.all(ops)),
+      task: { update: vi.fn().mockResolvedValue({}) },
     };
 
     await createTaskComment(prisma as never, {
@@ -98,6 +102,12 @@ describe("comment service", () => {
         }),
       })
     );
+    // The version bump commits atomically with the comment create.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.task.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: { commentThreadVersion: { increment: 1 } },
+    });
   });
 
   it("lets the author update comment text and notifies only newly mentioned users", async () => {
@@ -144,7 +154,12 @@ describe("comment service", () => {
     expect(prisma.comment.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "comment-1" },
-        data: { content: "Updated @alex and @sam" },
+        data: {
+          content: "Updated @alex and @sam",
+          // CITADEL-e10 (finding 5): in-place edits keep createdAt, so the
+          // durable thread version is bumped in the same write.
+          task: { update: { commentThreadVersion: { increment: 1 } } },
+        },
       })
     );
     expect(dispatchNotification).toHaveBeenCalledTimes(1);
@@ -227,8 +242,66 @@ describe("comment service", () => {
 
     expect(prisma.comment.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { content: "" },
+        data: {
+          content: "",
+          task: { update: { commentThreadVersion: { increment: 1 } } },
+        },
       })
     );
+  });
+
+  it("lets the author delete their own comment and bumps the thread version atomically", async () => {
+    const tx = {
+      comment: { delete: vi.fn().mockResolvedValue({ id: "comment-1", taskId: "task-1", authorId: "user-1" }) },
+      task: { update: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      comment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "comment-1",
+          taskId: "task-1",
+          authorId: "user-1",
+        }),
+      },
+      // CITADEL-e10 (finding 5): the version bump must commit in the SAME
+      // transaction as the delete so the AI summary cache CAS can never miss
+      // a deletion.
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(tx)),
+    };
+
+    const deleted = await deleteTaskComment(prisma as never, {
+      taskId: "task-1",
+      commentId: "comment-1",
+      actorId: "user-1",
+    });
+
+    expect(deleted).toMatchObject({ id: "comment-1" });
+    expect(tx.comment.delete).toHaveBeenCalledWith({ where: { id: "comment-1" } });
+    expect(tx.task.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: { commentThreadVersion: { increment: 1 } },
+    });
+  });
+
+  it("rejects deletes from non-authors", async () => {
+    const prisma = {
+      comment: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "comment-1",
+          taskId: "task-1",
+          authorId: "user-2",
+        }),
+      },
+      $transaction: vi.fn(),
+    };
+
+    await expect(
+      deleteTaskComment(prisma as never, {
+        taskId: "task-1",
+        commentId: "comment-1",
+        actorId: "user-1",
+      })
+    ).rejects.toThrow("You can only delete your own comments");
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

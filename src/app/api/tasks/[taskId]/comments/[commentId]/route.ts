@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { bearerSessionFromIdentity, resolveBearerToken } from "@/server/services/api-tokens";
-import { updateTaskComment } from "@/server/services/comment-service";
+import { updateTaskComment, deleteTaskComment } from "@/server/services/comment-service";
 import type { Session } from "next-auth";
 
 export async function PATCH(
@@ -37,6 +37,38 @@ export async function PATCH(
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unable to update comment" },
+      { status: 400 }
+    );
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ taskId: string; commentId: string }> }
+) {
+  let session: Session | null = await auth();
+  if (!session?.user?.id) {
+    // Personal API tokens: fall back to `Authorization: Bearer tk_…`
+    const identity = await resolveBearerToken(prisma, request.headers);
+    session = identity ? bearerSessionFromIdentity(identity) : null;
+  }
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { taskId, commentId } = await context.params;
+
+  try {
+    const comment = await deleteTaskComment(prisma, {
+      taskId,
+      commentId,
+      actorId: session.user.id,
+    });
+
+    return NextResponse.json({ comment });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unable to delete comment" },
       { status: 400 }
     );
   }

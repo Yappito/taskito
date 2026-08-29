@@ -87,11 +87,27 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
         rule.dayOfMonth ?? null,
       );
 
-      // The next occurrence would be past the end date: the plain advance
-      // (a standalone CAS — no task is created for this occurrence, so there
-      // is no claim/create gap to protect) retires it. A crash here simply
-      // re-runs the retirement on the next tick.
-      if (rule.endDate && nextDueDate > rule.endDate) {
+      // CITADEL-e10 (finding 9): distinguish two end-date situations.
+      //
+      //  - The CURRENT occurrence (rule.nextDueDate) is already beyond the
+      //    end date: nothing to create — retire the rule with a standalone
+      //    advance (a plain CAS with no task creation, so there is no
+      //    claim/create gap to protect). Unreachable through this function's
+      //    own query, which only returns rules with nextDueDate <= now <=
+      //    endDate, but guarded against pre-existing data drift and direct
+      //    invocation. A crash here simply re-runs the retirement on the
+      //    next tick.
+      //
+      //  - Only the FOLLOWING occurrence (nextDueDate below) would land
+      //    beyond the end date: the current occurrence is still valid
+      //    (rule.nextDueDate <= endDate) and MUST get its task created. The
+      //    previous code retired here WITHOUT creating the current task,
+      //    silently dropping the final occurrence. Now the flow falls
+      //    through to the ordinary claim+create transaction below; because
+      //    the claimed advance moves nextDueDate past endDate, the rule is
+      //    retired by that very claim — inside the same transaction as the
+      //    task creation, so a crash rolls both back together.
+      if (rule.endDate && rule.nextDueDate > rule.endDate) {
         await prisma.recurrenceRule.updateMany({
           where: { id: rule.id, nextDueDate: rule.nextDueDate },
           data: { nextDueDate },

@@ -426,8 +426,15 @@ model Task {
   alertAcknowledged Boolean      @default(false)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
-  // CITADEL-d77.32: cached AI task summary — { generatedAt, forUpdatedAt, forLatestCommentAt, result }
+  // CITADEL-d77.32: cached AI task summary — { generatedAt, forContentHash, result }
   aiSummary         Json?
+  // CITADEL-e10 (finding 5): durable comment-thread version, incremented on
+  // every comment create, edit, and delete for this task. Comment mutations
+  // can leave both task.updatedAt and the newest comment createdAt untouched
+  // (an in-place edit keeps its createdAt; deleting an older comment moves
+  // neither), so the AI summary cache compare-and-swap keys on this counter
+  // instead of a comment-time predicate.
+  commentThreadVersion Int       @default(0)
 
   project               Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
   creator               User?                  @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: SetNull)
@@ -1185,8 +1192,13 @@ model EmailDigestClaim {
   @@index([dayUtc, status])
 }
 
+// CITADEL-e10 (finding 6): 'sending' marks the ambiguous window around the
+// external SMTP call (see src/server/services/email/digest.ts). A claim found
+// stale in this state must never be resent — SMTP may already have accepted
+// the message — so it is abandoned (failed at the attempt cap) instead.
 enum EmailDigestClaimStatus {
   pending
   succeeded
   failed
+  sending
 }
