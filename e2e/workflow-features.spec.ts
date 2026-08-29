@@ -1,21 +1,42 @@
 import { test, expect } from "@playwright/test";
 
-import { createTask, goToDefaultProject, login, openBoardTaskDetail, switchToView, todayPlus, uniqueName } from "./helpers";
+import { createTask, expectTaskDetailOpen, goToDefaultProject, login, openBoardTaskDetail, switchToView, todayPlus, uniqueName } from "./helpers";
 
 test.describe("Workflow feature coverage", () => {
   test.beforeEach(async ({ page }) => {
     await login(page);
   });
 
-  test("dashboard renders analytics cards and sections", async ({ page }) => {
+  test("dashboard supports custom dashboards with metric widgets", async ({ page }) => {
     await goToDefaultProject(page);
-    await expect(page.getByText("Project dashboard")).toBeVisible();
-    await expect(page.getByText("Total")).toBeVisible();
-    await expect(page.getByText("Active")).toBeVisible();
-    await expect(page.getByText("Completed")).toBeVisible();
-    await expect(page.getByText("Status distribution")).toBeVisible();
-    await expect(page.getByText("7-day velocity")).toBeVisible();
-    await expect(page.getByText("At-risk tasks")).toBeVisible();
+    await switchToView(page, "dashboard");
+
+    await expect(page.getByRole("heading", { name: "Custom dashboards" })).toBeVisible();
+
+    const dashboardName = uniqueName("Team Dashboard");
+    const widgetTitle = uniqueName("Task count widget");
+
+    // Start a fresh dashboard regardless of dashboards left by previous runs
+    // (the view auto-selects the first existing dashboard on load).
+    await page.getByRole("button", { name: "New dashboard", exact: true }).click();
+
+    const createPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: "Create dashboard", exact: true }) });
+    await createPanel.locator("input").first().fill(dashboardName);
+    await createPanel.getByRole("button", { name: "Create dashboard", exact: true }).click();
+
+    // Creating selects the dashboard and flips the side panel to permissions.
+    await expect(page.getByRole("heading", { name: "Dashboard permissions" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("option", { hasText: dashboardName }).first()).toBeAttached();
+
+    // Add a metric widget counting all active project tasks.
+    const widgetPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: "Add widget", exact: true }) });
+    await widgetPanel.locator("input").first().fill(widgetTitle);
+    await widgetPanel.locator("select").first().selectOption({ label: "Metric" });
+    await widgetPanel.getByRole("button", { name: "Add widget", exact: true }).click();
+
+    const widgetCard = page.locator("section").filter({ has: page.getByRole("heading", { name: widgetTitle }) });
+    await expect(widgetCard).toBeVisible({ timeout: 10_000 });
+    await expect(widgetCard.locator(".text-5xl")).toHaveText(/\d+/);
   });
 
   test("calendar view shows month navigation and due-date tasks", async ({ page }) => {
@@ -55,7 +76,7 @@ test.describe("Workflow feature coverage", () => {
     expect(overflowCount).toBe(0);
 
     await bars.first().click();
-    await expect(page.getByText("Task Detail")).toBeVisible();
+    await expectTaskDetailOpen(page);
   });
 
   test("sprint view can create and advance a sprint lifecycle", async ({ page }) => {
@@ -179,6 +200,6 @@ test.describe("Workflow feature coverage", () => {
     expect(taskId).toBeTruthy();
 
     await goToDefaultProject(page, `?task=${taskId}`);
-    await expect(page.getByText("Task Detail")).toBeVisible({ timeout: 10_000 });
+    await expectTaskDetailOpen(page);
   });
 });

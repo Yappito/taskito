@@ -230,8 +230,8 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
         open={open}
         onClose={() => setOpen(false)}
         panelClassName="max-h-[min(88vh,56rem)] max-w-[min(92vw,72rem)]"
+        title="New Task"
       >
-        <h2 className="mb-4 text-lg font-semibold" style={{ color: "var(--color-text)" }}>New Task</h2>
         {submitError && (
           <Alert variant="danger" className="mb-4">
             {submitError}

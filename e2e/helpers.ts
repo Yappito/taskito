@@ -79,8 +79,12 @@ export async function createTask(page: Page, options: {
   templateToUse?: string;
   customFieldValues?: Record<string, string>;
 }) {
+  // The QuickAdd dialog exposes an accessible name via its Dialog title, so
+  // locators can be scoped to the dialog (avoids "Create Task"/"Cancel"
+  // substring collisions with page chrome and task-card buttons).
+  const dialog = page.getByRole("dialog", { name: "New Task" });
   await page.getByRole("button", { name: /New Task/i }).click();
-  await expect(page.getByRole("heading", { name: "New Task" })).toBeVisible();
+  await expect(dialog).toBeVisible();
 
   if (options.templateToUse) {
     await page.locator('select').first().selectOption({ label: options.templateToUse });
@@ -110,11 +114,11 @@ export async function createTask(page: Page, options: {
   }
 
   for (const tagName of options.tagNames ?? []) {
-    await page.locator("label", { hasText: tagName }).locator('input[type="checkbox"]').check();
+    await dialog.locator("label", { hasText: tagName }).locator('input[type="checkbox"]').check();
   }
 
   for (const [fieldName, value] of Object.entries(options.customFieldValues ?? {})) {
-    const fieldLabel = page.locator("label", {
+    const fieldLabel = dialog.locator("label", {
       hasText: new RegExp(`^${escapeRegex(fieldName)}(?:\\s*\\*)?$`),
     }).first();
     const input = fieldLabel
@@ -125,19 +129,18 @@ export async function createTask(page: Page, options: {
   }
 
   if (options.saveAsTemplate) {
-    await page.locator("label", { hasText: "Save this draft as a reusable template" }).locator('input[type="checkbox"]').check();
-    await page.getByPlaceholder("Template name").fill(options.saveAsTemplate);
+    await dialog.locator("label", { hasText: "Save this draft as a reusable template" }).locator('input[type="checkbox"]').check();
+    await dialog.getByPlaceholder("Template name").fill(options.saveAsTemplate);
   }
 
-  await page.getByRole("button", { name: "Create Task" }).click();
+  await dialog.getByRole("button", { name: "Create Task" }).click();
   await page.waitForTimeout(1000);
 
-  const dialogHeading = page.getByRole("heading", { name: "New Task" });
-  if (await dialogHeading.isVisible().catch(() => false)) {
-    await page.getByRole("button", { name: "Cancel" }).click();
+  if (await dialog.isVisible().catch(() => false)) {
+    await dialog.getByRole("button", { name: "Cancel" }).click();
   }
 
-  await expect(dialogHeading).not.toBeVisible({ timeout: 10_000 });
+  await expect(dialog).not.toBeVisible({ timeout: 10_000 });
 }
 
 export async function openBoardTaskDetail(page: Page, title: string) {
@@ -150,6 +153,39 @@ export async function openBoardTaskDetail(page: Page, title: string) {
 
 export function taskDetailPanel(page: Page): Locator {
   return page.locator(".fixed.inset-y-0.right-0").first();
+}
+
+/**
+ * Assert the task detail side panel is open.
+ *
+ * The panel header renders a "Task Detail" eyebrow label, but task cards whose
+ * titles merely contain "Task Detail" can be visible on the page at the same
+ * time, so the label is matched exactly inside the panel.
+ */
+export async function expectTaskDetailOpen(page: Page, timeout = 10_000): Promise<void> {
+  const detail = taskDetailPanel(page);
+  await expect(detail).toBeVisible({ timeout });
+  await expect(detail.getByText("Task Detail", { exact: true })).toBeVisible({ timeout });
+}
+
+/**
+ * Click the first element matching `locator` that is not covered by another
+ * element. Floating panels (task filters, toolbar, mini-map) overlay parts of
+ * the graph canvas, so fixed indices can be unclickable; Playwright rejects
+ * covered clicks, and we walk candidates until one lands.
+ */
+export async function clickFirstClickable(page: Page, locator: Locator, timeout = 2_500): Promise<Locator> {
+  const count = await locator.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    try {
+      await candidate.click({ timeout });
+      return candidate;
+    } catch {
+      // Covered by an overlay — try the next candidate.
+    }
+  }
+  throw new Error(`No clickable element found for locator: ${locator}`);
 }
 
 export async function closeTaskDetail(page: Page) {
