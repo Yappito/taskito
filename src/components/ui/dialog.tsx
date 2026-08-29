@@ -1,3 +1,5 @@
+"use client";
+
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
@@ -9,7 +11,7 @@ function DialogOverlay({
   return (
     <div
       className={cn(
-        "fixed inset-0 z-50 bg-black/50 backdrop-blur-sm",
+        "fixed inset-0 z-50 bg-[var(--color-overlay)] backdrop-blur-sm",
         className
       )}
       {...props}
@@ -23,14 +25,23 @@ function Dialog({
   onClose,
   children,
   panelClassName,
+  title,
+  description,
 }: {
   open: boolean;
   onClose: () => void;
-  children: React.ReactNode;
+  /** Optional: a dialog may consist of only its title/description */
+  children?: React.ReactNode;
   panelClassName?: string;
+  /** Optional heading rendered inside the panel and linked via aria-labelledby */
+  title?: React.ReactNode;
+  /** Optional description rendered under the title and linked via aria-describedby */
+  description?: React.ReactNode;
 }) {
   const panelRef = React.useRef<HTMLDivElement>(null);
   const onCloseRef = React.useRef(onClose);
+  const headingId = React.useId();
+  const descriptionId = React.useId();
 
   React.useEffect(() => {
     onCloseRef.current = onClose;
@@ -114,6 +125,8 @@ function Dialog({
           ref={panelRef}
           role="dialog"
           aria-modal="true"
+          aria-labelledby={title != null ? headingId : undefined}
+          aria-describedby={description != null ? descriptionId : undefined}
           tabIndex={-1}
           className={cn("relative max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg p-6 shadow-xl", panelClassName)}
           style={{
@@ -123,6 +136,28 @@ function Dialog({
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          {(title != null || description != null) && (
+            <div className="mb-4">
+              {title != null && (
+                <h2
+                  id={headingId}
+                  className="text-lg font-semibold"
+                  style={{ color: "var(--color-text)" }}
+                >
+                  {title}
+                </h2>
+              )}
+              {description != null && (
+                <p
+                  id={descriptionId}
+                  className="mt-1 text-sm"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  {description}
+                </p>
+              )}
+            </div>
+          )}
           {children}
         </div>
       </div>
@@ -138,14 +173,24 @@ function DialogControlled({
   onOpenChange,
   children,
   panelClassName,
+  title,
+  description,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  children: React.ReactNode;
+  children?: React.ReactNode;
   panelClassName?: string;
+  title?: React.ReactNode;
+  description?: React.ReactNode;
 }) {
   return (
-    <Dialog open={open} onClose={() => onOpenChange(false)} panelClassName={panelClassName}>
+    <Dialog
+      open={open}
+      onClose={() => onOpenChange(false)}
+      panelClassName={panelClassName}
+      title={title}
+      description={description}
+    >
       {children}
     </Dialog>
   );

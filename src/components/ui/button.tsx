@@ -8,8 +8,8 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-[var(--color-accent)] text-white shadow hover:bg-[var(--color-accent-hover)]",
-        destructive: "bg-[var(--color-danger)] text-white shadow-sm hover:opacity-90",
+        default: "bg-[var(--color-accent)] text-[var(--color-on-accent)] shadow hover:bg-[var(--color-accent-hover)]",
+        destructive: "bg-[var(--color-danger)] text-[var(--color-on-accent)] shadow-sm hover:opacity-90",
         outline: "border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm hover:bg-[var(--color-surface-hover)]",
         secondary: "bg-[var(--color-bg-muted)] text-[var(--color-text)] shadow-sm hover:bg-[var(--color-surface-active)]",
         ghost: "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]",
@@ -35,13 +35,14 @@ export interface ButtonProps
   asChild?: boolean;
 }
 
-/** Reusable button component with variants */
+/** Reusable button component with variants. Defaults to type="button" unless overridden. */
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, type, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
     return (
       <Comp
         className={cn(buttonVariants({ variant, size, className }))}
+        type={asChild ? type : type ?? "button"}
         ref={ref}
         {...props}
       />
