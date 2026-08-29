@@ -1,0 +1,294 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const {
+  processDueRecurrences,
+  processDueDateAutomationRules,
+  prismaMock,
+} = vi.hoisted(() => ({
+  processDueRecurrences: vi.fn(),
+  processDueDateAutomationRules: vi.fn(),
+  prismaMock: {
+    $transaction: vi.fn(),
+    automationRule: {
+      findMany: vi.fn(),
+    },
+    projectMember: {
+      findFirst: vi.fn(),
+    },
+  },
+}));
+
+vi.mock("@/server/services/recurrence-processor", () => ({
+  processDueRecurrences,
+}));
+
+vi.mock("@/server/services/automation-evaluator", () => ({
+  processDueDateAutomationRules,
+}));
+
+vi.mock("@/lib/prisma", () => ({
+  prisma: prismaMock,
+}));
+
+import {
+  SCHEDULER_ADVISORY_LOCK_KEY,
+  getSchedulerIntervalMs,
+  isSchedulerEnabled,
+  resolveProjectActorId,
+  runScheduledJobs,
+  startScheduler,
+  stopScheduler,
+} from "@/server/services/scheduler";
+
+const NOW = new Date("2026-05-19T09:00:00.000Z");
+const INTERVAL_MS = 60_000;
+const DEFAULT_TICK_TIMEOUT_MS = 600_000;
+
+const PROJECT_A = "cmab8yxxp0001i7p4k8n2v3q4";
+const PROJECT_B = "cmab8yxxp0002i7p4k8n2v3q5";
+const OWNER_ID = "cmab8yxxp0003i7p4k8n2v3q6";
+const MEMBER_ID = "cmab8yxxp0004i7p4k8n2v3q7";
+
+// Stand-in for the interactive-transaction client Prisma hands to the callback.
+// The advisory lock query runs on the tx connection; the jobs keep using the
+// global prisma mock (prismaMock).
+let txMock: { $queryRaw: ReturnType<typeof vi.fn> };
+
+function sqlText(call: unknown[]) {
+  const sql = call[0] as { sql?: string; text?: string; values?: unknown[] };
+  const values = Array.from(sql.values ?? []).map((value) => String(value));
+  return `${sql.text ?? sql.sql ?? String(call[0])} (${values.join(", ")})`;
+}
+
+function lockCalls() {
+  return txMock.$queryRaw.mock.calls.filter((call) => sqlText(call).includes("pg_try_advisory_xact_lock"));
+}
+
+function transactionOptions() {
+  return prismaMock.$transaction.mock.calls.at(-1)?.[1];
+}
+
+describe("scheduler", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    vi.clearAllMocks();
+    process.env.SCHEDULER_ENABLED = "true";
+    delete process.env.SCHEDULER_INTERVAL_MS;
+    delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+
+    txMock = { $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) };
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => unknown) => callback(txMock));
+    prismaMock.automationRule.findMany.mockResolvedValue([{ projectId: PROJECT_A }]);
+    prismaMock.projectMember.findFirst.mockResolvedValue({ userId: OWNER_ID });
+    processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
+    processDueDateAutomationRules.mockResolvedValue({ processed: 0 });
+  });
+
+  afterEach(() => {
+    stopScheduler();
+    delete process.env.SCHEDULER_ENABLED;
+    delete process.env.SCHEDULER_INTERVAL_MS;
+    delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    vi.useRealTimers();
+  });
+
+  describe("runScheduledJobs", () => {
+    it("takes the transaction-scoped advisory lock and runs both processors once", async () => {
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+      expect(lockCalls()).toHaveLength(1);
+      const lockSql = sqlText(lockCalls()[0]);
+      expect(lockSql).toContain("pg_try_advisory_xact_lock");
+      expect(lockSql).toContain(String(SCHEDULER_ADVISORY_LOCK_KEY));
+      expect(lockSql).not.toContain("pg_advisory_unlock");
+      expect(lockSql).not.toContain("pg_try_advisory_lock(");
+      expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100 });
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+      expect(processDueDateAutomationRules).toHaveBeenCalledWith(prismaMock, { projectId: PROJECT_A, actorId: OWNER_ID });
+    });
+
+    it("passes the transaction options with the tick timeout", async () => {
+      await runScheduledJobs();
+
+      expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+        maxWait: 5000,
+        timeout: DEFAULT_TICK_TIMEOUT_MS,
+      });
+    });
+
+    it("honours SCHEDULER_TICK_TIMEOUT_MS for the transaction timeout", async () => {
+      process.env.SCHEDULER_TICK_TIMEOUT_MS = "30000";
+
+      await runScheduledJobs();
+
+      expect(transactionOptions()).toEqual({ maxWait: 5000, timeout: 30000 });
+    });
+
+    it("skips the tick when another instance holds the lock", async () => {
+      txMock.$queryRaw.mockResolvedValue([{ locked: false }]);
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(lockCalls()).toHaveLength(1);
+      expect(processDueRecurrences).not.toHaveBeenCalled();
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+      expect(prismaMock.automationRule.findMany).not.toHaveBeenCalled();
+    });
+
+    it("skips the tick when the lock query fails", async () => {
+      txMock.$queryRaw.mockRejectedValue(new Error("database unavailable"));
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(processDueRecurrences).not.toHaveBeenCalled();
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+    });
+
+    it("still runs due-date automation when the recurrence processor throws", async () => {
+      processDueRecurrences.mockRejectedValue(new Error("recurrence exploded"));
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+    });
+
+    it("still runs recurrences when due-date automation throws", async () => {
+      processDueDateAutomationRules.mockRejectedValue(new Error("automation exploded"));
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs due-date automation per project and isolates per-project failures", async () => {
+      prismaMock.automationRule.findMany.mockResolvedValue([{ projectId: PROJECT_A }, { projectId: PROJECT_B }]);
+      processDueDateAutomationRules
+        .mockRejectedValueOnce(new Error("project A is broken"))
+        .mockResolvedValueOnce({ processed: 3 });
+
+      await runScheduledJobs();
+
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(2);
+      expect(processDueDateAutomationRules).toHaveBeenNthCalledWith(
+        2,
+        prismaMock,
+        { projectId: PROJECT_B, actorId: OWNER_ID },
+      );
+    });
+  });
+
+  describe("actor resolution", () => {
+    it("uses the project owner member (role owner) as the automation actor", async () => {
+      prismaMock.projectMember.findFirst.mockResolvedValue({ userId: OWNER_ID });
+
+      const actorId = await resolveProjectActorId(prismaMock as never, PROJECT_A);
+
+      expect(prismaMock.projectMember.findFirst).toHaveBeenCalledWith({
+        where: { projectId: PROJECT_A, role: "owner" },
+        orderBy: { createdAt: "asc" },
+        select: { userId: true },
+      });
+      expect(actorId).toBe(OWNER_ID);
+
+      prismaMock.automationRule.findMany.mockResolvedValue([{ projectId: PROJECT_A }]);
+      await runScheduledJobs();
+      expect(processDueDateAutomationRules).toHaveBeenCalledWith(prismaMock, { projectId: PROJECT_A, actorId: OWNER_ID });
+    });
+
+    it("falls back to the earliest project member when no owner role exists", async () => {
+      prismaMock.projectMember.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ userId: MEMBER_ID });
+
+      const actorId = await resolveProjectActorId(prismaMock as never, PROJECT_A);
+
+      expect(actorId).toBe(MEMBER_ID);
+    });
+
+    it("skips projects that have no members to act with", async () => {
+      prismaMock.projectMember.findFirst.mockResolvedValue(null);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      prismaMock.automationRule.findMany.mockResolvedValue([{ projectId: PROJECT_A }]);
+
+      await runScheduledJobs();
+
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler]"));
+      warnSpy.mockRestore();
+    });
+  });
+
+  it("is started by startScheduler and ticks on the configured interval", async () => {
+    process.env.SCHEDULER_INTERVAL_MS = "1000";
+    startScheduler();
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lockCalls()).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(lockCalls()).toHaveLength(1);
+    expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+    expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(lockCalls()).toHaveLength(2);
+    expect(processDueRecurrences).toHaveBeenCalledTimes(2);
+  });
+
+  it("is idempotent under repeated startScheduler calls (hot reload)", async () => {
+    startScheduler();
+    startScheduler();
+    startScheduler();
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+
+    expect(lockCalls()).toHaveLength(1);
+    expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not schedule anything when SCHEDULER_ENABLED is false", async () => {
+    process.env.SCHEDULER_ENABLED = "false";
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    startScheduler();
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS * 5);
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    expect(processDueRecurrences).not.toHaveBeenCalled();
+    expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+    expect(isSchedulerEnabled()).toBe(false);
+    infoSpy.mockRestore();
+  });
+
+  it("defaults to enabled and to a 60000ms interval", () => {
+    delete process.env.SCHEDULER_ENABLED;
+    delete process.env.SCHEDULER_INTERVAL_MS;
+    expect(isSchedulerEnabled()).toBe(true);
+    expect(getSchedulerIntervalMs()).toBe(INTERVAL_MS);
+  });
+
+  it("clamps implausibly small intervals to 1000ms", () => {
+    process.env.SCHEDULER_INTERVAL_MS = "5";
+    expect(getSchedulerIntervalMs()).toBe(1000);
+  });
+
+  it("picks up stopScheduler to clear the running timer", async () => {
+    startScheduler();
+    stopScheduler();
+
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS * 3);
+
+    expect(lockCalls()).toHaveLength(0);
+  });
+});

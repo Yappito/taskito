@@ -210,6 +210,44 @@ Uploads can also be stored in S3-compatible object storage instead of the local 
 
 Task comment attachments and profile images are still served through authenticated Taskito routes. Each stored file records its storage backend, bucket, and object key in the database, so restoring the database and reconnecting the same S3 bucket restores access to S3-backed files.
 
+## Scheduling
+
+Two features are time-driven and need a scheduler: recurring tasks (the next occurrence is created automatically) and automation rules with the `dueDatePassed` trigger. Both can run through two interchangeable paths:
+
+### Built-in in-process scheduler (default)
+
+The production container runs a small in-process scheduler via Next.js instrumentation (`src/instrumentation.ts`). On every tick it:
+
+1. Opens an interactive transaction and takes a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`, `src/server/services/scheduler.ts`) inside it, so in multi-replica deployments only one instance actually runs jobs — the others skip the tick. The lock lives on the transaction's own connection and is released automatically at commit/rollback, so it cannot leak on a pool connection.
+2. Processes due recurrence rules (creates the next recurring tasks).
+3. Runs `dueDatePassed` automation rules for every project that has them enabled. Actions are attributed to the project owner (the `owner`-role project member), since automation rules do not store a creator.
+
+Failures are logged with a `[scheduler]` prefix (without secrets) and never abort the remaining jobs. The scheduler is enabled by default and can be configured with:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SCHEDULER_ENABLED` | `true` | Set to `false` to disable the built-in scheduler (e.g. when you prefer an external cron) |
+| `SCHEDULER_INTERVAL_MS` | `60000` | Tick interval in milliseconds; values below `1000` are clamped to `1000` |
+| `SCHEDULER_TICK_TIMEOUT_MS` | `600000` | Maximum duration of one tick; the tick's advisory-lock transaction is aborted when exceeded |
+
+The scheduler runs inside the web process, so no extra container or worker is needed. It only starts in the Node.js runtime on server boot — never during `next build`.
+
+### External cron (optional)
+
+If you prefer your own scheduler (system crontab, Kubernetes CronJob, etc.), set `SCHEDULER_ENABLED=false` and schedule a POST against the cron endpoint:
+
+```bash
+curl -X POST -H "Authorization: Bearer $CRON_SECRET" https://your-taskito-host/api/cron/process-recurring
+```
+
+| Variable | Notes |
+|---|---|
+| `CRON_SECRET` | Bearer token for the cron endpoint. With it unset the endpoint answers `503`; with a wrong token `401` |
+
+Both task recurrence and due-date automation can also be triggered manually from Project settings → Automation ("Process due-date rules") and from the recurring-task controls.
+
+Prefer running exactly one path: leave the built-in scheduler on and skip the cron job, or disable the built-in scheduler with `SCHEDULER_ENABLED=false` and drive jobs externally.
+
 ## Operations
 
 Useful commands from the repository root:
@@ -264,6 +302,9 @@ Useful commands from the repository root:
 | `STORAGE_S3_SESSION_TOKEN` | No | Optional temporary credentials session token |
 | `STORAGE_S3_FORCE_PATH_STYLE` | No | Set `true` for S3-compatible services that need path-style URLs |
 | `STORAGE_S3_PREFIX` | No | Optional object key prefix, e.g. `taskito/prod` |
+| `SCHEDULER_ENABLED` | No | In-process scheduler for recurrences + due-date automation; defaults to `true` — set `false` to rely only on the external cron endpoint |
+| `SCHEDULER_INTERVAL_MS` | No | Scheduler tick interval in milliseconds; defaults to `60000` (values below 1000 clamp to 1000) |
+| `CRON_SECRET` | No | Bearer token for `POST /api/cron/process-recurring`; unset keeps that endpoint disabled (503) |
 
 ### Rotating the secret encryption key (`AI_SECRET_MASTER_KEY`)
 
