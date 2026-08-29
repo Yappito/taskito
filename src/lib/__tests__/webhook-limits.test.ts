@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_WEBHOOK_DELIVERY_LEASE_MS,
   DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH,
+  DEFAULT_WEBHOOK_LEASE_MARGIN_MS,
   DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS,
   DEFAULT_WEBHOOK_TIMEOUT_MS,
   WEBHOOK_TIMEOUT_MS,
@@ -10,6 +11,7 @@ import {
   webhookDeliveryLeaseMs,
   webhookDeliveryPreflightDeadlineMs,
   webhookDeliveryQueueMaxDepth,
+  webhookLeaseMarginMs,
   webhookRequestTimeoutMs,
 } from "@/lib/webhook-limits";
 
@@ -64,6 +66,22 @@ describe("webhook delivery limits", () => {
     expect(webhookDeliveryQueueMaxDepth()).toBe(7);
     vi.stubEnv("WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH", "999999");
     expect(webhookDeliveryQueueMaxDepth()).toBe(DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH);
+  });
+
+  it("defaults the lease-renewal margin to 5s and clamps invalid values (wave-9 finding 1)", () => {
+    expect(DEFAULT_WEBHOOK_LEASE_MARGIN_MS).toBe(5_000);
+    delete process.env.WEBHOOK_LEASE_MARGIN_MS;
+    expect(webhookLeaseMarginMs()).toBe(5_000);
+    // 0 is legal (lease exactly equals the POST timeout) but negatives and
+    // out-of-range values fall back to the default.
+    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "0");
+    expect(webhookLeaseMarginMs()).toBe(0);
+    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "-5");
+    expect(webhookLeaseMarginMs()).toBe(5_000);
+    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "60001");
+    expect(webhookLeaseMarginMs()).toBe(5_000);
+    vi.stubEnv("WEBHOOK_LEASE_MARGIN_MS", "20000");
+    expect(webhookLeaseMarginMs()).toBe(20_000);
   });
 
   it("ships the queue-depth default the .env.example documents (100) so code and docs agree", () => {

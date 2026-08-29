@@ -35,6 +35,10 @@ import {
   DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS,
   schedulerLockTransactionTimeoutMs,
 } from "@/server/services/scheduler-lock-connection";
+import {
+  DEFAULT_TICK_TIMEOUT_MS,
+  SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS,
+} from "@/server/services/scheduler-deadline";
 
 function lastClient(): ClientStub {
   const result = PrismaClientMock.mock.results.at(-1);
@@ -168,6 +172,52 @@ describe("scheduler lock connection", () => {
     expect(schedulerLockTransactionTimeoutMs()).toBe(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler-lock] invalid SCHEDULER_LOCK_TX_TIMEOUT_MS"));
     warnSpy.mockRestore();
+  });
+
+  // Wave-9 finding 2: a lock-transaction timeout BELOW the tick budget arms
+  // Prisma to release the advisory lock (and the cross-replica exclusion)
+  // while the tick's jobs are still live — the answer to "how long may a run
+  // last" would then be unrelated to "how long may the work run". The clamp
+  // floors the timeout at tick budget + safety margin, raising a too-low
+  // configured value with a warning.
+  it("clamps a too-low SCHEDULER_LOCK_TX_TIMEOUT_MS up to the tick deadline + safety margin (wave-9 finding 2)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+      // Valid per the 60s minimum, but far below the 10min tick + 5min margin.
+      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "60000";
+      expect(schedulerLockTransactionTimeoutMs()).toBe(DEFAULT_TICK_TIMEOUT_MS + SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS);
+      expect(schedulerLockTransactionTimeoutMs()).toBe(900_000);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("below the tick deadline + safety margin"));
+
+      // The floor tracks the ACTUAL tick budget: a bigger tick deadline
+      // raises the floor with it.
+      process.env.SCHEDULER_TICK_TIMEOUT_MS = "3600000"; // 1h tick budget
+      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "1800000"; // 30min — below 1h + 5min
+      expect(schedulerLockTransactionTimeoutMs()).toBe(3_900_000);
+
+      // A configured value ABOVE the floor passes through untouched.
+      process.env.SCHEDULER_TICK_TIMEOUT_MS = "60000"; // 1min tick budget → floor 6min
+      process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "7200000";
+      expect(schedulerLockTransactionTimeoutMs()).toBe(7_200_000);
+      warnSpy.mockRestore();
+    } finally {
+      warnSpy.mockRestore();
+      delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    }
+  });
+
+  it("raises even the DEFAULT lock-transaction timeout when the tick budget would outlast it (wave-9 finding 2)", () => {
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
+    // A pathological 24h+ tick budget must not run on a 24h lock tx timeout.
+    process.env.SCHEDULER_TICK_TIMEOUT_MS = String(25 * 60 * 60 * 1000);
+    try {
+      expect(schedulerLockTransactionTimeoutMs()).toBe(
+        Math.max(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS, 25 * 60 * 60 * 1000 + SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS),
+      );
+    } finally {
+      delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    }
   });
 
   it("pins ONE interactive $transaction per run: try-lock inside it, callback awaited inside it", async () => {

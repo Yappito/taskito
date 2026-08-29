@@ -61,6 +61,10 @@ export const recurrenceRouter = createTRPCRouter({
           dayOfMonth: input.dayOfMonth ?? null,
           endDate: input.endDate ?? null,
           nextDueDate: input.nextDueDate,
+          // An explicit re-save reactivates the rule: a wave-9 dead-rule
+          // retirement (terminal retiredAt) must not survive an operator
+          // re-configuring the recurrence.
+          retiredAt: null,
         },
       });
     }),

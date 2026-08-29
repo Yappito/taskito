@@ -16,6 +16,7 @@ import {
   webhookDeliveryLeaseMs,
   webhookDeliveryPreflightDeadlineMs,
   webhookDeliveryQueueMaxDepth,
+  webhookLeaseMarginMs,
   webhookRequestTimeoutMs,
 } from "@/lib/webhook-limits";
 
@@ -75,10 +76,24 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *  - before decrypt/sign/POST, the delivery re-checks that the webhook's
  *    creator STILL holds `automation_manage` + `task_read` on the project and
  *    is not disabled (fail closed) — an already-queued delivery must not keep
- *    POSTing task metadata after its creator lost read access;
+ *    POSTing task metadata after its creator lost read access. The check runs
+ *    under a deadline (the preflight budget) so a slow/stalled authz query
+ *    cannot stall the worker indefinitely; a deadline hit fails closed (no
+ *    POST) via the bounded retry ladder;
  *  - the preflight (URL validation + DNS pin) runs under an explicit deadline
- *    (`webhookDeliveryPreflightDeadlineMs`) so it cannot outlive the lease,
- *    and the configured lease is floored at preflight budget + POST timeout;
+ *    (`webhookDeliveryPreflightDeadlineMs`) so it cannot spin forever, and the
+ *    initial lease is floored at preflight budget + POST timeout;
+ *  - wave-9 finding 1: the lease is RENEWED immediately BEFORE the POST,
+ *    token-gated (matching `id` + `processing` + the claim token). The
+ *    initial lease covers the whole claim → authz → preflight → decrypt →
+ *    sign sequence, but those stages can legitimately run long (claim
+ *    round-trip, DNS, queue latency), so the static floor alone can be
+ *    outlasted by a still-pending POST. Renewing right before `postWebhookRequest`
+ *    stamps `leaseExpiresAt = now + webhookRequestTimeoutMs() + margin`, so
+ *    the lease covers EXACTLY the POST window regardless of how long the
+ *    preceding stages took. If the renewal matches 0 rows the claim was
+ *    already stolen (expired + recovered or redelivered) — the delivery is
+ *    skipped and never POSTed after losing its claim.
  *  - target URLs are re-validated (same SSRF policy as at create time) AND
  *    the connection is PINNED to the validated address: the dispatcher
  *    resolves once, checks every A/AAAA answer against the block rules, then
@@ -331,9 +346,27 @@ export async function deliverWebhook(
   // delivery may have been enqueued long before the creator was disabled,
   // demoted, or denied task_read — the endpoint still receives task
   // metadata, so access must hold at send time, not just at enqueue time.
-  // Fail closed: mark the delivery failed (no further retries) instead of
-  // POSTing.
-  const creatorMayDeliver = await webhookCreatorMayDeliver(prisma, delivery.webhook.createdByUserId, delivery.webhook.projectId);
+  // The check is BOUNDED (wave-9 finding 1): a slow or stalled DB query
+  // would otherwise have no deadline at all — runWithDeadline abandons it
+  // after the preflight budget and we FAIL CLOSED (no POST) via the normal
+  // bounded retry ladder; a later attempt re-checks access.
+  let creatorMayDeliver: boolean;
+  try {
+    creatorMayDeliver = await runWithDeadline(
+      webhookCreatorMayDeliver(prisma, delivery.webhook.createdByUserId, delivery.webhook.projectId),
+      webhookDeliveryPreflightDeadlineMs(),
+      "Webhook creator access re-check",
+    );
+  } catch (error) {
+    if (!(error instanceof WebhookPreflightDeadlineError)) {
+      throw error;
+    }
+    // Fail closed: mark the delivery failed for this attempt (no POST, no
+    // unbounded stall) and schedule a bounded retry.
+    const message = boundedError(error, "authz deadline exceeded");
+    await recordFailure(prisma, delivery.id, claimToken, attempts, now, message, null);
+    return { status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending", responseCode: null, error: message };
+  }
   if (!creatorMayDeliver) {
     const message = `Webhook creator no longer holds automation_manage + task_read on the project; delivery cancelled without sending`;
     await finalizeOwnedClaim(prisma, delivery.id, claimToken, {
@@ -391,6 +424,31 @@ export async function deliverWebhook(
   const timestamp = Math.floor(now.getTime() / 1000).toString();
   const signature = computeWebhookSignature(secret, timestamp, body);
 
+  // Wave-9 finding 1 — RENEW the lease immediately BEFORE the POST, under
+  // the claim token. The initial lease was stamped at claim time and floored
+  // at preflight + request timeout, but the claim round-trip, the authz
+  // query, decrypt/sign, and the DNS preflight all consume that window
+  // BEFORE the POST starts, so the POST could still survive past
+  // `leaseExpiresAt` and a recovery pass could start a second POST while the
+  // first is live. Re-stamping here makes the lease cover exactly the POST
+  // window regardless of how long the preceding stages took.
+  const renewedAt = new Date();
+  const renewal = (await prisma.webhookDelivery.updateMany({
+    where: { id: delivery.id, status: "processing", claimToken },
+    data: {
+      leaseExpiresAt: new Date(renewedAt.getTime() + webhookRequestTimeoutMs() + webhookLeaseMarginMs()),
+    },
+  })) as WebhookUpdateManyResult;
+  if (renewal.count === 0) {
+    // Our claim was already stolen (expired + recovered, or redelivered):
+    // another worker owns this delivery now. NEVER POST after losing the
+    // claim — the incoming second POST would duplicate the event.
+    console.warn(
+      `${LOG_PREFIX} stale claim on delivery ${delivery.id}: lease renewal rejected before the POST; skipping delivery (claim lost)`
+    );
+    return { status: "skipped", error: "Webhook delivery claim was lost before the POST could start (lease recovered or redelivered)" };
+  }
+
   const outcome = await postWebhookRequest(target.url, {
     body,
     event: delivery.event,
@@ -434,8 +492,9 @@ export async function deliverWebhook(
 }
 
 /**
- * Deadline error for the send-time preflight (URL validation + DNS). Treated
- * like any other pre-flight failure: bounded retry, never an unhandled throw.
+ * Deadline error for the send-time preflight (URL validation + DNS) and the
+ * bounded send-time authz re-check. Treated like any other pre-flight
+ * failure: bounded retry, never an unhandled throw.
  */
 export class WebhookPreflightDeadlineError extends Error {
   constructor(message: string) {
@@ -445,17 +504,18 @@ export class WebhookPreflightDeadlineError extends Error {
 }
 
 /**
- * Races `promise` against a hard deadline so a hung DNS validation cannot
- * outlive the claim lease. The losing promise is NOT cancelled (Node DNS has
- * no cancellation) — it is simply abandoned.
+ * Races `promise` against a hard deadline so a hung DNS validation (or a
+ * stalled send-time authz query) cannot hold a worker indefinitely. The
+ * losing promise is NOT cancelled (Node DNS has no cancellation) — it is
+ * simply abandoned.
  */
-async function runWithDeadline<T>(promise: Promise<T>, deadlineMs: number): Promise<T> {
+async function runWithDeadline<T>(promise: Promise<T>, deadlineMs: number, label = "Webhook URL validation (DNS)"): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       reject(
         new WebhookPreflightDeadlineError(
-          `Webhook URL validation (DNS) exceeded the ${Math.ceil(deadlineMs / 1000)}s preflight deadline`,
+          `${label} exceeded the ${Math.ceil(deadlineMs / 1000)}s deadline`,
         ),
       );
     }, deadlineMs);

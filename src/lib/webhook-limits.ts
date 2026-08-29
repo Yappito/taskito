@@ -28,6 +28,16 @@ export const DEFAULT_WEBHOOK_TIMEOUT_MS = 10_000;
 export const DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS = 15_000;
 
 /**
+ * Fixed buffer added on top of the outbound POST timeout when the dispatcher
+ * RENEWS the claim lease immediately before the POST (wave-9 finding 1). The
+ * renewal stamps `leaseExpiresAt = now + webhookRequestTimeoutMs() + margin`,
+ * so no matter how long the preceding claim/authz/preflight/decrypt stages
+ * took, the lease always covers the whole POST window plus this slack (the
+ * slack absorbs the finalize update that follows the response).
+ */
+export const DEFAULT_WEBHOOK_LEASE_MARGIN_MS = 5_000;
+
+/**
  * Depth cap for the in-process outbound delivery queue. When the queue is
  * full, new deliveries are NOT enqueued inline — their durable `pending`
  * rows are still picked up by the scheduler sweep, so nothing is lost; only
@@ -83,6 +93,14 @@ export function webhookDeliveryQueueMaxDepth(): number {
   return envInt("WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH", DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH, 1, 100_000);
 }
 
+/**
+ * Buffer over the POST timeout applied when renewing the claim lease right
+ * before the POST (`WEBHOOK_LEASE_MARGIN_MS`, default 5s, clamped to 0-60s).
+ */
+export function webhookLeaseMarginMs(): number {
+  return envInt("WEBHOOK_LEASE_MARGIN_MS", DEFAULT_WEBHOOK_LEASE_MARGIN_MS, 0, 60_000);
+}
+
 /** Outbound timeout constant moved next to the derived lease floor (see dispatcher re-export). */
 export const WEBHOOK_TIMEOUT_MS = DEFAULT_WEBHOOK_TIMEOUT_MS;
 
@@ -92,6 +110,12 @@ export const WEBHOOK_TIMEOUT_MS = DEFAULT_WEBHOOK_TIMEOUT_MS;
  * bounded POST (`WEBHOOK_TIMEOUT_MS`). A lease below this could expire while
  * the claiming worker is still mid-request, letting another worker re-claim
  * a delivery that is still in flight.
+ *
+ * This floor is only the INITIAL lease stamped at claim time — the
+ * authoritative guarantee is the token-gated lease RENEWAL the dispatcher
+ * performs immediately before the POST (wave-9 finding 1), which re-stamps
+ * `leaseExpiresAt` from the POST's own start instant so the claim/authz/
+ * preflight stages can never consume the window the POST needs.
  */
 export function webhookDeliveryLeaseFloorMs(): number {
   return webhookPreflightBudgetMs() + webhookRequestTimeoutMs();
@@ -109,9 +133,10 @@ export function webhookDeliveryLeaseMs(): number {
 
 /**
  * Wall-time budget for the send-time preflight (URL validation + DNS pinning)
- * inside a single delivery attempt. It is capped so that one attempt's DNS
- * work can never outlive the claim lease: preflight budget + POST timeout
- * <= claimed lease. (`WEBHOOK_PREFLIGHT_BUDGET_MS`.)
+ * AND for the send-time creator-access re-check inside a single delivery
+ * attempt: both are bounded races so a hung DNS lookup or a stalled authz
+ * query can never spin a worker indefinitely. Capped so that preflight + one
+ * POST fit inside the initial claim lease. (`WEBHOOK_PREFLIGHT_BUDGET_MS`.)
  */
 export function webhookDeliveryPreflightDeadlineMs(): number {
   return Math.max(1_000, Math.min(webhookPreflightBudgetMs(), webhookDeliveryLeaseMs() - webhookRequestTimeoutMs()));

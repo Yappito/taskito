@@ -71,14 +71,17 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
   // router's dateKey day granularity: an occurrence whose DAY is on/before
   // the endDate's day is valid and gets created (then retired by its own
   // claim advance); only a rule whose current occurrence is already past the
-  // end day hits the standalone retirement branch. Rules already past their
-  // end day are still selected here and retire themselves through that
-  // branch one interval per tick until nextDueDate moves past `now` (a plain
-  // CAS advance, no task created), so they drain out of the due pool instead
-  // of accumulating unseen as under the old gate.
+  // end day hits the standalone retirement branch and is retired in ONE
+  // step. Wave-9 finding 3: retired rules are excluded from selection
+  // (`retiredAt: null`) and a dead rule is retired with a single CAS (set
+  // `retiredAt`), NOT by walking one missed interval per tick — a rule left
+  // years behind used to drain over thousands of ticks and, because the
+  // selection is oldest-nextDueDate-first and capped, a batch of dead rows
+  // could monopolize every tick and starve healthy due rules for days.
   const rules = await prisma.recurrenceRule.findMany({
     where: {
       nextDueDate: { lte: now },
+      retiredAt: null,
       ...(options.projectId ? { task: { projectId: options.projectId } } : {}),
     },
     include: {
@@ -117,12 +120,27 @@ export async function processDueRecurrences(prisma: PrismaClient, options: { pro
       // accepts nextDueDate on the endDate's calendar day).
       //
       //  - The CURRENT occurrence (rule.nextDueDate) is already past the
-      //    end DAY: nothing to create — retire the rule with a standalone
-      //    advance (a plain CAS with no task creation, so there is no
-      //    claim/create gap to protect). Reachable for rules selected after
+      //    end DAY: nothing to create — retire the rule in ONE step (a
+      //    single CAS setting the terminal `retiredAt` flag, no task
+      //    created, no interval walked). Reachable for rules selected after
       //    their end day has passed (e.g. scheduler downtime spanning the
-      //    endDate, or pre-existing data drift). A crash here simply re-runs
-      //    the retirement on the next tick.
+      //    endDate, or pre-existing data drift). Wave-9 finding 3: the old
+      //    branch advanced nextDueDate ONE interval per tick, so a rule
+      //    left years behind needed thousands of ticks to drain and — with
+      //    oldest-nextDueDate-first capped selection — a batch of dead rows
+      //    could monopolize every tick, starving healthy due rules. Setting
+      //    the terminal flag removes the rule from the due pool immediately
+      //    (all due-selection queries gate on `retiredAt: null`) and it
+      //    never returns. A crash here simply re-runs the retirement on the
+      //    next tick; a lost CAS (raced re-activation) matches 0 rows and
+      //    is retried from the freshly read state.
+      if (rule.endDate && dayKey(rule.nextDueDate) > dayKey(rule.endDate)) {
+        await prisma.recurrenceRule.updateMany({
+          where: { id: rule.id, nextDueDate: rule.nextDueDate },
+          data: { retiredAt: now },
+        });
+        continue;
+      }
       //
       //  - The current occurrence is still on/before the end day —
       //    including the downtime case where `now` itself is already past

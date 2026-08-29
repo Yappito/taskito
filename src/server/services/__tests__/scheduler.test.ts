@@ -535,6 +535,25 @@ describe("scheduler", () => {
       warnSpy.mockRestore();
     });
 
+    // Wave-9 finding 2: the tick deadline must be THREADed into the digest
+    // job (runDigestJob previously dropped it), so the digest is actually
+    // cancellable at the tick deadline instead of running unboundedly.
+    it("threads the tick deadline signal into the digest job (wave-9 finding 2)", async () => {
+      let receivedSignal: AbortSignal | undefined;
+      runDailyDigestJob.mockImplementation(async (_now: Date, options?: { signal?: AbortSignal }) => {
+        receivedSignal = options?.signal;
+        return { sent: 0, skipped: 0, retryable: 0 };
+      });
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob.mock.calls[0][1]).toEqual({ signal: expect.any(AbortSignal) });
+      expect(receivedSignal).toBeDefined();
+      expect(receivedSignal?.aborted).toBe(false);
+    });
+
     it("still runs due-date automation and the digest when the recurrence processor throws", async () => {
       processDueRecurrences.mockRejectedValue(new Error("recurrence exploded"));
 
