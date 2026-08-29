@@ -12,8 +12,7 @@ const {
     $queryRaw: vi.fn(),
   },
   lockConnectionMock: {
-    tryAdvisoryLock: vi.fn(),
-    releaseAdvisoryLock: vi.fn(),
+    runExclusive: vi.fn(),
     end: vi.fn(),
   },
 }));
@@ -48,8 +47,7 @@ describe("POST /api/cron/process-recurring", () => {
     vi.clearAllMocks();
     process.env.CRON_SECRET = CRON_SECRET;
     processDueRecurrences.mockResolvedValue(SUCCESS_BODY);
-    lockConnectionMock.tryAdvisoryLock.mockResolvedValue(true);
-    lockConnectionMock.releaseAdvisoryLock.mockResolvedValue(undefined);
+    lockConnectionMock.runExclusive.mockImplementation(async (_key: number, fn: () => Promise<unknown>) => fn());
     lockConnectionMock.end.mockResolvedValue(undefined);
   });
 
@@ -91,7 +89,7 @@ describe("POST /api/cron/process-recurring", () => {
     expect(processDueRecurrences).not.toHaveBeenCalled();
   });
 
-  it("delegates to the recurrence processor under the session scheduler lock and returns 200 with the result", async () => {
+  it("delegates to the recurrence processor under the pinned scheduler lock transaction and returns 200 with the result", async () => {
     const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));
 
     expect(response.status).toBe(200);
@@ -100,32 +98,32 @@ describe("POST /api/cron/process-recurring", () => {
     // M9: the cron route drives the processor against the tick deadline
     // handed over by the lock helper.
     expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100, signal: expect.any(AbortSignal) });
-    // M8: the run executed while the scheduler lock was held on the dedicated
-    // lock connection — which is NOT the shared pool connection (finding 8).
-    expect(lockConnectionMock.tryAdvisoryLock).toHaveBeenCalledWith(SCHEDULER_ADVISORY_LOCK_KEY);
+    // M8: the run executed inside ONE pinned lock transaction on the
+    // dedicated lock connection — which is NOT the shared pool (finding 8).
+    expect(lockConnectionMock.runExclusive).toHaveBeenCalledTimes(1);
+    expect(lockConnectionMock.runExclusive.mock.calls[0][0]).toBe(SCHEDULER_ADVISORY_LOCK_KEY);
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
-    // The lock is released and the dedicated connection closed only after the
-    // run settled.
-    expect(lockConnectionMock.releaseAdvisoryLock).toHaveBeenCalledTimes(1);
+    // The lock transaction ends (releasing the xact lock) and the dedicated
+    // connection closes only after the run settles.
     expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
   });
 
   it("skips with 409 { skipped: true } when the scheduler lock is held (M8)", async () => {
-    lockConnectionMock.tryAdvisoryLock.mockResolvedValue(false);
+    // Another session/replica's open transaction holds the xact lock.
+    lockConnectionMock.runExclusive.mockResolvedValue(null);
 
     const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({ skipped: true });
     expect(processDueRecurrences).not.toHaveBeenCalled();
-    // Not acquired: nothing unlocked, but the dedicated connection is closed.
-    expect(lockConnectionMock.releaseAdvisoryLock).not.toHaveBeenCalled();
+    // Not acquired: nothing to release, but the dedicated connection is closed.
     expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
   });
 
   it("skips with 409 when the lock acquisition fails, without leaking the dedicated connection", async () => {
-    lockConnectionMock.tryAdvisoryLock.mockRejectedValue(new Error("database unavailable"));
+    lockConnectionMock.runExclusive.mockRejectedValue(new Error("database unavailable"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));

@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encryptSecret } from "@/lib/secret-crypto";
 import { createPinnedOutboundLookup } from "@/lib/ai-provider-validation";
 import {
+  webhookDeliveryLeaseMs,
+  webhookDeliveryPreflightDeadlineMs,
+  webhookRequestTimeoutMs,
+} from "@/lib/webhook-limits";
+import {
   buildWebhookTaskSnapshot,
   defaultWebhookTransport,
   deliverWebhook,
@@ -594,8 +599,14 @@ describe("webhook dispatcher", () => {
       expect(store.row.claimToken).toBeTypeOf("string");
     });
 
-    it("claims with the atomic processing predicate (pending + due), a lease, and a fresh claim token", async () => {
+    it("claims with the atomic processing predicate (pending + due), a lease from the ACTUAL claim instant, and a fresh claim token", async () => {
+      // The lease must be stamped from the moment of the claim UPDATE (with
+      // fake timers frozen at `now`, the claim's `new Date()` IS `now` — but
+      // the stamp flows from the claim instant, not `options.now`, which the
+      // per-claim lease test below proves with advancing time).
       const now = new Date("2026-01-01T00:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
       const prisma = createPrismaMock();
       prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
@@ -611,7 +622,8 @@ describe("webhook dispatcher", () => {
       expect(claimCall.where).toEqual({ id: "delivery-1", status: "pending", nextAttemptAt: { lte: now } });
       expect(claimCall.data.status).toBe("processing");
       expect(claimCall.data.attempts).toEqual({ increment: 1 });
-      expect(claimCall.data.leaseExpiresAt).toEqual(new Date(now.getTime() + 300_000));
+      // Lease window = claim instant + configured (floored) lease.
+      expect(claimCall.data.leaseExpiresAt).toEqual(new Date(now.getTime() + webhookDeliveryLeaseMs()));
       // The claim stamps the OWNER token used by every later update.
       expect(claimCall.data.claimToken).toEqual(expect.any(String));
 
@@ -627,6 +639,113 @@ describe("webhook dispatcher", () => {
         claimToken: claimCall.data.claimToken,
       });
       expect(finalizeCall.data.leaseExpiresAt).toBeNull();
+    });
+  });
+
+  describe("claim lease timing (wave-8 finding 1: lease must cover the real POST window)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    /**
+     * Finds the claim update (pending -> processing with a lease) among the
+     * updateMany calls and returns the stamped lease deadline.
+     */
+    function claimLeases(prisma: ReturnType<typeof createPrismaMock>): Date[] {
+      return (prisma.webhookDelivery.updateMany.mock.calls as unknown as Array<
+        [{ where: Record<string, unknown>; data: Record<string, unknown> }]
+      >)
+        .filter(([args]) => args.where.status === "pending" && args.data.leaseExpiresAt instanceof Date)
+        .map(([args]) => args.data.leaseExpiresAt as Date);
+    }
+
+    it("POSTs with the SAME configured timeout the lease floor derives from (single source of truth)", async () => {
+      // Clamp WEBHOOK_TIMEOUT_MS to its 1s minimum. The lease floor derives
+      // from the clamped ENV value (1s + preflight); if the POST ran on the
+      // frozen 10s constant instead, the lease would expire while the request
+      // was still live.
+      vi.stubEnv("WEBHOOK_TIMEOUT_MS", "1000");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+
+      const { transport, requests } = recordingTransport();
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+
+      expect(result.status).toBe("success");
+      expect(requests).toHaveLength(1);
+      // The production POST budget is the CLAMPED env value — never the
+      // constant. Reverting to `?? WEBHOOK_TIMEOUT_MS` fails this (10000 ≠ 1000).
+      expect(requests[0].timeoutMs).toBe(webhookRequestTimeoutMs());
+      expect(requests[0].timeoutMs).toBe(1_000);
+    });
+
+    it("the claim lease covers preflight + the real POST window end-to-end", async () => {
+      vi.stubEnv("WEBHOOK_TIMEOUT_MS", "1000");
+      vi.stubEnv("WEBHOOK_DELIVERY_LEASE_MS", "1000"); // floor kicks in
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+
+      const { transport, requests } = recordingTransport();
+      await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+
+      const leaseExpiresAt = claimLeases(prisma)[0];
+      expect(leaseExpiresAt).toBeInstanceOf(Date);
+      // Lease window measured from the claim instant (fake-timer time at claim).
+      const leaseWindowMs = leaseExpiresAt.getTime() - now.getTime();
+      const actualPostTimeoutMs = requests[0].timeoutMs;
+      // Lease >= one worst-case send cycle: preflight deadline + the REAL
+      // POST timeout that is about to run — measured end-to-end, not assumed.
+      expect(leaseWindowMs).toBeGreaterThanOrEqual(webhookDeliveryPreflightDeadlineMs() + actualPostTimeoutMs);
+      // Guard against a degenerate mutation that shortens both sides:
+      // the actual POST timeout equals the configured one.
+      expect(actualPostTimeoutMs).toBe(webhookRequestTimeoutMs());
+    });
+
+    it("a sequential sweep stamps each row's lease from ITS OWN claim time (not the batch start)", async () => {
+      const batchStart = new Date("2026-01-01T00:00:00.000Z");
+      const INTER_ROW_DELAY_MS = 5_000;
+      vi.setSystemTime(batchStart);
+      const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findMany.mockResolvedValue([{ id: "d1" }, { id: "d2" }]);
+      prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) =>
+        pendingDeliveryRow(webhookRowFor("whsec_x"), { id: args.where.id }),
+      );
+
+      let requestsSeen = 0;
+      const transport = vi.fn(async (): Promise<WebhookOutboundResponse> => {
+        requestsSeen += 1;
+        if (requestsSeen === 1) {
+          // Simulate the sweep taking 5s between the first row's POST and the
+          // second row's claim (fake wall clock advances).
+          vi.setSystemTime(new Date(batchStart.getTime() + INTER_ROW_DELAY_MS));
+        }
+        return { status: 200, error: null };
+      });
+
+      const result = await processDueWebhookDeliveries(prisma as never, new Date(), { transport });
+      expect(result.processed).toBe(2);
+      expect(requestsSeen).toBe(2);
+
+      const leases = claimLeases(prisma);
+      expect(leases).toHaveLength(2);
+      const leaseWindowMs = webhookDeliveryLeaseMs();
+      // Row 1 was claimed at the batch start…
+      expect(leases[0].getTime()).toBe(batchStart.getTime() + leaseWindowMs);
+      // …and row 2 was claimed ~5s later, so ITS lease must start later too —
+      // a lease derived from the shared batch timestamp would already be 5s
+      // (of POST/read/preflight) consumed before the row was even claimed.
+      expect(leases[1].getTime()).toBe(batchStart.getTime() + INTER_ROW_DELAY_MS + leaseWindowMs);
+      expect(leases[1].getTime() - leases[0].getTime()).toBe(INTER_ROW_DELAY_MS);
     });
   });
 

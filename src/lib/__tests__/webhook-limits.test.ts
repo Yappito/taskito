@@ -65,4 +65,22 @@ describe("webhook delivery limits", () => {
     vi.stubEnv("WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH", "999999");
     expect(webhookDeliveryQueueMaxDepth()).toBe(DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH);
   });
+
+  it("ships the queue-depth default the .env.example documents (100) so code and docs agree", () => {
+    // wave-8: the code default and WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH in
+    // .env.example must be the SAME value (100); a split invites surprise
+    // backpressure differences between documented and actual behavior.
+    expect(DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH).toBe(100);
+    delete process.env.WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH;
+    expect(webhookDeliveryQueueMaxDepth()).toBe(100);
+  });
+
+  it("uses WEBHOOK_TIMEOUT_MS (clamped) as the single POST-timeout source the lease floor derives from", () => {
+    vi.stubEnv("WEBHOOK_TIMEOUT_MS", "1000");
+    expect(webhookRequestTimeoutMs()).toBe(1_000);
+    // Floor = preflight budget + the SAME clamped env value the dispatcher's
+    // POST uses — never a frozen constant.
+    vi.stubEnv("WEBHOOK_PREFLIGHT_BUDGET_MS", "15000");
+    expect(webhookDeliveryLeaseFloorMs()).toBe(16_000);
+  });
 });

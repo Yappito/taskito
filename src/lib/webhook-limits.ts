@@ -33,8 +33,10 @@ export const DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS = 15_000;
  * rows are still picked up by the scheduler sweep, so nothing is lost; only
  * the immediate in-process attempt is dropped (explicit backpressure instead
  * of unbounded memory growth).
+ *
+ * Default is 100 so the code agrees with the `.env.example` documentation.
  */
-export const DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH = 200;
+export const DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH = 100;
 
 /**
  * Largest upstream response body the dispatcher is willing to drain. Webhook
