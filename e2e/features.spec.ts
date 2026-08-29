@@ -9,6 +9,35 @@ async function goToProject(page: Page) {
   await waitForAppShell(page);
 }
 
+/**
+ * Click the first graph node that is not covered by a floating panel and
+ * return its task title, captured BEFORE the click.
+ *
+ * Hovering a node re-renders it last in the DOM and focusing relays out the
+ * subgraph, so reading the title back from a positional locator after the
+ * click can yield a different node than the one that was actually clicked.
+ */
+async function clickReachableGraphNode(page: Page): Promise<string | null> {
+  const nodes = page.locator(".graph-node");
+  const count = await nodes.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = nodes.nth(index);
+    const title = await candidate.getAttribute("data-task-title").catch(() => null);
+    if (!title) {
+      continue;
+    }
+    try {
+      // Floating panels (task filters, toolbar, mini-map) cover part of the
+      // canvas; a covered click throws after the timeout and we try the next.
+      await candidate.click({ timeout: 2_500 });
+      return title;
+    } catch {
+      // Covered by an overlay — try the next candidate.
+    }
+  }
+  throw new Error("No clickable graph node found");
+}
+
 test.describe("Board view drag-and-drop", () => {
   test.beforeEach(async ({ page }) => {
     await login(page);
@@ -46,7 +75,6 @@ test.describe("Board view drag-and-drop", () => {
     // Click the first task card
     const firstCard = page.locator("[data-board-task-id]").first();
     await firstCard.click();
-    await page.waitForTimeout(300);
 
     // Task detail panel should appear
     await expectTaskDetailOpen(page);
@@ -88,7 +116,6 @@ test.describe("Task body/description", () => {
     // Click Edit button in the detail panel
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
     await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
-    await page.waitForTimeout(300);
 
     // Should see the description textarea
     const textarea = page.locator('textarea[name="body"]');
@@ -106,16 +133,15 @@ test.describe("Task body/description", () => {
     // Click Edit
     const detailPanel = page.locator(".fixed.inset-y-0.right-0");
     await detailPanel.getByRole("button", { name: "Edit", exact: true }).click();
-    await page.waitForTimeout(300);
 
     // Fill in description
     const textarea = page.locator('textarea[name="body"]');
     await expect(textarea).toBeVisible();
     await textarea.fill("Test description body content");
 
-    // Save
+    // Save — the update invalidates the task cache, and the visibility
+    // assertion below waits for the view-mode panel to refresh.
     await detailPanel.getByRole("button", { name: "Save" }).click();
-    await page.waitForTimeout(1000);
 
     // View mode should show the description
     await expect(page.getByText("Test description body content")).toBeVisible({ timeout: 10000 });
@@ -166,7 +192,6 @@ test.describe("Search opens task", () => {
 
   test("search modal can be opened with button", async ({ page }) => {
     await page.locator("button", { hasText: "Search..." }).click();
-    await page.waitForTimeout(300);
 
     const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
     await expect(searchInput).toBeVisible();
@@ -174,10 +199,8 @@ test.describe("Search opens task", () => {
 
   test("search modal closes with Escape", async ({ page }) => {
     await page.locator("button", { hasText: "Search..." }).click();
-    await page.waitForTimeout(300);
 
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(300);
 
     const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
     await expect(searchInput).not.toBeVisible();
@@ -234,10 +257,9 @@ test.describe("Graph view", () => {
     await expect(page.locator(".graph-node").first()).toBeVisible({ timeout: 10_000 });
     const initialNodeCount = await page.locator(".graph-node").count();
 
-    // Floating panels (task filters, toolbar, mini-map) cover part of the
-    // canvas; click the first node that is actually reachable.
-    const node = await clickFirstClickable(page, page.locator(".graph-node"));
-    const focusedTitle = await node.getAttribute("data-task-title");
+    // A single mouse click (like keyboard Enter) toggles focus mode on the
+    // clicked node; the toolbar renders "Focus: <full title>" and "Show all".
+    const focusedTitle = await clickReachableGraphNode(page);
     expect(focusedTitle).toBeTruthy();
 
     const showAll = page.getByRole("button", { name: "Show all", exact: true });
@@ -272,7 +294,6 @@ test.describe("Graph view", () => {
     expect(matchingTitle).toBeTruthy();
 
     await page.getByPlaceholder("Highlight by title...").fill(matchingTitle!);
-    await page.waitForTimeout(400);
 
     const matchingNode = page.locator(`.graph-node[data-task-title="${matchingTitle}"]`);
 
@@ -330,7 +351,6 @@ test.describe("Graph view", () => {
 
   test("reset zoom button works", async ({ page }) => {
     await page.getByRole("button", { name: "Reset", exact: true }).click();
-    await page.waitForTimeout(500);
     // Just verify no error — graph should still be visible
     const svg = page.locator("svg").first();
     await expect(svg).toBeVisible();
@@ -365,7 +385,6 @@ test.describe("List view filters", () => {
 
   test("list view can filter tasks by title substring", async ({ page }) => {
     await page.getByPlaceholder("Filter by title...").fill("drag-and-drop");
-    await page.waitForTimeout(400);
 
     await expect(page.getByText("Add drag-and-drop to board")).toBeVisible();
     await expect(page.getByText("Design database schema")).not.toBeVisible();
@@ -375,7 +394,6 @@ test.describe("List view filters", () => {
   test("list view can filter tasks by tag", async ({ page }) => {
     await page.getByRole("button", { name: "Show filters" }).click();
     await page.getByRole("button", { name: "backend", exact: true }).click();
-    await page.waitForTimeout(300);
 
     await expect(page.getByText("Design database schema")).toBeVisible();
     await expect(page.getByText("Set up project repository")).not.toBeVisible();

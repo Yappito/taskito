@@ -272,5 +272,21 @@ test.describe("Expanded Playwright coverage", () => {
       await expect(page.getByLabel(`${label} email`, { exact: true })).toBeVisible();
     }
     await expect(page.getByLabel("Daily due-soon digest email", { exact: true })).toBeVisible();
+
+    // Toggle an EMAIL channel checkbox and verify the choice persists after
+    // closing and reopening the center.
+    const statusEmailToggle = page.getByLabel("Status changes email", { exact: true });
+    const initiallyChecked = await statusEmailToggle.isChecked();
+    await statusEmailToggle.click();
+    await expect(statusEmailToggle).toBeChecked({ checked: !initiallyChecked });
+
+    await page.getByLabel("Open notifications").click();
+    await expect(statusEmailToggle).not.toBeVisible();
+    await page.getByLabel("Open notifications").click();
+    await expect(statusEmailToggle).toBeChecked({ checked: !initiallyChecked });
+
+    // Restore the original preference so reruns start from the same state.
+    await statusEmailToggle.click();
+    await expect(statusEmailToggle).toBeChecked({ checked: initiallyChecked });
   });
 });

@@ -24,9 +24,12 @@ test.describe("Workflow feature coverage", () => {
     await createPanel.locator("input").first().fill(dashboardName);
     await createPanel.getByRole("button", { name: "Create dashboard", exact: true }).click();
 
-    // Creating selects the dashboard and flips the side panel to permissions.
+    // Creating selects the new dashboard: the side panel flips from
+    // "Create dashboard" to "Dashboard permissions", the picker lists the
+    // new dashboard, and the board shows the fresh dashboard's empty state.
     await expect(page.getByRole("heading", { name: "Dashboard permissions" })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("option", { hasText: dashboardName }).first()).toBeAttached();
+    await expect(page.getByRole("heading", { name: "No widgets yet" })).toBeVisible({ timeout: 10_000 });
 
     // Add a metric widget counting all active project tasks.
     const widgetPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: "Add widget", exact: true }) });

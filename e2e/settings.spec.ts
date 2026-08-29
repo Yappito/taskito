@@ -50,11 +50,9 @@ test.describe("Settings page", () => {
     await page.getByRole("tab", { name: "projects" }).click();
 
     await page.getByRole("button", { name: "New Project" }).click();
-    await page.waitForTimeout(300);
 
     // Type a project name
     await page.locator('input[placeholder="My Project"]').fill("Test Project");
-    await page.waitForTimeout(100);
 
     // Slug and key should be auto-populated
     const slugInput = page.locator('input[placeholder="my-project"]');
@@ -69,7 +67,6 @@ test.describe("Settings page", () => {
     await page.getByRole("tab", { name: "projects" }).click();
 
     await page.getByRole("button", { name: "New Project" }).click();
-    await page.waitForTimeout(300);
 
     await page.locator('input[placeholder="My Project"]').fill("Switcher Project");
     await page.locator('input[placeholder="Optional description"]').fill("Used for project switching coverage");
@@ -100,7 +97,6 @@ test.describe("Settings page", () => {
 
     // Switch to users tab
     await page.getByRole("tab", { name: "users" }).click();
-    await page.waitForTimeout(500);
 
     // Should see New User button and at least the admin user
     await expect(page.getByText("New User")).toBeVisible();
@@ -113,7 +109,6 @@ test.describe("Settings page", () => {
 
     // Switch to users tab
     await page.getByRole("tab", { name: "users" }).click();
-    await page.waitForTimeout(500);
 
     await page.getByText("New User").click();
 
@@ -146,7 +141,6 @@ test.describe("Search modal", () => {
 
     // Open search via the button
     await page.locator("button", { hasText: "Search..." }).click();
-    await page.waitForTimeout(300);
 
     // Search modal should be visible (look for the input)
     const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
@@ -154,7 +148,6 @@ test.describe("Search modal", () => {
 
     // Click the backdrop (outside the modal) — use coordinates at bottom-right area
     await page.mouse.click(50, 600);
-    await page.waitForTimeout(300);
 
     // Modal should be closed
     await expect(searchInput).not.toBeVisible();
@@ -166,14 +159,12 @@ test.describe("Search modal", () => {
 
     // Press Cmd+K
     await page.keyboard.press("Meta+k");
-    await page.waitForTimeout(300);
 
     const searchInput = page.locator('input[placeholder="Search tasks or run a command..."]');
     await expect(searchInput).toBeVisible();
 
     // Press Escape to close
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(300);
     await expect(searchInput).not.toBeVisible();
   });
 
@@ -187,7 +178,6 @@ test.describe("Search modal", () => {
     await expect(searchInput).toBeVisible();
 
     await page.keyboard.press("Meta+k");
-    await page.waitForTimeout(300);
     await expect(searchInput).not.toBeVisible();
   });
 });
