@@ -266,9 +266,11 @@ test.describe("Expanded Playwright coverage", () => {
     await expect(page.getByRole("button", { name: "Mark all read" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Clear all" })).toBeVisible();
     await expect(page.getByText("Preferences")).toBeVisible();
-    await expect(page.getByLabel("Assignments")).toBeVisible();
-    await expect(page.getByLabel("Comments")).toBeVisible();
-    await expect(page.getByLabel("Status changes")).toBeVisible();
-    await expect(page.getByLabel("Mentions")).toBeVisible();
+    // One checkbox per channel and type: "<Label> in-app" and "<Label> email".
+    for (const label of ["Assignments", "Comments", "Status changes", "Mentions"]) {
+      await expect(page.getByLabel(`${label} in-app`, { exact: true })).toBeVisible();
+      await expect(page.getByLabel(`${label} email`, { exact: true })).toBeVisible();
+    }
+    await expect(page.getByLabel("Daily due-soon digest email", { exact: true })).toBeVisible();
   });
 });

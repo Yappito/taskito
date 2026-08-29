@@ -248,7 +248,8 @@ test.describe("Backlog regression coverage", () => {
     await closeTaskDetail(page);
     await page.getByLabel("Open notifications").click({ force: true });
     await expect(page.getByText("Preferences")).toBeVisible();
-    const assignmentsToggle = page.locator('label:has-text("Assignments") input[type="checkbox"]');
+    // Preferences rows now carry one checkbox per channel (aria-labels "<Label> in-app" / "<Label> email").
+    const assignmentsToggle = page.getByLabel("Assignments in-app", { exact: true });
     await assignmentsToggle.click();
     await expect(assignmentsToggle).not.toBeChecked();
     await assignmentsToggle.click();
