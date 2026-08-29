@@ -1,10 +1,28 @@
 import { requireProjectAccess, requireTaskAccess } from "@/server/authz";
+import { normalizeAiPermissions } from "@/lib/ai-permissions";
 import type { AiConversationContextInput, AiConversationContextSnapshot } from "@/lib/ai-types";
 
 type PrismaClient = typeof import("@/lib/prisma").prisma;
 type AiContextRecord = Record<string, unknown>;
-const PROJECT_TASK_CONTEXT_LIMIT = 50;
+// Hard fetch cap so the char budget (not the DB) bounds the sample; the
+// provider-visible trimming is done by AI_CONTEXT_MAX_CHARS below.
+const PROJECT_TASK_CONTEXT_LIMIT = 200;
 const CONTEXT_TASK_COMMENT_LIMIT = 5;
+const DEFAULT_AI_CONTEXT_MAX_CHARS = 60_000;
+const TRUNCATION_MARKER = "…[truncated]";
+
+/**
+ * Character budget for the serialized AI context snapshot. Read at call time
+ * (not import time) so tests and deployments can tune it via env.
+ */
+export function getAiContextMaxChars() {
+  const raw = process.env.AI_CONTEXT_MAX_CHARS?.trim();
+  if (!raw) {
+    return DEFAULT_AI_CONTEXT_MAX_CHARS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 200 ? parsed : DEFAULT_AI_CONTEXT_MAX_CHARS;
+}
 
 function asRecord(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as AiContextRecord : null;
@@ -33,7 +51,7 @@ function truncate(value: string | null | undefined, maxLength: number) {
   if (!value) {
     return value ?? null;
   }
-  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+  return value.length > maxLength ? `${value.slice(0, maxLength)}${TRUNCATION_MARKER}` : value;
 }
 
 function serializePerson(person: unknown) {
@@ -63,7 +81,8 @@ function serializeLinkedTask(task: unknown) {
   };
 }
 
-function serializeTask(task: AiContextRecord, options: { detailed?: boolean } = {}) {
+/** Serializer shared by the context snapshot and the read tools (taskito_get_task). */
+export function serializeAiTask(task: AiContextRecord, options: { detailed?: boolean } = {}) {
   const project = asRecord(task.project);
   const status = asRecord(task.status);
   return {
@@ -149,9 +168,17 @@ function serializeTask(task: AiContextRecord, options: { detailed?: boolean } = 
 export async function buildAiConversationContext(
   prisma: PrismaClient,
   userId: string,
-  input: AiConversationContextInput
+  input: AiConversationContextInput & { permissions?: unknown }
 ): Promise<AiConversationContextSnapshot> {
   await requireProjectAccess(prisma, userId, input.projectId);
+
+  // The three context sections are gated on the read permissions: a read_only
+  // conversation sees task data, a no-permissions conversation must receive
+  // none, so write-only proposals have nothing to read from.
+  const permissions = normalizeAiPermissions(input.permissions);
+  const canReadCurrentTask = permissions.includes("read_current_task");
+  const canReadSelectedTasks = permissions.includes("read_selected_tasks");
+  const canSearchProject = permissions.includes("search_project");
 
   const now = new Date();
   const activeTaskWhere = {
@@ -267,7 +294,9 @@ export async function buildAiConversationContext(
         },
         project: { select: { key: true, slug: true } },
       },
-      orderBy: [{ dueDate: "asc" }, { taskNumber: "asc" }],
+      // Most recently touched tasks first: the bounded sample then favors
+      // whatever the project actually worked on.
+      orderBy: [{ updatedAt: "desc" }, { taskNumber: "asc" }],
       take: PROJECT_TASK_CONTEXT_LIMIT,
     }),
   ]);
@@ -276,14 +305,61 @@ export async function buildAiConversationContext(
     await requireTaskAccess(prisma, userId, input.taskId);
   }
 
-  return {
+  const serializedCurrentTask = canReadCurrentTask
+    ? currentTask
+      ? serializeAiTask(currentTask as unknown as AiContextRecord, { detailed: true })
+      : null
+    : null;
+  const serializedSelectedTasks = canReadSelectedTasks
+    ? selectedTasks.map((task) => serializeAiTask(task as unknown as AiContextRecord, { detailed: true }))
+    : [];
+  const serializedProjectTasks = canSearchProject
+    ? projectTasks.map((task) => serializeAiTask(task as unknown as AiContextRecord, { detailed: true }))
+    : [];
+
+  const snapshot: AiConversationContextSnapshot = {
     project,
-    currentTask: currentTask ? serializeTask(currentTask as unknown as AiContextRecord, { detailed: true }) : null,
-    projectTasks: projectTasks.map((task) => serializeTask(task as unknown as AiContextRecord, { detailed: true })),
-    selectedTasks: selectedTasks.map((task) => serializeTask(task as unknown as AiContextRecord, { detailed: true })),
+    currentTask: serializedCurrentTask,
+    projectTasks: [],
+    selectedTasks: serializedSelectedTasks,
     statuses,
     tags,
     people,
     customFields,
+    truncated: false,
   };
+
+  // Char budget: the compact JSON serialization of the snapshot (measured with
+  // the worst-case `truncated: true` flag so the bound is pessimistic) must fit
+  // inside AI_CONTEXT_MAX_CHARS. projectTasks are newest-first, so trimming
+  // drops the stale tail first.
+  const budget = getAiContextMaxChars();
+  let truncated = canSearchProject && serializedProjectTasks.length >= PROJECT_TASK_CONTEXT_LIMIT;
+  let runningLength = JSON.stringify({ ...snapshot, truncated: true }).length;
+  const includedProjectTasks: Array<Record<string, unknown>> = [];
+  for (const task of serializedProjectTasks) {
+    const taskSize = JSON.stringify(task).length;
+    if (includedProjectTasks.length > 0 && runningLength + taskSize > budget) {
+      truncated = true;
+      break;
+    }
+    includedProjectTasks.push(task);
+    runningLength += taskSize;
+  }
+  // Exact pass: the incremental estimate skips join commas, so guarantee the
+  // invariant by re-measuring and dropping the tail while over budget.
+  while (includedProjectTasks.length > 0 && JSON.stringify({ ...snapshot, projectTasks: includedProjectTasks, truncated: true }).length > budget) {
+    includedProjectTasks.pop();
+    truncated = true;
+  }
+  if (JSON.stringify({ ...snapshot, projectTasks: includedProjectTasks, truncated: true }).length > budget) {
+    // Nothing else can be dropped but the base snapshot alone exceeds the
+    // budget; flag it so the model knows the view is incomplete.
+    truncated = true;
+  }
+
+  snapshot.projectTasks = includedProjectTasks;
+  snapshot.truncated = truncated;
+
+  return snapshot;
 }

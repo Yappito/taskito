@@ -7,9 +7,7 @@ import { AI_PERMISSION_PRESETS, AI_PERMISSION_VALUES } from "@/lib/ai-types";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { requireProjectAccess } from "@/server/authz";
-import { buildAiAssistantTurnRequest, persistAiAssistantCompletion } from "@/server/services/ai/orchestrator";
-import { streamWithAnthropicProvider } from "@/server/services/ai/provider-anthropic";
-import { streamWithOpenAiCompatibleProvider } from "@/server/services/ai/provider-openai-compatible";
+import { runAiAssistantTurn } from "@/server/services/ai/orchestrator";
 
 function sse(data: unknown) {
   return `data: ${JSON.stringify(data)}\n\n`;
@@ -93,36 +91,25 @@ export async function POST(request: Request) {
         });
         await prisma.aiConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
 
-        const turnRequest = await buildAiAssistantTurnRequest(prisma, {
-          conversation,
-          requestedByUserId: session.user.id,
-        });
         controller.enqueue(encoder.encode(sse({ type: "started" })));
 
-        const completion = turnRequest.provider.adapter === "anthropic"
-          ? await streamWithAnthropicProvider(turnRequest.provider, turnRequest.syntheticMessages, turnRequest.tools, (delta) => {
-              controller.enqueue(encoder.encode(sse({ type: "content", delta })));
-            }, request.signal)
-          : await streamWithOpenAiCompatibleProvider(turnRequest.provider, turnRequest.syntheticMessages, turnRequest.tools, (delta) => {
-              controller.enqueue(encoder.encode(sse({ type: "content", delta })));
-            }, request.signal);
-
-        if (request.signal.aborted) {
-          throw new Error("AI stream aborted");
-        }
-
-        const persisted = await persistAiAssistantCompletion(prisma, {
+        // runAiAssistantTurn owns the provider calls (streaming), the bounded
+        // read-tool loop, and persistence of every assistant/tool message.
+        const persisted = await runAiAssistantTurn(prisma, {
           conversation,
           requestedByUserId: session.user.id,
-          completion,
-          selectedTaskIds: turnRequest.selectedTaskIds,
+          onDelta: (delta) => {
+            controller.enqueue(encoder.encode(sse({ type: "content", delta })));
+          },
+          signal: request.signal,
         });
 
         controller.enqueue(encoder.encode(sse({
           type: "done",
           messageId: persisted.message.id,
           proposalIds: persisted.proposals.map((proposal) => proposal.id),
-          truncated: completion.truncated,
+          readToolRounds: persisted.readToolRounds,
+          truncated: persisted.truncated,
         })));
       } catch (error) {
         controller.enqueue(encoder.encode(sse({

@@ -113,7 +113,7 @@ export async function executeAiAction(
         ...(payload.dueDate !== undefined ? { dueDate: parseDate(payload.dueDate) } : {}),
         ...(payload.startDate !== undefined ? { startDate: parseNullableDate(payload.startDate) } : {}),
         ...(payload.tagIds !== undefined ? { tagIds: payload.tagIds as string[] } : {}),
-        ...(payload.customFieldValues !== undefined ? { customFieldValues: payload.customFieldValues as Array<{ customFieldId: string; value: string | number | null }> } : {}),
+        ...(payload.customFieldValues !== undefined ? { customFieldValues: payload.customFieldValues as Array<{ customFieldId: string; value: string | number | boolean | null }> } : {}),
       });
       break;
     case "bulkUpdate":
@@ -138,7 +138,7 @@ export async function executeAiAction(
         ...(payload.statusId !== undefined ? { statusId: String(payload.statusId) } : {}),
         ...(payload.assigneeId !== undefined ? { assigneeId: payload.assigneeId == null ? null : String(payload.assigneeId) } : {}),
         ...(payload.tagIds !== undefined ? { tagIds: payload.tagIds as string[] } : {}),
-        ...(payload.customFieldValues !== undefined ? { customFieldValues: payload.customFieldValues as Array<{ customFieldId: string; value: string | number | null }> } : {}),
+        ...(payload.customFieldValues !== undefined ? { customFieldValues: payload.customFieldValues as Array<{ customFieldId: string; value: string | number | boolean | null }> } : {}),
       });
 
       break;

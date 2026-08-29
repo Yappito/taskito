@@ -173,13 +173,13 @@ export async function createTaskWithNextNumber<T>(
 
 const customFieldValueInputSchema = z.object({
   customFieldId: z.string().cuid(),
-  value: z.union([z.string(), z.number(), z.null()]),
+  value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
 });
 
 async function validateCustomFieldValues(
   ctx: { prisma: typeof import("@/lib/prisma").prisma },
   projectId: string,
-  values: Array<{ customFieldId: string; value: string | number | null }> | undefined
+  values: Array<{ customFieldId: string; value: string | number | boolean | null }> | undefined
 ) {
   if (!values || values.length === 0) {
     return [] as Array<{ customFieldId: string; value: Prisma.InputJsonValue }>;
