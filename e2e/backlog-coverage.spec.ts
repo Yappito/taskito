@@ -67,7 +67,7 @@ async function updateTaskStatusToDoneExpectingError(page: Page, title: string, e
 async function createMemberUser(page: Page, options: { name: string; email: string; password: string }) {
   await page.goto("/settings");
   await page.waitForLoadState("networkidle");
-  await page.getByRole("button", { name: "users" }).click();
+  await page.getByRole("tab", { name: "users" }).click();
   await page.getByText("New User").click();
   await page.getByPlaceholder("John Doe").fill(options.name);
   await page.getByPlaceholder("john@example.com").fill(options.email);
@@ -80,17 +80,16 @@ async function createMemberUser(page: Page, options: { name: string; email: stri
 async function deleteUserByEmail(page: Page, email: string) {
   await page.goto("/settings");
   await page.waitForLoadState("networkidle");
-  await page.getByRole("button", { name: "users" }).click();
+  await page.getByRole("tab", { name: "users" }).click();
 
   const userRow = page.locator("div.rounded-lg", { hasText: email }).first();
   if (!(await userRow.isVisible().catch(() => false))) {
     return;
   }
 
-  page.once("dialog", (dialog) => {
-    void dialog.accept();
-  });
   await userRow.getByRole("button", { name: "Delete" }).click();
+  // Deletion is guarded by the in-app confirm dialog (no native confirm())
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
   await expect(page.getByText(email)).not.toBeVisible({ timeout: 10_000 });
 }
 

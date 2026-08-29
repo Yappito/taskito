@@ -15,14 +15,14 @@ test.describe("Settings page", () => {
     await expect(page.locator("h1")).toHaveText("Settings");
 
     // Should have Projects and Users tabs
-    await expect(page.getByRole("button", { name: "projects" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "users" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "projects" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "users" })).toBeVisible();
   });
 
   test("projects tab shows existing projects", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: "projects" }).click();
+    await page.getByRole("tab", { name: "projects" }).click();
 
     await expect(page.getByRole("button", { name: "New Project" })).toBeVisible();
 
@@ -33,7 +33,7 @@ test.describe("Settings page", () => {
   test("can open create project dialog", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: "projects" }).click();
+    await page.getByRole("tab", { name: "projects" }).click();
 
     await page.getByRole("button", { name: "New Project" }).click();
 
@@ -47,7 +47,7 @@ test.describe("Settings page", () => {
   test("create project auto-generates slug and key", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: "projects" }).click();
+    await page.getByRole("tab", { name: "projects" }).click();
 
     await page.getByRole("button", { name: "New Project" }).click();
     await page.waitForTimeout(300);
@@ -66,7 +66,7 @@ test.describe("Settings page", () => {
   test("project switcher navigates between projects and scopes tasks", async ({ page }) => {
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
-    await page.getByRole("button", { name: "projects" }).click();
+    await page.getByRole("tab", { name: "projects" }).click();
 
     await page.getByRole("button", { name: "New Project" }).click();
     await page.waitForTimeout(300);
@@ -97,7 +97,7 @@ test.describe("Settings page", () => {
     await page.waitForLoadState("networkidle");
 
     // Switch to users tab
-    await page.getByRole("button", { name: "users" }).click();
+    await page.getByRole("tab", { name: "users" }).click();
     await page.waitForTimeout(500);
 
     // Should see New User button and at least the admin user
@@ -110,7 +110,7 @@ test.describe("Settings page", () => {
     await page.waitForLoadState("networkidle");
 
     // Switch to users tab
-    await page.getByRole("button", { name: "users" }).click();
+    await page.getByRole("tab", { name: "users" }).click();
     await page.waitForTimeout(500);
 
     await page.getByText("New User").click();

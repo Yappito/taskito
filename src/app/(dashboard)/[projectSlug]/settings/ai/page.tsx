@@ -5,8 +5,8 @@ import { use, useEffect, useMemo, useState } from "react";
 import { AiPermissionPicker } from "@/components/ai/ai-permission-picker";
 import { AiProviderForm } from "@/components/ai/ai-provider-form";
 import { AiProviderList } from "@/components/ai/ai-provider-list";
+import { ProviderManager, type AiProviderSummary } from "@/components/ai/provider-manager";
 import { Button } from "@/components/ui/button";
-import { DialogControlled as Dialog, DialogContent } from "@/components/ui/dialog";
 import { trpc } from "@/lib/trpc-client";
 import type { AiPermission } from "@/lib/ai-types";
 
@@ -31,8 +31,6 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
   const { data: permissions } = trpc.ai.listPermissions.useQuery();
   const { data: providers = [] } = trpc.ai.listProviders.useQuery({ projectId, actorScope: "manage" });
   const policy = policyQuery.data;
-  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
-  const [revealedSecret, setRevealedSecret] = useState<{ providerId: string; label: string; secret: string } | null>(null);
   const [defaultProviderId, setDefaultProviderId] = useState<string>("");
   const [allowUserProviders, setAllowUserProviders] = useState(true);
   const [allowProjectProviders, setAllowProjectProviders] = useState(true);
@@ -50,27 +48,6 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     },
   });
 
-  const updateMutation = trpc.ai.updateProvider.useMutation({
-    onSuccess: async () => {
-      setEditingProviderId(null);
-      await Promise.all([
-        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
-        utils.ai.getProjectPolicy.invalidate({ projectId }),
-      ]);
-    },
-  });
-
-  const deleteMutation = trpc.ai.deleteProvider.useMutation({
-    onSuccess: async () => {
-      await Promise.all([
-        utils.ai.listProviders.invalidate({ projectId, actorScope: "manage" }),
-        utils.ai.getProjectPolicy.invalidate({ projectId }),
-      ]);
-    },
-  });
-
-  const aiClient = trpc.useContext();
-
   const savePolicyMutation = trpc.ai.updateProjectPolicy.useMutation({
     onSuccess: async () => {
       await Promise.all([
@@ -80,32 +57,9 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
     },
   });
 
-  const testMutation = trpc.ai.testProvider.useMutation();
-
-  const projectProviders = providers.filter((provider) => provider.scope === "project") as Array<{
-    id: string;
-    label: string;
-    adapter: string | null;
-    model: string | null;
-    baseUrl: string | null;
-    isEnabled: boolean;
-    isDefault: boolean;
-    scope: "user" | "project" | "shared";
-    canManage?: boolean;
-  }>;
-  const sharedProviders = providers.filter((provider) => provider.scope === "shared") as Array<{
-    id: string;
-    label: string;
-    adapter: string | null;
-    model: string | null;
-    baseUrl: string | null;
-    isEnabled: boolean;
-    isDefault: boolean;
-    scope: "user" | "project" | "shared";
-    canManage?: boolean;
-  }>;
+  const projectProviders = providers.filter((provider) => provider.scope === "project") as AiProviderSummary[];
+  const sharedProviders = providers.filter((provider) => provider.scope === "shared") as AiProviderSummary[];
   const policyDefaultCandidates = [...sharedProviders, ...projectProviders];
-  const editingProvider = [...projectProviders, ...sharedProviders].find((provider) => provider.id === editingProviderId) ?? null;
   const availablePermissions = useMemo(() => (permissions ?? []) as AiPermission[], [permissions]);
 
   useEffect(() => {
@@ -155,40 +109,13 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
           Providers configured directly for this project.
         </p>
         <div className="mt-4">
-          <AiProviderList
+          <ProviderManager
+            scope={{ projectId }}
             providers={projectProviders}
-            onEdit={(provider) => {
-              setEditingProviderId(provider.id);
-            }}
-            onDelete={(provider) => {
-              if (confirm(`Delete provider \"${provider.label}\"?`)) {
-                deleteMutation.mutate({ id: provider.id });
-              }
-            }}
-            onRevealSecret={async (provider) => {
-              const result = await aiClient.ai.revealProviderSecret.fetch({ id: provider.id });
-              setRevealedSecret({ providerId: provider.id, label: provider.label, secret: result.secret ?? "" });
-            }}
-            onTest={(provider) => testMutation.mutate({ id: provider.id })}
+            editTitle="Edit Project Provider"
+            editSubmitLabel="Save Project Provider"
           />
         </div>
-        {testMutation.error && (
-          <p className="mt-3 text-sm" style={{ color: "var(--color-danger)" }}>{testMutation.error.message}</p>
-        )}
-        {testMutation.data && (
-          <p className="mt-3 text-sm" style={{ color: "var(--color-accent)" }}>
-            Provider test request succeeded for {testMutation.data.label}.
-          </p>
-        )}
-        {revealedSecret && (
-          <div className="mt-3 rounded-2xl border p-3 text-sm" style={{ borderColor: "var(--color-border)", color: "var(--color-text-secondary)" }}>
-            <div className="font-medium" style={{ color: "var(--color-text)" }}>Secret for {revealedSecret.label}</div>
-            <code className="mt-2 block overflow-x-auto rounded-xl px-3 py-2 text-xs" style={{ backgroundColor: "var(--color-bg-muted)", color: "var(--color-text)" }}>
-              {revealedSecret.secret}
-            </code>
-            <Button className="mt-3" size="sm" variant="outline" onClick={() => setRevealedSecret(null)}>Hide Secret</Button>
-          </div>
-        )}
       </section>
 
       <section className="rounded-3xl border p-6" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
@@ -289,34 +216,6 @@ function AiSettingsContent({ projectId, projectName }: { projectId: string; proj
           </div>
         </div>
       </section>
-
-      <Dialog open={!!editingProvider} onOpenChange={(open) => {
-        if (!open) {
-          setEditingProviderId(null);
-        }
-      }}>
-        <DialogContent>
-          {editingProvider && (
-            <AiProviderForm
-              title="Edit Project Provider"
-              submitLabel="Save Project Provider"
-              isPending={updateMutation.isPending}
-              error={updateMutation.error?.message ?? null}
-              initialValues={{
-                label: editingProvider.label,
-                adapter: (editingProvider.adapter ?? "openai_compatible") as "openai_compatible" | "anthropic",
-                baseUrl: editingProvider.baseUrl ?? "",
-                model: editingProvider.model ?? "",
-                secret: "",
-                isEnabled: editingProvider.isEnabled,
-                isDefault: editingProvider.isDefault,
-              }}
-              secretRequired={false}
-              onSubmit={(values) => updateMutation.mutate({ id: editingProvider.id, ...values })}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

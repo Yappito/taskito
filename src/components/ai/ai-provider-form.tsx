@@ -9,6 +9,8 @@ type ProviderAdapter = "openai_compatible" | "anthropic";
 
 interface AiProviderFormProps {
   title: string;
+  /** Set false when the surrounding dialog already renders the title (avoids a duplicate heading) */
+  showTitle?: boolean;
   submitLabel: string;
   isPending?: boolean;
   error?: string | null;
@@ -36,6 +38,7 @@ interface AiProviderFormProps {
 
 export function AiProviderForm({
   title,
+  showTitle = true,
   submitLabel,
   isPending = false,
   error,
@@ -70,11 +73,13 @@ export function AiProviderForm({
         onSubmit({ label, adapter, baseUrl, model, secret, isEnabled, isDefault });
       }}
     >
-      <div>
-        <h3 className="text-base font-semibold" style={{ color: "var(--color-text)" }}>
-          {title}
-        </h3>
-      </div>
+      {showTitle && (
+        <div>
+          <h3 className="text-base font-semibold" style={{ color: "var(--color-text)" }}>
+            {title}
+          </h3>
+        </div>
+      )}
       <div className="grid gap-4 md:grid-cols-2">
         <div>
           <label className="mb-1 block text-sm font-medium" style={{ color: "var(--color-text-secondary)" }}>
