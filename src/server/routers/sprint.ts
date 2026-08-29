@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { canAccessProject, requireProjectAccess, requireTaskAccess } from "@/server/authz";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
+import { FINISHED_CATEGORIES, upsertSprintSnapshot } from "@/server/services/sprint-snapshot";
 
 const sprintInput = z.object({
   projectId: z.string().cuid(),
@@ -75,6 +76,14 @@ function mapSprintMutationError(error: unknown): never {
 
   throw error;
 }
+
+const sprintInclude = {
+  _count: { select: { tasks: true } },
+  members: {
+    include: { user: { select: { id: true, name: true, email: true, image: true } } },
+    orderBy: { createdAt: "asc" as const },
+  },
+} satisfies Prisma.SprintInclude;
 
 export const sprintRouter = createTRPCRouter({
   list: protectedProcedure
@@ -251,6 +260,190 @@ export const sprintRouter = createTRPCRouter({
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, sprint.projectId, { permission: "sprint_manage" });
       await ctx.prisma.sprint.delete({ where: { id: input.id } });
       return { success: true };
+    }),
+
+  start: protectedProcedure
+    .input(z.object({ id: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const sprint = await ctx.prisma.sprint.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { id: true, projectId: true, status: true },
+      });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, sprint.projectId, { permission: "sprint_manage" });
+
+      try {
+        return await ctx.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Sprint" WHERE "id" = ${input.id} FOR UPDATE`);
+          const current = await tx.sprint.findUniqueOrThrow({
+            where: { id: input.id },
+            select: { id: true, status: true },
+          });
+          if (current.status === "completed") {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot start a completed sprint" });
+          }
+
+          const activeSprint = await tx.sprint.findFirst({
+            where: {
+              projectId: sprint.projectId,
+              status: "active",
+              id: { not: input.id },
+            },
+            select: { id: true, name: true },
+          });
+          if (activeSprint) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Project already has an active sprint: ${activeSprint.name}`,
+            });
+          }
+
+          const now = new Date();
+          const updated = await tx.sprint.update({
+            where: { id: input.id },
+            data: { status: "active", startedAt: now },
+          });
+
+          // First burndown data point for the newly started sprint.
+          const snapshotTasks = await tx.task.findMany({
+            where: { sprintId: input.id },
+            select: { status: { select: { category: true } } },
+          });
+          const finishedCount = snapshotTasks.filter((task) => (FINISHED_CATEGORIES as readonly string[]).includes(task.status.category)).length;
+          await upsertSprintSnapshot(tx, {
+            sprintId: input.id,
+            date: now,
+            remainingCount: snapshotTasks.length - finishedCount,
+            completedCount: finishedCount,
+          });
+
+          return tx.sprint.findUniqueOrThrow({ where: { id: updated.id }, include: sprintInclude });
+        });
+      } catch (error) {
+        mapSprintMutationError(error);
+      }
+    }),
+
+  complete: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().cuid(),
+        // Where unfinished work goes: back to the backlog, to the next planned
+        // sprint (earliest startDate), or into a specific sprint (id).
+        carryOverTo: z.union([z.literal("backlog"), z.literal("next"), z.string().cuid()]).default("backlog"),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const sprint = await ctx.prisma.sprint.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { id: true, projectId: true, status: true },
+      });
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, sprint.projectId, { permission: "sprint_manage" });
+
+      try {
+        return await ctx.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "Sprint" WHERE "id" = ${input.id} FOR UPDATE`);
+          const current = await tx.sprint.findUniqueOrThrow({
+            where: { id: input.id },
+            select: { id: true, status: true },
+          });
+          if (current.status === "completed") {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Sprint is already completed" });
+          }
+
+          let targetSprintId: string | null = null;
+          if (input.carryOverTo === "next") {
+            const nextSprint = await tx.sprint.findFirst({
+              where: {
+                projectId: sprint.projectId,
+                status: "planning",
+                id: { not: input.id },
+              },
+              orderBy: [{ startDate: "asc" }, { order: "asc" }],
+              select: { id: true, name: true },
+            });
+            if (!nextSprint) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "No planned sprint available to carry work over to",
+              });
+            }
+            targetSprintId = nextSprint.id;
+          } else if (input.carryOverTo !== "backlog") {
+            const targetSprint = await tx.sprint.findUnique({
+              where: { id: input.carryOverTo },
+              select: { id: true, projectId: true, status: true },
+            });
+            if (!targetSprint || targetSprint.projectId !== sprint.projectId) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Carry-over target sprint must belong to the same project",
+              });
+            }
+            if (targetSprint.id === sprint.id) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Cannot carry work over to the sprint being completed",
+              });
+            }
+            if (targetSprint.status === "completed") {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Cannot carry work over to a completed sprint",
+              });
+            }
+            targetSprintId = targetSprint.id;
+          }
+
+          const tasks = await tx.task.findMany({
+            where: { sprintId: input.id },
+            select: { id: true, status: { select: { category: true } } },
+          });
+          const finishedIds = tasks
+            .filter((task) => (FINISHED_CATEGORIES as readonly string[]).includes(task.status.category))
+            .map((task) => task.id);
+          const carriedIds = tasks
+            .filter((task) => !(FINISHED_CATEGORIES as readonly string[]).includes(task.status.category))
+            .map((task) => task.id);
+
+          if (carriedIds.length > 0) {
+            await tx.task.updateMany({
+              where: { id: { in: carriedIds } },
+              data: { sprintId: targetSprintId },
+            });
+          }
+
+          // Completion-day snapshot: after the carry-over every unfinished task
+          // has left the sprint, so the remaining work is zero.
+          const now = new Date();
+          await upsertSprintSnapshot(tx, {
+            sprintId: input.id,
+            date: now,
+            remainingCount: 0,
+            completedCount: finishedIds.length,
+          });
+
+          const updated = await tx.sprint.update({
+            where: { id: input.id },
+            data: {
+              status: "completed",
+              completedAt: now,
+              summary: {
+                committedCount: tasks.length,
+                completedCount: finishedIds.length,
+                carriedOverCount: carriedIds.length,
+                completedTaskIds: finishedIds,
+              },
+            },
+          });
+
+          return tx.sprint.findUniqueOrThrow({
+            where: { id: updated.id },
+            include: sprintInclude,
+          });
+        });
+      } catch (error) {
+        mapSprintMutationError(error);
+      }
     }),
 
   assignTask: protectedProcedure

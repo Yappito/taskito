@@ -17,6 +17,15 @@ const {
     projectMember: {
       findFirst: vi.fn(),
     },
+    sprint: {
+      findMany: vi.fn(),
+    },
+    task: {
+      findMany: vi.fn(),
+    },
+    sprintSnapshot: {
+      upsert: vi.fn(),
+    },
   },
 }));
 
@@ -55,6 +64,8 @@ const PROJECT_A = "cmab8yxxp0001i7p4k8n2v3q4";
 const PROJECT_B = "cmab8yxxp0002i7p4k8n2v3q5";
 const OWNER_ID = "cmab8yxxp0003i7p4k8n2v3q6";
 const MEMBER_ID = "cmab8yxxp0004i7p4k8n2v3q7";
+const SPRINT_A = "cmab8yxxp0005s0p0r0i0n0t0a0a0";
+const SPRINT_B = "cmab8yxxp0006s0p0r0i0n0t0a0a0";
 
 // Stand-in for the interactive-transaction client Prisma hands to the callback.
 // The advisory lock query runs on the tx connection; the jobs keep using the
@@ -89,6 +100,8 @@ describe("scheduler", () => {
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => unknown) => callback(txMock));
     prismaMock.automationRule.findMany.mockResolvedValue([{ projectId: PROJECT_A }]);
     prismaMock.projectMember.findFirst.mockResolvedValue({ userId: OWNER_ID });
+    prismaMock.sprint.findMany.mockResolvedValue([]);
+    prismaMock.task.findMany.mockResolvedValue([]);
     processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
     processDueDateAutomationRules.mockResolvedValue({ processed: 0 });
     runDailyDigestJob.mockResolvedValue({ sent: 0, skipped: 0 });
@@ -104,7 +117,7 @@ describe("scheduler", () => {
   });
 
   describe("runScheduledJobs", () => {
-    it("takes the transaction-scoped advisory lock and runs all three jobs once", async () => {
+    it("takes the transaction-scoped advisory lock and runs every scheduled job once", async () => {
       const result = await runScheduledJobs();
 
       expect(result).toEqual({ ran: true });
@@ -221,6 +234,43 @@ describe("scheduler", () => {
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] scheduled job failed: digest exploded"));
       errorSpy.mockRestore();
+    });
+
+    it("runs the sprint snapshot job for each active sprint (idempotent upsert per day)", async () => {
+      prismaMock.sprint.findMany.mockResolvedValue([{ id: SPRINT_A }, { id: SPRINT_B }]);
+      prismaMock.task.findMany
+        .mockResolvedValueOnce([
+          { status: { category: "todo" } },
+          { status: { category: "active" } },
+          { status: { category: "done" } },
+        ])
+        .mockResolvedValueOnce([{ status: { category: "cancelled" } }]);
+
+      // Two identical ticks in the same UTC day must not duplicate rows.
+      await runScheduledJobs();
+      await runScheduledJobs();
+
+      expect(prismaMock.sprint.findMany).toHaveBeenCalledWith({
+        where: { status: "active" },
+        select: { id: true },
+      });
+      expect(prismaMock.sprintSnapshot.upsert).toHaveBeenCalledTimes(4);
+      expect(prismaMock.sprintSnapshot.upsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          where: { sprintId_date: { sprintId: SPRINT_A, date: expect.any(Date) } },
+          create: expect.objectContaining({ remainingCount: 2, completedCount: 1 }),
+        })
+      );
+      expect(prismaMock.sprintSnapshot.upsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          where: { sprintId_date: { sprintId: SPRINT_B, date: expect.any(Date) } },
+          create: expect.objectContaining({ remainingCount: 0, completedCount: 1 }),
+        })
+      );
+      expect(processDueRecurrences).toHaveBeenCalledTimes(2);
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(2);
     });
 
     it("runs due-date automation per project and isolates per-project failures", async () => {

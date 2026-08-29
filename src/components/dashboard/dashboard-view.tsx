@@ -18,9 +18,11 @@ type DashboardDataWidget = RouterOutputs["dashboard"]["getDashboardData"]["widge
 type Person = RouterOutputs["project"]["people"][number];
 
 type Visibility = "public" | "restricted";
-type WidgetType = "metric" | "pie" | "bar" | "table";
+type WidgetType = "metric" | "pie" | "bar" | "table" | "burndown";
 type WidgetGroupBy = "status" | "priority" | "assignee" | "tag" | "sprint" | "dueMonth";
 type WidgetMetric = "count" | "overdue" | "completed" | "unassigned";
+
+type BurndownDay = { date: string; remaining: number; ideal: number };
 
 interface DashboardViewProps {
   projectId: string;
@@ -47,6 +49,8 @@ interface WidgetDraft {
   metric: WidgetMetric;
   savedFilterId: string;
   query: string;
+  /** Burndown widgets only: selected sprint id ("" = active sprint) */
+  sprintId: string;
   width: 1 | 2;
 }
 
@@ -72,6 +76,7 @@ const emptyWidgetDraft: WidgetDraft = {
   metric: "count",
   savedFilterId: "",
   query: "",
+  sprintId: "",
   width: 2,
 };
 
@@ -96,6 +101,7 @@ const widgetTypeLabels: Record<WidgetType, string> = {
   pie: "Pie chart",
   bar: "Bar chart",
   table: "Task table",
+  burndown: "Burndown chart",
 };
 
 function userLabel(person: Person) {
@@ -105,6 +111,7 @@ function userLabel(person: Person) {
 function resetWidgetDraftForType(type: WidgetType, current: WidgetDraft): WidgetDraft {
   if (type === "metric") return { ...current, type, title: current.title || "Task count", width: 1 };
   if (type === "table") return { ...current, type, title: current.title || "Matching tasks", width: 2 };
+  if (type === "burndown") return { ...current, type, title: current.title || "Sprint burndown", width: 2 };
   return { ...current, type, title: current.title || "Chart", width: 2 };
 }
 
@@ -118,6 +125,10 @@ function seriesFromWidget(widget: DashboardDataWidget) {
 
 function tasksFromWidget(widget: DashboardDataWidget) {
   return "tasks" in widget && Array.isArray(widget.tasks) ? widget.tasks : [];
+}
+
+function daysFromWidget(widget: DashboardDataWidget) {
+  return "days" in widget && Array.isArray(widget.days) ? (widget.days as BurndownDay[]) : [];
 }
 
 function formatDate(value: string | Date) {
@@ -265,6 +276,82 @@ function BarChart({ series }: { series: Array<{ key: string; label: string; valu
   );
 }
 
+function BurndownChart({ days }: { days: BurndownDay[] }) {
+  if (days.length === 0) {
+    return <div className="grid h-48 place-items-center text-sm" style={{ color: "var(--color-text-muted)" }}>No data</div>;
+  }
+
+  const width = 640;
+  const height = 240;
+  const padding = { top: 14, right: 14, bottom: 30, left: 44 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const maxValue = Math.max(1, ...days.map((day) => Math.max(day.remaining, day.ideal)));
+  const xFor = (index: number) =>
+    days.length === 1 ? padding.left : padding.left + (index / (days.length - 1)) * chartWidth;
+  const yFor = (value: number) => padding.top + (1 - value / maxValue) * chartHeight;
+  const toPoints = (pick: (day: BurndownDay) => number) =>
+    days.map((day, index) => `${xFor(index)},${yFor(pick(day))}`).join(" ");
+
+  const lastDay = days[days.length - 1];
+  const yTicks = [0, Math.round(maxValue / 2), maxValue];
+  const xTickIndexes = days.length >= 3 ? [0, Math.floor((days.length - 1) / 2), days.length - 1] : days.map((_, index) => index);
+
+  return (
+    <div className="space-y-2">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-56 w-full"
+        role="img"
+        aria-label={`Burndown chart of ${days.length} day${days.length === 1 ? "" : "s"}: ${lastDay.remaining} task${lastDay.remaining === 1 ? "" : "s"} remaining`}
+      >
+        {yTicks.map((tick) => (
+          <g key={`y-${tick}`}>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yFor(tick)}
+              y2={yFor(tick)}
+              stroke="var(--color-border)"
+              strokeWidth={1}
+            />
+            <text x={padding.left - 8} y={yFor(tick)} fontSize={11} textAnchor="end" dominantBaseline="middle" fill="var(--color-text-muted)">
+              {tick}
+            </text>
+          </g>
+        ))}
+        {xTickIndexes.map((index) => (
+          <text
+            key={`x-${index}`}
+            x={xFor(index)}
+            y={height - 10}
+            fontSize={11}
+            textAnchor={index === 0 ? "start" : index === days.length - 1 ? "end" : "middle"}
+            fill="var(--color-text-muted)"
+          >
+            {formatDate(days[index].date)}
+          </text>
+        ))}
+        <polyline points={toPoints((day) => day.ideal)} fill="none" stroke="var(--color-text-muted)" strokeWidth={1.5} strokeDasharray="6 5" strokeLinecap="round" strokeLinejoin="round" />
+        <polyline points={toPoints((day) => day.remaining)} fill="none" stroke="var(--color-accent)" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
+        {days.map((day, index) => (
+          <circle key={day.date} cx={xFor(index)} cy={yFor(day.remaining)} r={2.5} fill="var(--color-accent)" />
+        ))}
+      </svg>
+      <div className="flex flex-wrap gap-4 text-xs" style={{ color: "var(--color-text-secondary)" }}>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-0.5 w-4 rounded-full" style={{ backgroundColor: "var(--color-accent)" }} />
+          Remaining
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-0.5 w-4 rounded-full" style={{ backgroundColor: "var(--color-text-muted)" }} />
+          Ideal
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function TableWidget({ widget }: { widget: DashboardDataWidget }) {
   const tasks = tasksFromWidget(widget);
   if (tasks.length === 0) {
@@ -301,7 +388,8 @@ function TableWidget({ widget }: { widget: DashboardDataWidget }) {
 
 function WidgetCard({ widget, config, onEdit, onDelete }: { widget: DashboardDataWidget; config?: DashboardWidget; onEdit: () => void; onDelete: () => void }) {
   const series = seriesFromWidget(widget);
-  const width = config?.width === 2 || widget.type === "table" ? "xl:col-span-2" : "";
+  const days = daysFromWidget(widget);
+  const width = config?.width === 2 || widget.type === "table" || widget.type === "burndown" ? "xl:col-span-2" : "";
 
   return (
     <section className={`rounded-2xl border p-4 ${width}`} style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)", boxShadow: "var(--shadow-sm)" }}>
@@ -312,7 +400,15 @@ function WidgetCard({ widget, config, onEdit, onDelete }: { widget: DashboardDat
             <Badge variant="outline">{widgetTypeLabels[widget.type as WidgetType] ?? widget.type}</Badge>
           </div>
           <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
-            {widget.savedFilterId ? "Saved filter" : widget.query ? widget.query : "All active project tasks"}
+            {widget.type === "burndown"
+              ? "sprintName" in widget && widget.sprintName
+                ? `Sprint: ${widget.sprintName}`
+                : "Active sprint"
+              : widget.savedFilterId
+                ? "Saved filter"
+                : widget.query
+                  ? widget.query
+                  : "All active project tasks"}
           </p>
         </div>
         <div className="flex gap-2">
@@ -323,6 +419,8 @@ function WidgetCard({ widget, config, onEdit, onDelete }: { widget: DashboardDat
 
       {widget.error ? (
         <div className="rounded-xl border p-3 text-sm" style={{ borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))", backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)", color: "var(--color-danger)" }}>{widget.error}</div>
+      ) : widget.type === "burndown" ? (
+        <BurndownChart days={days} />
       ) : widget.type === "metric" ? (
         <div>
           <div className="text-5xl font-semibold" style={{ color: "var(--color-text)" }}>{widget.total}</div>
@@ -353,6 +451,7 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
   const { data: dashboards = [], isLoading: dashboardsLoading } = trpc.dashboard.listDashboards.useQuery({ projectId });
   const { data: savedFilters = [] } = trpc.dashboard.listSavedFilters.useQuery({ projectId });
   const { data: people = [] } = trpc.project.people.useQuery({ projectId });
+  const { data: sprints = [] } = trpc.sprint.list.useQuery({ projectId });
   const { data: queryExamples = [] } = trpc.dashboard.queryHelp.useQuery();
 
   const selectedDashboard = useMemo(
@@ -433,6 +532,8 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
       metric: editingWidget.metric as WidgetMetric,
       savedFilterId: editingWidget.savedFilterId ?? "",
       query: editingWidget.query ?? "",
+      // Burndown widgets store their chosen sprint id in the query column.
+      sprintId: editingWidget.type === "burndown" ? editingWidget.query ?? "" : "",
       width: editingWidget.width === 2 ? 2 : 1,
     });
   }, [editingWidget]);
@@ -559,7 +660,11 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
       groupBy: widgetDraft.type === "bar" || widgetDraft.type === "pie" ? widgetDraft.groupBy : null,
       metric: widgetDraft.metric,
       savedFilterId: widgetDraft.savedFilterId || null,
-      query: widgetDraft.savedFilterId ? null : widgetDraft.query.trim() || null,
+      // Burndown widgets keep the chosen sprint id in the query column;
+      // empty means "use the project's active sprint".
+      query: widgetDraft.type === "burndown"
+        ? widgetDraft.sprintId || null
+        : widgetDraft.savedFilterId ? null : widgetDraft.query.trim() || null,
       width: widgetDraft.width,
     };
     if (!payload.title) return;
@@ -761,14 +866,25 @@ export function DashboardView({ projectId, statuses, tags }: DashboardViewProps)
                   </Select>
                 </div>
               )}
-              <div className="space-y-1.5">
-                <FieldLabel>Saved filter</FieldLabel>
-                <Select value={widgetDraft.savedFilterId} onChange={(event) => setWidgetDraft((draft) => ({ ...draft, savedFilterId: event.target.value }))}>
-                  <option value="">Inline query or all active tasks</option>
-                  {savedFilters.map((filter) => <option key={filter.id} value={filter.id}>{filter.name}</option>)}
-                </Select>
-              </div>
-              {!widgetDraft.savedFilterId && (
+              {widgetDraft.type === "burndown" && (
+                <div className="space-y-1.5">
+                  <FieldLabel>Sprint</FieldLabel>
+                  <Select value={widgetDraft.sprintId} onChange={(event) => setWidgetDraft((draft) => ({ ...draft, sprintId: event.target.value }))}>
+                    <option value="">Active sprint (automatic)</option>
+                    {sprints.map((sprint) => <option key={sprint.id} value={sprint.id}>{sprint.name} ({sprint.status})</option>)}
+                  </Select>
+                </div>
+              )}
+              {widgetDraft.type !== "burndown" && (
+                <div className="space-y-1.5">
+                  <FieldLabel>Saved filter</FieldLabel>
+                  <Select value={widgetDraft.savedFilterId} onChange={(event) => setWidgetDraft((draft) => ({ ...draft, savedFilterId: event.target.value }))}>
+                    <option value="">Inline query or all active tasks</option>
+                    {savedFilters.map((filter) => <option key={filter.id} value={filter.id}>{filter.name}</option>)}
+                  </Select>
+                </div>
+              )}
+              {!widgetDraft.savedFilterId && widgetDraft.type !== "burndown" && (
                 <div className="space-y-1.5">
                   <FieldLabel>Inline query</FieldLabel>
                   <textarea

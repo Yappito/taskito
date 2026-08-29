@@ -174,24 +174,42 @@ enum SprintStatus {
 }
 
 model Sprint {
-  id        String       @id @default(cuid())
-  projectId String
-  name      String
-  goal      String?
-  startDate DateTime
-  endDate   DateTime
-  status    SprintStatus @default(planning)
-  order     Int          @default(0)
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  id          String       @id @default(cuid())
+  projectId   String
+  name        String
+  goal        String?
+  startDate   DateTime
+  endDate     DateTime
+  status      SprintStatus @default(planning)
+  order       Int          @default(0)
+  startedAt   DateTime?
+  completedAt DateTime?
+  summary     Json?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tasks   Task[]
-  members SprintMember[]
+  project   Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks     Task[]
+  members   SprintMember[]
+  snapshots SprintSnapshot[]
 
   @@unique([projectId, name])
   @@index([projectId, order])
   @@index([projectId, status])
+}
+
+model SprintSnapshot {
+  id             String   @id @default(cuid())
+  sprintId       String
+  date           DateTime @db.Date
+  remainingCount Int
+  completedCount Int
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+
+  @@unique([sprintId, date])
 }
 
 model SprintMember {
@@ -740,6 +758,7 @@ enum DashboardWidgetType {
   pie
   bar
   table
+  burndown
 }
 
 enum DashboardWidgetGroupBy {
