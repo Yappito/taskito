@@ -3,7 +3,8 @@ import type { AiConversation, AiMessage, Prisma } from "@prisma/client";
 import { completeWithAnthropicProviderStructured } from "./provider-anthropic";
 import { buildAiConversationContext } from "./context-builder";
 import { executeAiAction } from "./action-executor";
-import { completeWithOpenAiCompatibleProviderStructured, type AiProviderCompletion } from "./provider-openai-compatible";
+import { completeWithOpenAiCompatibleProviderStructured } from "./provider-openai-compatible";
+import { appendAiTruncationNote, type AiProviderCompletion } from "./provider-request";
 import { buildAiContextMessage, buildAiSystemPrompt, extractAiProposals, stripAiProposalBlock } from "./presenter";
 import { resolveAiProvider } from "./provider-registry";
 import { buildAiToolDefinitions, normalizeAiNativeToolCalls, normalizeAiToolProposals, resolveAiActionPayload, type AiNativeToolDefinition } from "./tools";
@@ -73,6 +74,7 @@ export async function buildAiAssistantTurnRequest(
       toolPayload: null,
       toolCalls: null,
       toolCallId: null,
+      usage: null,
       isStreaming: false,
       createdAt: new Date(0),
     },
@@ -85,6 +87,7 @@ export async function buildAiAssistantTurnRequest(
       toolPayload: null,
       toolCalls: null,
       toolCallId: null,
+      usage: null,
       isStreaming: false,
       createdAt: new Date(0),
     },
@@ -131,7 +134,9 @@ export async function persistAiAssistantCompletion(
       return null;
     }
   }))).filter((proposal): proposal is (typeof rawProposals)[number] => proposal !== null);
-  const assistantContent = stripAiProposalBlock(input.completion.content) || (proposals.length > 0 ? "I prepared the proposed action cards below." : "");
+  const baseContent = stripAiProposalBlock(input.completion.content) || (proposals.length > 0 ? "I prepared the proposed action cards below." : "");
+  // Truncated replies get a visible note so lost output is never silent.
+  const assistantContent = input.completion.truncated ? appendAiTruncationNote(baseContent) : baseContent;
 
   const assistantMessage = await prisma.aiMessage.create({
     data: {
@@ -140,6 +145,7 @@ export async function persistAiAssistantCompletion(
       content: assistantContent,
       ...(proposals.length ? { toolPayload: { proposals } as unknown as Prisma.InputJsonValue } : {}),
       ...(input.completion.toolCalls.length ? { toolCalls: input.completion.toolCalls as unknown as Prisma.InputJsonValue } : {}),
+      ...(input.completion.usage ? { usage: input.completion.usage as unknown as Prisma.InputJsonValue } : {}),
     },
   });
 

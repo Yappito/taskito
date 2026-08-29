@@ -3,8 +3,25 @@ import type { AiMessage } from "@prisma/client";
 import { assertAiProviderBaseUrlFetchAllowed } from "@/lib/ai-provider-validation";
 
 import type { ResolvedAiProvider } from "./provider-registry";
-import { fetchAiProvider, getAiProviderRequestTimeoutMs, normalizeAiProviderRequestError, UpstreamProviderError } from "./provider-request";
-import type { AiNativeToolCall, AiNativeToolDefinition } from "./tools";
+import {
+  AiProviderError,
+  aiProviderErrorFromResponse,
+  createAiProviderCompletion,
+  fetchAiProviderWithRetry,
+  getAiProviderRequestTimeoutMs,
+  normalizeAiProviderRequestError,
+  resolveAiMaxOutputTokens,
+  type AiProviderCompletion,
+  type AiProviderUsage,
+} from "./provider-request";
+import type { AiNativeToolDefinition } from "./tools";
+
+interface AnthropicUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
 
 interface AnthropicMessageResponse {
   content?: Array<{
@@ -14,11 +31,18 @@ interface AnthropicMessageResponse {
     name?: string;
     input?: Record<string, unknown>;
   }>;
+  stop_reason?: string | null;
+  usage?: AnthropicUsage;
 }
 
-interface AiProviderCompletion {
-  content: string;
-  toolCalls: AiNativeToolCall[];
+interface AnthropicStreamEvent {
+  type?: string;
+  index?: number;
+  content_block?: { id?: string; name?: string; type?: string };
+  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+  message?: { usage?: AnthropicUsage };
+  usage?: AnthropicUsage;
+  error?: { type?: string; message?: string };
 }
 
 function mapAnthropicTools(tools: AiNativeToolDefinition[] | undefined) {
@@ -38,6 +62,71 @@ function normalizeMessages(messages: AiMessage[]) {
     }));
 }
 
+function readAnthropicUsage(usage: AnthropicUsage | undefined): AiProviderUsage | null {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const inputTokens = typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens) ? usage.input_tokens : null;
+  const outputTokens = typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens) ? usage.output_tokens : null;
+  const cacheReadTokens = typeof usage.cache_read_input_tokens === "number" && Number.isFinite(usage.cache_read_input_tokens)
+    ? usage.cache_read_input_tokens
+    : null;
+  if (inputTokens === null && outputTokens === null && cacheReadTokens === null) {
+    return null;
+  }
+  return { inputTokens, outputTokens, cacheReadTokens };
+}
+
+function mergeAnthropicUsage(parts: (AiProviderUsage | null)[]): AiProviderUsage | null {
+  let merged: AiProviderUsage | undefined;
+  for (const part of parts) {
+    if (!part) continue;
+    const current: AiProviderUsage = merged ?? { inputTokens: null, outputTokens: null, cacheReadTokens: null };
+    merged = {
+      inputTokens: part.inputTokens ?? current.inputTokens,
+      outputTokens: part.outputTokens ?? current.outputTokens,
+      cacheReadTokens: part.cacheReadTokens ?? current.cacheReadTokens,
+    };
+  }
+  return merged ?? null;
+}
+
+function buildAnthropicRequestBody(
+  provider: ResolvedAiProvider,
+  messages: AiMessage[],
+  tools: AiNativeToolDefinition[] | undefined,
+  { stream = false }: { stream?: boolean } = {}
+) {
+  const systemMessages = messages.filter((message) => message.role === "system");
+  return {
+    model: provider.model,
+    max_tokens: resolveAiMaxOutputTokens(provider.settings),
+    ...(stream ? { stream: true } : {}),
+    system: systemMessages.map((message) => message.content).join("\n\n").trim() || undefined,
+    messages: normalizeMessages(messages),
+    ...(tools?.length ? { tools: mapAnthropicTools(tools) } : {}),
+  };
+}
+
+async function postToAnthropicMessages(
+  provider: ResolvedAiProvider,
+  baseUrl: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal
+) {
+  return fetchAiProviderWithRetry(`${baseUrl.replace(/\/$/, "")}/messages`, {
+    method: "POST",
+    headers: {
+      ...provider.defaultHeaders,
+      "Content-Type": "application/json",
+      "x-api-key": provider.secret,
+      "anthropic-version": "2023-06-01",
+    },
+    signal,
+    body: JSON.stringify(body),
+  });
+}
+
 export async function completeWithAnthropicProvider(provider: ResolvedAiProvider, messages: AiMessage[]) {
   const completion = await completeWithAnthropicProviderStructured(provider, messages);
   return completion.content;
@@ -48,33 +137,19 @@ export async function completeWithAnthropicProviderStructured(
   messages: AiMessage[],
   tools?: AiNativeToolDefinition[]
 ): Promise<AiProviderCompletion> {
-  const systemMessages = messages.filter((message) => message.role === "system");
-  const conversationMessages = normalizeMessages(messages);
-
   const baseUrl = await assertAiProviderBaseUrlFetchAllowed(provider.baseUrl);
   const timeoutMs = getAiProviderRequestTimeoutMs();
 
   try {
-    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/messages`, {
-      method: "POST",
-      headers: {
-        ...provider.defaultHeaders,
-        "Content-Type": "application/json",
-        "x-api-key": provider.secret,
-        "anthropic-version": "2023-06-01",
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-      body: JSON.stringify({
-        model: provider.model,
-        max_tokens: 1200,
-        system: systemMessages.map((message) => message.content).join("\n\n").trim() || undefined,
-        messages: conversationMessages,
-        ...(tools?.length ? { tools: mapAnthropicTools(tools) } : {}),
-      }),
-    });
+    const response = await postToAnthropicMessages(
+      provider,
+      baseUrl,
+      buildAnthropicRequestBody(provider, messages, tools),
+      AbortSignal.timeout(timeoutMs)
+    );
 
     if (!response.ok) {
-      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
+      throw await aiProviderErrorFromResponse(response);
     }
 
     const payload = (await response.json()) as AnthropicMessageResponse;
@@ -83,7 +158,10 @@ export async function completeWithAnthropicProviderStructured(
       toolCalls: payload.content?.flatMap((part) => part.type === "tool_use" && part.name
         ? [{ id: part.id, name: part.name, arguments: part.input ?? {} }]
         : []) ?? [],
-    };
+      truncated: payload.stop_reason === "max_tokens",
+      stopReason: payload.stop_reason ?? null,
+      usage: readAnthropicUsage(payload.usage),
+    } satisfies AiProviderCompletion;
   } catch (error) {
     throw normalizeAiProviderRequestError(error, timeoutMs);
   }
@@ -96,38 +174,34 @@ export async function streamWithAnthropicProvider(
   onDelta: (delta: string) => void,
   signal?: AbortSignal
 ): Promise<AiProviderCompletion> {
-  const systemMessages = messages.filter((message) => message.role === "system");
-  const conversationMessages = normalizeMessages(messages);
   const baseUrl = await assertAiProviderBaseUrlFetchAllowed(provider.baseUrl);
   const timeoutMs = getAiProviderRequestTimeoutMs();
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signals = [timeoutSignal, signal].filter(Boolean) as AbortSignal[];
   const combinedSignal = signals.length > 1 ? AbortSignal.any(signals) : timeoutSignal;
   let content = "";
+  let stopReason: string | null = null;
+  let startUsage: AiProviderUsage | null = null;
+  let deltaUsage: AiProviderUsage | null = null;
   const toolCalls = new Map<number, { id?: string; name: string; inputBuffer: string }>();
 
   try {
-    const response = await fetchAiProvider(`${baseUrl.replace(/\/$/, "")}/messages`, {
-      method: "POST",
-      headers: {
-        ...provider.defaultHeaders,
-        "Content-Type": "application/json",
-        "x-api-key": provider.secret,
-        "anthropic-version": "2023-06-01",
-      },
-      signal: combinedSignal,
-      body: JSON.stringify({
-        model: provider.model,
-        max_tokens: 1200,
-        stream: true,
-        system: systemMessages.map((message) => message.content).join("\n\n").trim() || undefined,
-        messages: conversationMessages,
-        ...(tools?.length ? { tools: mapAnthropicTools(tools) } : {}),
-      }),
-    });
+    const response = await postToAnthropicMessages(
+      provider,
+      baseUrl,
+      buildAnthropicRequestBody(provider, messages, tools, { stream: true }),
+      combinedSignal
+    );
 
-    if (!response.ok || !response.body) {
-      throw new UpstreamProviderError(`Provider request failed with status ${response.status}`, response.status);
+    if (!response.ok) {
+      throw await aiProviderErrorFromResponse(response);
+    }
+    if (!response.body) {
+      throw new AiProviderError("Anthropic stream returned an empty body", {
+        status: response.status,
+        code: "empty_stream_body",
+        retryable: false,
+      });
     }
 
     const reader = response.body.getReader();
@@ -147,12 +221,35 @@ export async function streamWithAnthropicProvider(
         const data = line.slice(5).trim();
         if (!data) continue;
         try {
-          const parsed = JSON.parse(data) as {
-            type?: string;
-            index?: number;
-            content_block?: { id?: string; name?: string; type?: string };
-            delta?: { type?: string; text?: string; partial_json?: string };
-          };
+          const parsed = JSON.parse(data) as AnthropicStreamEvent;
+          // Keepalives and lifecycle bookkeeping events carry no payload data.
+          if (parsed.type === "ping") continue;
+          if (parsed.type === "error") {
+            await reader.cancel().catch(() => {});
+            const errorType = parsed.error?.type ?? "stream_error";
+            const errorMessage = parsed.error?.message?.trim();
+            throw new AiProviderError(
+              (errorMessage && errorMessage.length > 0 ? errorMessage : `Anthropic stream failed with ${errorType} error event`).slice(0, 500),
+              {
+                status: null,
+                code: errorType,
+                // The request cannot be retried in place (bytes were already
+                // streamed); a retry would have to restart the whole turn.
+                retryable: errorType === "overloaded_error",
+              }
+            );
+          }
+          if (parsed.type === "message_start" && parsed.message?.usage) {
+            startUsage = readAnthropicUsage(parsed.message.usage);
+          }
+          if (parsed.type === "message_delta") {
+            if (parsed.delta?.stop_reason) {
+              stopReason = parsed.delta.stop_reason;
+            }
+            if (parsed.usage) {
+              deltaUsage = readAnthropicUsage(parsed.usage);
+            }
+          }
           if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
             toolCalls.set(parsed.index ?? 0, { id: parsed.content_block.id, name: parsed.content_block.name ?? "", inputBuffer: "" });
           }
@@ -164,13 +261,16 @@ export async function streamWithAnthropicProvider(
             const existing = toolCalls.get(parsed.index ?? 0)!;
             existing.inputBuffer += parsed.delta.partial_json;
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof AiProviderError) {
+            throw error;
+          }
           // Ignore malformed provider stream events.
         }
       }
     }
 
-    return {
+    return createAiProviderCompletion({
       content: content.trim(),
       toolCalls: [...toolCalls.values()].flatMap((toolCall) => {
         if (!toolCall.name) return [];
@@ -180,7 +280,10 @@ export async function streamWithAnthropicProvider(
           return [{ id: toolCall.id, name: toolCall.name, arguments: {} }];
         }
       }),
-    };
+      truncated: stopReason === "max_tokens",
+      stopReason,
+      usage: mergeAnthropicUsage([startUsage, deltaUsage]),
+    });
   } catch (error) {
     throw normalizeAiProviderRequestError(error, timeoutMs);
   }
