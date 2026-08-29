@@ -23,6 +23,8 @@ export type PrismaModelMock = Record<string, Mock>;
 export type PrismaMock = Record<string, PrismaModelMock> & {
   /** Interactive / batch transactions run against this same mock. */
   $transaction: Mock;
+  /** Client-level raw query stub (resolves to an empty result set). */
+  $queryRaw: Mock;
 };
 
 const NON_DELEGATE_KEYS = new Set(["then", "catch", "finally"]);
@@ -72,6 +74,8 @@ export function createPrismaMock(): PrismaMock {
     return callback(proxy);
   }).mockName("prisma.$transaction");
 
+  const queryRaw = vi.fn(async () => []).mockName("prisma.$queryRaw");
+
   const proxy = new Proxy({} as Record<string | symbol, unknown>, {
     get(_target, prop) {
       if (typeof prop !== "string" || NON_DELEGATE_KEYS.has(prop)) {
@@ -79,6 +83,9 @@ export function createPrismaMock(): PrismaMock {
       }
       if (prop === "$transaction") {
         return transaction;
+      }
+      if (prop === "$queryRaw") {
+        return queryRaw;
       }
       return delegateFor(models, prop);
     },

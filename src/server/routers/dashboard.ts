@@ -5,9 +5,10 @@ import type { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure, type TRPCContext } from "@/server/trpc";
 import { getEffectiveProjectAccess, requireProjectAccess } from "@/server/authz";
 import { buildTaskWhereFromDashboardQuery, dashboardQueryHelp, type DashboardQueryDictionary } from "@/server/services/dashboard-query";
+import { computeBurndownDays } from "@/server/services/burndown";
 
 const visibilitySchema = z.enum(["public", "restricted"]);
-const widgetTypeSchema = z.enum(["metric", "pie", "bar", "table"]);
+const widgetTypeSchema = z.enum(["metric", "pie", "bar", "table", "burndown"]);
 const groupBySchema = z.enum(["status", "priority", "assignee", "tag", "sprint", "dueMonth"]);
 const metricSchema = z.enum(["count", "overdue", "completed", "unassigned"]);
 
@@ -219,6 +220,74 @@ function monthKey(date: Date) {
   return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, "0")}`;
 }
 
+/**
+ * Burndown widgets store their chosen sprint in the widget's `query` column
+ * (empty = the project's active sprint). The sprint must belong to the
+ * dashboard's project.
+ */
+async function validateBurndownSprintQuery(ctx: TRPCContext, projectId: string, query: string | null | undefined) {
+  if (!query) return;
+  const sprint = await ctx.prisma.sprint.findUnique({
+    where: { id: query },
+    select: { id: true, projectId: true },
+  });
+  if (!sprint || sprint.projectId !== projectId) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Burndown sprint must belong to this dashboard project." });
+  }
+}
+
+interface BurndownWidgetData {
+  sprintName: string | null;
+  days: ReturnType<typeof computeBurndownDays>;
+}
+
+/**
+ * Resolve the sprint for a burndown widget (explicit id or the active one) and
+ * compute the daily remaining/ideal series from SprintSnapshot rows.
+ */
+async function buildBurndownWidgetData(ctx: TRPCContext, projectId: string, query: string | null): Promise<BurndownWidgetData> {
+  const sprintSelect = {
+    id: true,
+    projectId: true,
+    name: true,
+    startDate: true,
+    endDate: true,
+    status: true,
+  } as const;
+
+  let sprint: Prisma.SprintGetPayload<{ select: typeof sprintSelect }> | null = null;
+  if (query) {
+    sprint = await ctx.prisma.sprint.findUnique({ where: { id: query }, select: sprintSelect });
+    if (!sprint || sprint.projectId !== projectId) {
+      throw new Error("Burndown sprint no longer exists.");
+    }
+  } else {
+    sprint = await ctx.prisma.sprint.findFirst({
+      where: { projectId, status: "active" },
+      orderBy: [{ startDate: "asc" }, { order: "asc" }],
+      select: sprintSelect,
+    });
+  }
+
+  if (!sprint) {
+    return { sprintName: null, days: [] };
+  }
+
+  const snapshots = await ctx.prisma.sprintSnapshot.findMany({
+    where: { sprintId: sprint.id },
+    select: { date: true, remainingCount: true, completedCount: true },
+    orderBy: { date: "asc" },
+  });
+
+  const days = computeBurndownDays({
+    startDate: sprint.startDate,
+    endDate: sprint.endDate,
+    snapshots,
+  });
+
+  return { sprintName: sprint.name, days };
+}
+
 async function buildSeries(ctx: TRPCContext, where: Prisma.TaskWhereInput, groupBy: string | null) {
   if (!groupBy) return [];
 
@@ -318,10 +387,28 @@ async function buildWidgetData(ctx: TRPCContext, dashboard: DashboardForView, di
         query = filter.query;
       }
 
+      const displayQuery = widget.savedFilterId ? "" : query;
+
+      if (widget.type === "burndown") {
+        const burndown = await buildBurndownWidgetData(ctx, dashboard.projectId, widget.query);
+        return {
+          id: widget.id,
+          title: widget.title,
+          type: widget.type,
+          total: 0,
+          days: burndown.days,
+          sprintName: burndown.sprintName,
+          query: "",
+          metric: widget.metric,
+          groupBy: widget.groupBy,
+          savedFilterId: widget.savedFilterId ?? undefined,
+          error: null,
+        };
+      }
+
       const parsed = buildTaskWhereFromDashboardQuery(dashboard.projectId, query, dictionary);
       const where = combineWhere(parsed.where, metricWhere(widget.type === "metric" ? widget.metric : "count"));
       const total = await ctx.prisma.task.count({ where });
-      const displayQuery = widget.savedFilterId ? "" : query;
 
       if (widget.type === "table") {
         const tasks = await ctx.prisma.task.findMany({
@@ -556,7 +643,11 @@ export const dashboardRouter = createTRPCRouter({
         }
       }
       if (!input.savedFilterId && input.query) {
-        await validateQuery(ctx, dashboard.projectId, input.query);
+        if (input.type === "burndown") {
+          await validateBurndownSprintQuery(ctx, dashboard.projectId, input.query);
+        } else {
+          await validateQuery(ctx, dashboard.projectId, input.query);
+        }
       }
 
       const maxOrder = await ctx.prisma.dashboardWidget.aggregate({
@@ -601,7 +692,11 @@ export const dashboardRouter = createTRPCRouter({
         }
       }
       if (!input.savedFilterId && input.query) {
-        await validateQuery(ctx, dashboard.projectId, input.query);
+        if (input.type === "burndown") {
+          await validateBurndownSprintQuery(ctx, dashboard.projectId, input.query);
+        } else {
+          await validateQuery(ctx, dashboard.projectId, input.query);
+        }
       }
 
       return ctx.prisma.dashboardWidget.update({

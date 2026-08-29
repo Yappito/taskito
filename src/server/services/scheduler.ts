@@ -4,14 +4,16 @@ import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { runDailyDigestJob } from "@/server/services/email/digest";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
+import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
 
 /**
  * In-process background scheduler ("cron inside the app").
  *
- * Drives the three time-based features that used to require an external trigger:
+ * Drives the time-based features that used to require an external trigger:
  *  - recurrence processing (creating the next occurrence of recurring tasks)
  *  - due-date automation rules (`dueDatePassed` trigger)
  *  - the daily due-soon digest email (from SCHEDULER_DIGEST_HOUR_UTC onwards)
+ *  - the daily sprint snapshot series (remaining work per active sprint)
  *
  * Multi-replica safety: every tick opens one interactive transaction and takes
  * a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`)
@@ -173,6 +175,19 @@ async function runDigestJob() {
 }
 
 /**
+ * Daily sprint snapshot series: one remaining-work row per active sprint for
+ * the current UTC day. recordSprintSnapshots is idempotent (upsert on the
+ * unique sprintId + day pair), so repeated ticks and other replicas cannot
+ * create duplicate rows for the same day.
+ */
+async function runSprintSnapshotJob() {
+  const recorded = await recordSprintSnapshots(prisma);
+  if (recorded > 0) {
+    console.info(`${SCHEDULER_LOG_PREFIX} sprint snapshot job recorded ${recorded} sprint snapshot(s)`);
+  }
+}
+
+/**
  * One scheduler tick: open a transaction, take the transaction-scoped advisory
  * lock inside it, and run all three jobs while the transaction (and therefore
  * the lock) is held. Each job is isolated so a failure cannot abort the others;
@@ -190,7 +205,7 @@ export async function runScheduledJobs() {
           return { ran: false };
         }
 
-        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob]) {
+        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob, runSprintSnapshotJob]) {
           try {
             await job();
           } catch (error) {

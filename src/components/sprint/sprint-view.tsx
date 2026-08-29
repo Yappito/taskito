@@ -6,6 +6,7 @@ import { TaskDetail } from "@/components/task/task-detail";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
+import { Field } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
 import { trpc } from "@/lib/trpc-client";
 import type { StatusCategory, TaskCardData, TaskFilterTagOption } from "@/lib/types";
@@ -58,6 +59,26 @@ function defaultEndDate() {
   return date.toISOString().split("T")[0];
 }
 
+interface SprintSummaryData {
+  committedCount: number;
+  completedCount: number;
+  carriedOverCount: number;
+  completedTaskIds?: string[];
+}
+
+function parseSprintSummary(summary: unknown): SprintSummaryData | null {
+  if (!summary || typeof summary !== "object") return null;
+  const value = summary as Record<string, unknown>;
+  if (typeof value.committedCount !== "number" || typeof value.completedCount !== "number" || typeof value.carriedOverCount !== "number") {
+    return null;
+  }
+  return {
+    committedCount: value.committedCount,
+    completedCount: value.completedCount,
+    carriedOverCount: value.carriedOverCount,
+  };
+}
+
 export function SprintView({ projectId, statuses }: SprintViewProps) {
   const utils = trpc.useUtils();
   const { data: sprints = [] } = trpc.sprint.list.useQuery({ projectId });
@@ -67,8 +88,12 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageMembersOpen, setManageMembersOpen] = useState(false);
+  const [completeDialogOpen, setCompleteDialogOpen] = useState(false);
+  const [carryOverTarget, setCarryOverTarget] = useState("backlog");
+  const [sprintActionError, setSprintActionError] = useState<string | null>(null);
   const [createdSprintName, setCreatedSprintName] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [completeError, setCompleteError] = useState<string | null>(null);
   const [memberError, setMemberError] = useState<string | null>(null);
   const [memberSelection, setMemberSelection] = useState<string[]>([]);
   const [collapsedSprints, setCollapsedSprints] = useState<Record<string, boolean>>({});
@@ -91,6 +116,11 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
   );
   const { data: tasks } = trpc.task.list.useQuery(taskListInput, { enabled: !!sprintId });
   const sprintTasks = useMemo(() => (tasks?.items ?? []) as unknown as TaskCardData[], [tasks?.items]);
+  const sprintSummary = parseSprintSummary(selectedSprint?.summary);
+  const carryOverSprints = sprints.filter(
+    (sprint) => sprint.id !== sprintId && sprint.status !== "completed"
+  );
+  const hasPlannedSprint = carryOverSprints.some((sprint) => sprint.status === "planning");
   const createSprint = trpc.sprint.create.useMutation({
     onSuccess: async (createdSprint) => {
       setCreateError(null);
@@ -103,7 +133,25 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
       setCreateError(error.message || "Unable to create sprint.");
     },
   });
-  const updateSprint = trpc.sprint.update.useMutation({ onSuccess: () => utils.sprint.list.invalidate({ projectId }) });
+  const startSprint = trpc.sprint.start.useMutation({
+    onSuccess: async () => {
+      setSprintActionError(null);
+      await utils.sprint.list.invalidate({ projectId });
+    },
+    onError: (error) => {
+      setSprintActionError(error.message || "Unable to start sprint.");
+    },
+  });
+  const completeSprint = trpc.sprint.complete.useMutation({
+    onSuccess: async () => {
+      setSprintActionError(null);
+      setCompleteDialogOpen(false);
+      await utils.sprint.list.invalidate({ projectId });
+    },
+    onError: (error) => {
+      setCompleteError(error.message || "Unable to complete sprint.");
+    },
+  });
   const assignSprintMembers = trpc.sprint.assignMembers.useMutation({
     onSuccess: async () => {
       setMemberError(null);
@@ -513,6 +561,57 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
         </form>
       </Dialog>
 
+      <Dialog
+        open={completeDialogOpen}
+        onClose={() => setCompleteDialogOpen(false)}
+        title="Complete sprint"
+        description="Move unfinished work out of the sprint, then mark it completed."
+        panelClassName="max-w-md"
+      >
+        {selectedSprint && (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!selectedSprint) return;
+              const target = carryOverTarget === "" ? (hasPlannedSprint ? "next" : "backlog") : carryOverTarget;
+              completeSprint.mutate({ id: selectedSprint.id, carryOverTo: target });
+            }}
+            className="space-y-3"
+          >
+            {completeError && (
+              <div className="rounded-lg border px-3 py-2 text-sm" style={{ borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))", backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)", color: "var(--color-danger)" }}>
+                {completeError}
+              </div>
+            )}
+            <Field
+              label="Carry over unfinished work to"
+              hint="Tasks that are not done or cancelled move to the chosen target.">
+              {(ids) => (
+                <Select
+                  id={ids.id}
+                  value={carryOverTarget}
+                  onChange={(event) => setCarryOverTarget(event.target.value)}
+                >
+                  <option value="backlog">Backlog (no sprint)</option>
+                  {hasPlannedSprint && (
+                    <option value="next">Next planned sprint</option>
+                  )}
+                  {carryOverSprints.map((sprint) => (
+                    <option key={sprint.id} value={sprint.id}>{sprint.name} ({sprint.status})</option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button type="button" variant="outline" onClick={() => setCompleteDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={completeSprint.isPending}>
+                {completeSprint.isPending ? "Completing..." : "Complete sprint"}
+              </Button>
+            </div>
+          </form>
+        )}
+      </Dialog>
+
       {selectedSprint ? (
         <section className="rounded-2xl border p-4" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }}>
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -566,9 +665,38 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
                 )}
               </div>
             </div>
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" disabled={updateSprint.isPending || selectedSprint.status === "active"} onClick={() => updateSprint.mutate({ id: selectedSprint.id, status: "active" })}>Start</Button>
-              <Button size="sm" variant="outline" disabled={updateSprint.isPending || selectedSprint.status === "completed"} onClick={() => updateSprint.mutate({ id: selectedSprint.id, status: "completed" })}>Complete</Button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {selectedSprint.status === "completed" && sprintSummary && (
+                <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: "var(--color-text-muted)" }}>
+                  <span className="rounded-full border px-2 py-1" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+                    {sprintSummary.completedCount}/{sprintSummary.committedCount} completed
+                  </span>
+                  <span className="rounded-full border px-2 py-1" style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-overlay)" }}>
+                    {sprintSummary.carriedOverCount} carried over
+                  </span>
+                </div>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={startSprint.isPending || completeSprint.isPending || selectedSprint.status === "active" || selectedSprint.status === "completed"}
+                onClick={() => startSprint.mutate({ id: selectedSprint.id })}
+              >
+                Start
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={completeSprint.isPending || selectedSprint.status === "completed"}
+                onClick={() => {
+                  setCompleteError(null);
+                  setSprintActionError(null);
+                  setCarryOverTarget(hasPlannedSprint ? "next" : "backlog");
+                  setCompleteDialogOpen(true);
+                }}
+              >
+                Complete
+              </Button>
               {selectedSprint.status === "completed" && !isCompletedSprintCollapsed && (
                 <Button
                   size="sm"
@@ -583,6 +711,15 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
               )}
             </div>
           </div>
+          {sprintActionError && (
+            <div
+              role="alert"
+              className="mt-4 rounded-lg border px-3 py-2 text-sm"
+              style={{ borderColor: "color-mix(in srgb, var(--color-danger) 35%, var(--color-border))", backgroundColor: "color-mix(in srgb, var(--color-danger) 10%, transparent)", color: "var(--color-danger)" }}
+            >
+              {sprintActionError}
+            </div>
+          )}
           {isCompletedSprintCollapsed ? (
             <div
               className="mt-4 rounded-2xl border p-4"
@@ -595,6 +732,9 @@ export function SprintView({ projectId, statuses }: SprintViewProps) {
                   </p>
                   <p className="mt-1 text-xs" style={{ color: "var(--color-text-muted)" }}>
                     {selectedSprint._count.tasks} sprint task{selectedSprint._count.tasks === 1 ? "" : "s"} · {selectedSprint.members.length} member{selectedSprint.members.length === 1 ? "" : "s"} · completed {new Date(selectedSprint.endDate).toLocaleDateString()}
+                    {sprintSummary
+                      ? ` · ${sprintSummary.completedCount}/${sprintSummary.committedCount} completed · ${sprintSummary.carriedOverCount} carried over`
+                      : ""}
                   </p>
                 </div>
                 <Button
