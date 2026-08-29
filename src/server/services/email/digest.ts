@@ -43,7 +43,8 @@ export interface DigestJobResult {
   sent: number;
   skipped: number;
   /** Recipients that still need a retry for this UTC day (failed sends below
-   * the attempt cap, or claims still pending from an interrupted run). */
+   * the attempt cap, or claims still pending/sending from an interrupted or
+   * in-flight run). */
   retryable: number;
 }
 
@@ -295,17 +296,34 @@ export async function buildDueSoonDigest(
  *
  * Cross-replica uniqueness boundary: a durable EmailDigestClaim row, unique on
  * (userId, dayUtc), NOT the best-effort settings.emailChannel.lastDigestSentAt
- * write. The claim row is created (pending) before the send attempt, so two
- * replicas or ticks racing on the same user/day can never both send; after a
- * successful SMTP send the claim is marked succeeded, and a failed send keeps
- * an explicit failed state that a later tick on the same UTC day retries (up
- * to {@link DIGEST_CLAIM_MAX_ATTEMPTS} attempts; stale pending claims from a
- * crashed run are reclaimed after {@link DIGEST_CLAIM_STALE_MS}).
+ * write. Claim lifecycle (CITADEL-e10 finding 6):
+ *
+ *   pending   — claim acquired (created, or CAS-reclaimed from failed/
+ *               stale-pending); the digest is built. Crashing here is
+ *               unambiguous (nothing sent yet), so a stale pending claim is
+ *               safely reclaimable by another run.
+ *   sending   — flipped immediately BEFORE the SMTP call and marked succeeded
+ *               (or failed) after it. SMTP is an external side effect a DB row
+ *               cannot prove: if a run dies in this window, the outcome is
+ *               AMBIGUOUS. Chosen semantics: AT-MOST-ONCE. A claim found stale
+ *               in "sending" is NEVER resent — it is abandoned as failed at
+ *               the attempt cap with a logged warning (a missed digest is
+ *               preferable to a duplicate).
+ *   succeeded — durable proof the user was handled for the day.
+ *   failed    — last send attempt errored (or the claim was abandoned);
+ *               retried up to {@link DIGEST_CLAIM_MAX_ATTEMPTS} times while
+ *               under the cap.
+ *
+ * After a successful SMTP send the claim is marked succeeded, and a failed
+ * send keeps an explicit failed state that a later tick on the same UTC day
+ * retries.
  *
  * The returned `retryable` count reports how many recipients still need work
  * for this day — runDailyDigestJob only closes its process-level day guard
  * once that reaches zero, and another replica re-running the same day is kept
- * out by the succeeded claims, never by the process guard.
+ * out by the succeeded claims, never by the process guard. Sending claims
+ * keep the day open too: fresh ones resolve when their run finishes, stale
+ * ones when a later run abandons them.
  */
 export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaClient): Promise<DigestJobResult> {
   const dayUtc = utcDayString(now);
@@ -354,8 +372,38 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
       skipped += 1;
       continue;
     }
-    if (existing?.status === "pending" && existing.updatedAt.getTime() > staleBefore.getTime()) {
-      // A live run somewhere owns this recipient; never race it.
+    if (
+      (existing?.status === "pending" || existing?.status === "sending")
+      && existing.updatedAt.getTime() > staleBefore.getTime()
+    ) {
+      // A live run somewhere owns this recipient (pending = building the
+      // digest, sending = mid-SMTP); never race it.
+      skipped += 1;
+      continue;
+    }
+    if (existing?.status === "sending") {
+      // CITADEL-e10 (finding 6): a STALE "sending" claim is ambiguous — SMTP
+      // may already have accepted the message before the owning run died, and
+      // no DB row can prove an external send completed. At-most-once
+      // semantics: abandon the claim as failed at the attempt cap (never
+      // reclaimed, never resent) with a logged warning. A missed digest is
+      // preferable to a duplicate.
+      try {
+        await client.emailDigestClaim.updateMany({
+          where: { userId: user.id, dayUtc, status: "sending" },
+          data: {
+            status: "failed",
+            attempts: DIGEST_CLAIM_MAX_ATTEMPTS,
+            lastError: "abandoned: ambiguous send outcome (stale sending claim); not resent to avoid a duplicate",
+          },
+        });
+        logEmailError(
+          `due-soon digest claim for user ${user.id} was stale in "sending" — abandoned without resending (at-most-once)`,
+          new Error("stale sending claim"),
+        );
+      } catch (error) {
+        logEmailError(`due-soon digest claim bookkeeping for user ${user.id} failed`, error);
+      }
       skipped += 1;
       continue;
     }
@@ -423,6 +471,22 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
       blockedOnMore: digest.blockedOnMore,
     });
 
+    // CITADEL-e10 (finding 6): flip pending → sending immediately before the
+    // SMTP call. Everything up to here is retryable (nothing was sent); from
+    // this flip onward the outcome is ambiguous, so a crash makes the claim
+    // un-reclaimable (see the stale-sending abandonment above) instead of
+    // letting a later sweep duplicate the send.
+    const flipped = await client.emailDigestClaim.updateMany({
+      where: { userId: user.id, dayUtc, status: "pending" },
+      data: { status: "sending" },
+    });
+    if (!flipped || flipped.count !== 1) {
+      // The claim moved underneath us (external tampering or a concurrent
+      // bookkeeping write) — never race whoever owns it now.
+      skipped += 1;
+      continue;
+    }
+
     try {
       await sendEmail({
         to: user.email,
@@ -449,7 +513,9 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
     sent += 1;
     // Mark the durable claim succeeded FIRST: once this write lands, no other
     // replica can resend this user/day even if the legacy settings bookkeeping
-    // below fails (the claim, not lastDigestSentAt, is the boundary).
+    // below fails (the claim, not lastDigestSentAt, is the boundary). If this
+    // write itself fails, the claim stays "sending": ambiguous, never resent
+    // (CITADEL-e10 finding 6) — the initiating response still counted the send.
     try {
       await client.emailDigestClaim.updateMany({
         where: { userId: user.id, dayUtc },
@@ -482,9 +548,10 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
   }
 
   // How many recipients still need work for this day? Failed claims under the
-  // attempt cap plus any pending claim not owned by a live run — including
-  // pending claims another replica is still working on, so this process never
-  // closes its day guard while any recipient might still be mid-flight.
+  // attempt cap, any pending claim (retry-safe), and any sending claim —
+  // including pending/sending claims another replica is still working on, so
+  // this process never closes its day guard while any recipient might still
+  // be mid-flight or awaiting abandonment (CITADEL-e10 finding 6).
   let retryable = 0;
   try {
     const remaining = (await client.emailDigestClaim.findMany({
@@ -493,6 +560,7 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
         OR: [
           { status: "failed", attempts: { lt: DIGEST_CLAIM_MAX_ATTEMPTS } },
           { status: "pending" },
+          { status: "sending" },
         ],
       },
       select: { id: true },

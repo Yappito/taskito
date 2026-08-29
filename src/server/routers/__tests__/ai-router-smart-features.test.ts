@@ -206,6 +206,7 @@ describe("ai.summarizeTask caching", () => {
       createdAt: new Date("2026-05-01T00:00:00.000Z"),
       updatedAt: updatedAtV1,
       aiSummary: null,
+      commentThreadVersion: 0,
       status: { id: statusTodoId, name: "Todo", color: "#888", category: "todo", isFinal: false, projectId, order: 1 },
       project: { key: "TASK" },
       creator: null,
@@ -241,15 +242,20 @@ describe("ai.summarizeTask caching", () => {
     prisma.aiProviderConnection.findFirst.mockResolvedValue(buildProviderRow());
     storedSummary = null;
     rowOverrides = {};
-    // The cache write is a CAS updateMany: it only lands while the row still
-    // carries the updatedAt it was read with. The mock replays that contract:
-    // a where.updatedAt that no longer matches the current row returns 0 and
-    // persists nothing.
+    // The cache write is a CAS updateMany. The mock replays real DB
+    // semantics generically: every key the where-clause specifies must match
+    // the row's current value (CITADEL-e10, finding 5 — updatedAt AND
+    // commentThreadVersion); keys the where omits impose no constraint, so a
+    // regression that drops the version from the CAS is caught by the tests.
     prisma.task.updateMany.mockImplementation(async (
-      { where, data }: { where: { updatedAt?: Date }; data: { aiSummary: Record<string, unknown>; updatedAt: Date } },
+      { where, data }: { where: { updatedAt?: Date; commentThreadVersion?: number }; data: { aiSummary: Record<string, unknown>; updatedAt: Date } },
     ) => {
       const currentUpdatedAt = (rowOverrides.updatedAt as Date | undefined) ?? updatedAtV1;
+      const currentThreadVersion = (rowOverrides.commentThreadVersion as number | undefined) ?? 0;
       if (where.updatedAt && where.updatedAt.getTime() !== currentUpdatedAt.getTime()) {
+        return { count: 0 };
+      }
+      if (where.commentThreadVersion != null && where.commentThreadVersion !== currentThreadVersion) {
         return { count: 0 };
       }
       storedSummary = data.aiSummary;
@@ -315,17 +321,16 @@ describe("ai.summarizeTask caching", () => {
     // The write is a CAS on the pre-call updatedAt AND pins the write's
     // updatedAt to the same value (never an older timestamp, never a bump).
     const casCall = prisma.task.updateMany.mock.calls[0][0] as {
-      where: { id: string; updatedAt: Date; comments: unknown };
+      where: { id: string; updatedAt: Date; commentThreadVersion: number };
       data: { updatedAt: Date };
     };
     expect(casCall.where.id).toBe(taskId);
     expect(casCall.where.updatedAt).toEqual(updatedAtV1);
     expect(casCall.data.updatedAt).toBe(casCall.where.updatedAt);
-    // The CAS also guards the newest comment: it must still exist and stay newest.
-    expect(casCall.where.comments).toEqual({
-      some: { createdAt: commentAtV1 },
-      none: { createdAt: { gt: commentAtV1 } },
-    });
+    // CITADEL-e10 (finding 5): the thread half of the CAS is the durable
+    // comment-thread version read with the task — it catches in-place edits
+    // and deletions of older comments, which never move the newest createdAt.
+    expect(casCall.where.commentThreadVersion).toBe(0);
 
     // 2) Same task content → cached, no provider call.
     const second = await caller.summarizeTask({ taskId });
@@ -434,25 +439,116 @@ describe("ai.summarizeTask caching", () => {
     const first = await caller.summarizeTask({ taskId });
     expect(first.cached).toBe(false);
 
-    // Comment creation does not bump task.updatedAt — only the thread grows.
+    // Comment creation does not bump task.updatedAt — only the thread grows
+    // (and with it, CITADEL-e10 finding 5, the durable commentThreadVersion).
     const newerCommentAt = new Date("2026-05-22T10:00:00.000Z");
     mockTask({
       comments: [
         { ...buildTaskRow().comments[0], id: "clxcomment000000000000000004", content: "Newest comment.", createdAt: newerCommentAt },
         ...buildTaskRow().comments,
       ],
+      commentThreadVersion: 1,
     });
 
     const second = await caller.summarizeTask({ taskId });
     expect(second.cached).toBe(false);
     expect(second.summary).toBe("Summary after comment.");
     expect(fake.requests).toHaveLength(2);
-    // The losing CAS would have targeted the stale newest comment; the
-    // winning write pins the new one.
+    // The winning write pins the new thread version.
     const casCall = prisma.task.updateMany.mock.calls[1][0] as {
-      where: { comments: { none: { createdAt: { gt: Date } } } };
+      where: { commentThreadVersion: number };
     };
-    expect(casCall.where.comments.none.createdAt.gt).toEqual(newerCommentAt);
+    expect(casCall.where.commentThreadVersion).toBe(1);
+  });
+
+  // CITADEL-e10 (finding 5): editing the newest comment in place leaves its
+  // createdAt — and therefore the old newest-createdAt CAS predicate —
+  // untouched, so a summary computed from the pre-edit thread could previously
+  // land with persisted:true. The durable commentThreadVersion in the CAS
+  // where-clause must reject that write.
+  it("rejects the cache write when the newest comment is edited in place while the model runs", async () => {
+    restoreEnv = stubFakeProviderEnv();
+    const fake = installFakeFetch([
+      async () => {
+        // The edit lands mid-flight: same comment id and createdAt, new
+        // content — only the thread version moves.
+        mockTask({
+          comments: [
+            { ...buildTaskRow().comments[0], content: "Newest comment. (edited: this is wrong now)" },
+          ],
+          commentThreadVersion: 1,
+        });
+        return summaryResponse("Stale pre-edit summary.");
+      },
+      summaryResponse("Fresh post-edit summary."),
+    ]);
+    restoreFake = fake.restore;
+    mockTask();
+
+    const caller = makeCaller(prisma, userId);
+
+    const first = await caller.summarizeTask({ taskId });
+    expect(first.cached).toBe(false);
+    expect(first.persisted).toBe(false);
+    expect(first.summary).toBe("Stale pre-edit summary.");
+    // The CAS lost (count 0): nothing was persisted.
+    expect(storedSummary).toBeNull();
+    expect(prisma.task.updateMany).toHaveBeenCalledTimes(1);
+    const casCall = prisma.task.updateMany.mock.calls[0][0] as {
+      where: { commentThreadVersion: number };
+    };
+    expect(casCall.where.commentThreadVersion).toBe(0);
+
+    // The next request recomputes against the edited thread and persists.
+    const second = await caller.summarizeTask({ taskId });
+    expect(second.cached).toBe(false);
+    expect(second.persisted).toBe(true);
+    expect(second.summary).toBe("Fresh post-edit summary.");
+  });
+
+  // CITADEL-e10 (finding 5): deleting an OLDER comment moves neither
+  // task.updatedAt nor the newest createdAt, so the old CAS predicate stayed
+  // true; the thread version must catch it.
+  it("rejects the cache write when an older comment is deleted while the model runs", async () => {
+    restoreEnv = stubFakeProviderEnv();
+    const fake = installFakeFetch([
+      async () => {
+        // The older comment disappears mid-flight; only the version moves.
+        mockTask({
+          comments: [buildTaskRow().comments[0]],
+          commentThreadVersion: 1,
+        });
+        return summaryResponse("Stale pre-delete summary.");
+      },
+      summaryResponse("Fresh post-delete summary."),
+    ]);
+    restoreFake = fake.restore;
+    mockTask({
+      comments: [
+        buildTaskRow().comments[0],
+        {
+          id: "clxcomment000000000000000001",
+          content: "Older comment that will be deleted.",
+          authorId: userId,
+          taskId,
+          createdAt: new Date("2026-05-19T06:00:00.000Z"),
+          updatedAt: new Date("2026-05-19T06:00:00.000Z"),
+          author: { id: userId, name: "Jordan", email: "jordan@example.com", image: null },
+        },
+      ],
+    });
+
+    const caller = makeCaller(prisma, userId);
+
+    const first = await caller.summarizeTask({ taskId });
+    expect(first.persisted).toBe(false);
+    expect(first.summary).toBe("Stale pre-delete summary.");
+    expect(storedSummary).toBeNull();
+    expect(prisma.task.updateMany).toHaveBeenCalledTimes(1);
+
+    const second = await caller.summarizeTask({ taskId });
+    expect(second.persisted).toBe(true);
+    expect(second.summary).toBe("Fresh post-delete summary.");
   });
 });
 

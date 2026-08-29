@@ -150,6 +150,16 @@ describe("ai summarize service", () => {
         buildTaskSnapshot({ comments: [...buildTaskSnapshot().comments, { id: "comment-3", content: "New", createdAt: new Date("2026-05-22T00:00:00.000Z"), author: null }] }),
       ),
     ).not.toBe(computeTaskSummaryContentHash(snapshot));
+    // CITADEL-e10 (finding 5): the durable comment-thread version is folded
+    // into the key as well — an in-place edit or an older-comment delete
+    // bumps the version even when the serialized comments alone would
+    // collide (and legacy entries keyed without it always miss).
+    expect(
+      computeTaskSummaryContentHash(buildTaskSnapshot({ commentThreadVersion: 1 })),
+    ).not.toBe(computeTaskSummaryContentHash(snapshot));
+    expect(
+      computeTaskSummaryContentHash(buildTaskSnapshot({ commentThreadVersion: 2 })),
+    ).not.toBe(computeTaskSummaryContentHash(buildTaskSnapshot({ commentThreadVersion: 1 })));
   });
 
   it("validates the stored cache shape", () => {

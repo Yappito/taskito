@@ -253,15 +253,18 @@ describe("recurrence processor", () => {
     });
   });
 
-  it("retires an occurrence past the end date with a standalone advance and no task", async () => {
+  it("retires a rule whose CURRENT occurrence is already past the end date with a standalone advance and no task (finding 9)", async () => {
     const prisma = createPrismaMock();
+    // Defensive branch: only reachable with pre-existing data drift or direct
+    // invocation — nextDueDate itself sits beyond endDate, so there is no
+    // valid occurrence left to create.
     const current = new Date("2026-05-19T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
       createRule({
         frequency: "weekly",
         interval: 1,
         nextDueDate: current,
-        endDate: new Date("2026-05-20T00:00:00.000Z"),
+        endDate: new Date("2026-05-18T00:00:00.000Z"),
       }),
     ]);
 
@@ -276,6 +279,75 @@ describe("recurrence processor", () => {
       where: { id: RULE_ID, nextDueDate: current },
       data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
     });
+  });
+
+  // CITADEL-e10 (finding 9): the FINAL valid occurrence used to be dropped —
+  // when only the following occurrence would land past the end date, the old
+  // code retired the rule without ever creating the current occurrence's
+  // task. The current occurrence is valid (nextDueDate <= endDate, guaranteed
+  // by the batch query) and MUST get its task; retirement then happens inside
+  // the same claim+create transaction (the claimed advance moves nextDueDate
+  // past endDate, so the rule never becomes due again).
+  it("creates the final occurrence's task and retires the rule in the same claim+create transaction (finding 9)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-19T09:00:00.000Z");
+    // Current occurrence May 19 is on/before the end date; the FOLLOWING
+    // weekly occurrence (May 26) is past it.
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T00:00:00.000Z"),
+      }),
+    ]);
+
+    const result = await processDueRecurrences(prisma as never);
+
+    // The final task IS created, due on the rule's current nextDueDate.
+    expect(result.createdTaskIds).toEqual([CREATED_TASK_ID]);
+    expect(createTaskWithNextNumber).toHaveBeenCalledTimes(1);
+    expect(tx.task.create).toHaveBeenCalledTimes(1);
+    expect(tx.task.create.mock.calls[0][0].data).toMatchObject({
+      projectId: PROJECT_ID,
+      title: "Water the plants",
+      dueDate: current,
+    });
+    // Retirement is the claim itself: the claimed advance past the end date
+    // commits atomically with the task creation — no standalone advance on
+    // the global client.
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: { id: RULE_ID, nextDueDate: current },
+      data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
+    });
+  });
+
+  it("rolls back the final occurrence's retirement when the task creation fails (finding 9)", async () => {
+    const prisma = createPrismaMock();
+    const current = new Date("2026-05-19T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      createRule({
+        frequency: "weekly",
+        interval: 1,
+        nextDueDate: current,
+        endDate: new Date("2026-05-20T00:00:00.000Z"),
+      }),
+    ]);
+    tx.task.create.mockRejectedValueOnce(new Error("db write failed mid-transaction"));
+    createTaskWithNextNumber.mockImplementationOnce(async (_client: unknown, _projectId: string, factory: (tx: unknown, taskNumber: number) => Promise<unknown>) => {
+      return await factory(tx, 42);
+    });
+
+    const result = await processDueRecurrences(prisma as never);
+
+    // The failure aborted the transaction: no task, and the retirement (the
+    // claimed advance past endDate) rolled back with it — the occurrence
+    // stays due and is retried on the next tick, and no standalone retirement
+    // write ever committed.
+    expect(result.createdTaskIds).toEqual([]);
+    expect(prisma.recurrenceRule.updateMany).not.toHaveBeenCalled();
   });
 
   it("creates the next occurrence copying tags, custom fields, and assignee, due on rule.nextDueDate", async () => {

@@ -164,10 +164,22 @@ export interface StoredTaskAiSummary {
  * changes the hash, while unrelated field churn does not force a miss. Used
  * both as the cache validity key at read time and as the freshness check for
  * the CAS cache write.
+ *
+ * CITADEL-e10 (finding 5): the durable comment-thread version is folded into
+ * the key material as well (without being exposed to the provider context —
+ * serializeAiTask does not emit it), so a persisted entry can never outlive
+ * the thread state it was computed from: comment create/edit/delete all bump
+ * Task.commentThreadVersion.
  */
 export function computeTaskSummaryContentHash(taskSnapshot: Record<string, unknown>): string {
+  const commentThreadVersion = typeof taskSnapshot.commentThreadVersion === "number"
+    ? taskSnapshot.commentThreadVersion
+    : null;
   return createHash("sha256")
-    .update(JSON.stringify(serializeAiTask(taskSnapshot, { detailed: true })))
+    .update(JSON.stringify({
+      ...serializeAiTask(taskSnapshot, { detailed: true }),
+      commentThreadVersion,
+    }))
     .digest("hex");
 }
 
