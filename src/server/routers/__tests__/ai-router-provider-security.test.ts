@@ -183,4 +183,206 @@ describe("ai router provider security", () => {
       await expect(caller.testProvider({ id: providerId })).rejects.toThrow("Provider test failed: AI provider request failed");
     });
   });
+
+  // CITADEL-amv (finding 12): the one-shot fast path (default provider) must
+  // enforce the exact same policy clamps as the fallback scan — scope allow
+  // flags, project association for project providers, and ownership for user
+  // providers.
+  describe("one-shot default provider policy clamp (citadel-amv, finding 12)", () => {
+    const projectId = "clxproject00000000000000000";
+    const otherProjectId = "clxproject00000000000099999";
+    const projectDefaultId = "clxprovider0000000000000001";
+    const sharedDefaultId = "clxprovider0000000000000002";
+
+    function buildProjectDefault(overrides: Record<string, unknown> = {}) {
+      return {
+        id: projectDefaultId,
+        scope: "project",
+        ownerUserId: null,
+        projectId,
+        label: "Project default",
+        adapter: "openai_compatible",
+        baseUrl: FAKE_PROVIDER_BASE_URL,
+        model: "gpt-fake",
+        encryptedSecret: encryptAiSecret("sk-router-test"),
+        defaultHeaders: null,
+        isEnabled: true,
+        isDefault: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      };
+    }
+
+    function buildSharedDefault(overrides: Record<string, unknown> = {}) {
+      return {
+        ...buildProjectDefault(),
+        id: sharedDefaultId,
+        scope: "shared",
+        ownerUserId: null,
+        projectId: null,
+        label: "Shared default",
+        ...overrides,
+      };
+    }
+
+    function buildPolicy(overrides: Record<string, unknown> = {}) {
+      return {
+        projectId,
+        defaultProviderId: projectDefaultId,
+        allowUserProviders: true,
+        allowProjectProviders: true,
+        allowSharedProviders: true,
+        allowYoloMode: true,
+        allowYoloDestructive: false,
+        defaultPermissions: [],
+        maxPermissions: [],
+        ...overrides,
+      };
+    }
+
+    function wireDefaultPath(options: {
+      policy: Record<string, unknown> | null;
+      defaultProvider: Record<string, unknown> | null;
+      fallbackProvider?: Record<string, unknown> | null;
+    }) {
+      // Admin callers: requireProjectAccess/requireTaskAccess short-circuit via
+      // the user row mock, so it must carry the admin role.
+      prisma.user.findUnique.mockResolvedValue({ id: userId, role: "admin", disabledAt: null });
+      prisma.aiProjectPolicy.findUnique.mockResolvedValue(options.policy);
+      prisma.aiProviderConnection.findUnique.mockResolvedValue(options.defaultProvider);
+      prisma.aiProviderConnection.findFirst.mockResolvedValue(options.fallbackProvider ?? null);
+    }
+
+    it("ignores a project default provider when allowProjectProviders is false", async () => {
+      wireDefaultPath({ policy: buildPolicy({ allowProjectProviders: false }), defaultProvider: buildProjectDefault() });
+
+      const caller = makeCaller(prisma, "admin");
+      const result = await caller.hasUsableProvider({ projectId });
+
+      expect(result.hasUsableProvider).toBe(false);
+    });
+
+    it("refuses the one-shot features when only a policy-clamped project default exists", async () => {
+      wireDefaultPath({ policy: buildPolicy({ allowProjectProviders: false }), defaultProvider: buildProjectDefault() });
+      prisma.task.findUnique.mockResolvedValue({
+        id: "clxtask0000000000000000000",
+        projectId,
+        taskNumber: 7,
+        title: "Any task",
+        aiSummary: null,
+        comments: [],
+        updatedAt: new Date(),
+      });
+      prisma.task.findUniqueOrThrow.mockResolvedValue({
+        id: "clxtask0000000000000000000",
+        projectId,
+        taskNumber: 7,
+        title: "Any task",
+        project: { key: "TASK" },
+      });
+      const parseCaller = makeCaller(prisma, "admin");
+
+      await expect(parseCaller.parseTask({ projectId, text: "hello" })).rejects.toThrow(
+        "No AI provider is available for this project",
+      );
+      await expect(parseCaller.summarizeTask({ taskId: "clxtask0000000000000000000" })).rejects.toThrow(
+        "No AI provider is available for this project",
+      );
+      await expect(parseCaller.startBreakdown({ taskId: "clxtask0000000000000000000" })).rejects.toThrow(
+        "No AI provider is available for this project",
+      );
+      expect(prisma.aiConversation.create).not.toHaveBeenCalled();
+    });
+
+    it("ignores a shared default provider when allowSharedProviders is false", async () => {
+      wireDefaultPath({
+        policy: buildPolicy({ defaultProviderId: sharedDefaultId, allowSharedProviders: false }),
+        defaultProvider: buildSharedDefault(),
+      });
+
+      const caller = makeCaller(prisma, "admin");
+      const result = await caller.hasUsableProvider({ projectId });
+
+      expect(result.hasUsableProvider).toBe(false);
+    });
+
+    it("rejects a project default provider that belongs to a different project", async () => {
+      wireDefaultPath({
+        policy: buildPolicy(),
+        defaultProvider: buildProjectDefault({ projectId: otherProjectId }),
+      });
+
+      const caller = makeCaller(prisma, "admin");
+      const result = await caller.hasUsableProvider({ projectId });
+
+      expect(result.hasUsableProvider).toBe(false);
+    });
+
+    it("skips a clamped default but still uses a policy-allowed fallback provider", async () => {
+      restoreEnv = stubFakeProviderEnv();
+      const fallback = buildProjectDefault({ scope: "user", ownerUserId: userId, projectId: null, isDefault: false, id: "clxprovider0000000000000003" });
+      wireDefaultPath({
+        policy: buildPolicy({ allowProjectProviders: false }),
+        defaultProvider: buildProjectDefault(),
+        fallbackProvider: fallback,
+      });
+      prisma.workflowStatus.findMany.mockResolvedValue([]);
+      prisma.user.findMany.mockResolvedValue([]);
+      prisma.tag.findMany.mockResolvedValue([]);
+
+      const fake = installFakeFetch([
+        jsonResponse({
+          choices: [{ message: { content: JSON.stringify({ title: "From fallback" }), finish_reason: "stop" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+      ]);
+      restoreFake = fake.restore;
+
+      const caller = makeCaller(prisma, "admin");
+      expect((await caller.hasUsableProvider({ projectId })).hasUsableProvider).toBe(true);
+
+      const parsed = await caller.parseTask({ projectId, text: "From fallback" });
+      expect(parsed.draft.title).toBe("From fallback");
+      // The request went to the fallback provider row, never the clamped default.
+      expect(fake.requests).toHaveLength(1);
+    });
+
+    it("createProjectProvider refuses to install a default while project providers are disabled", async () => {
+      prisma.user.findUnique.mockResolvedValue({ id: userId, role: "admin", disabledAt: null });
+      prisma.aiProjectPolicy.findUnique.mockResolvedValue(buildPolicy({ allowProjectProviders: false }));
+
+      const caller = makeCaller(prisma, "admin");
+
+      await expect(
+        caller.createProjectProvider({
+          projectId,
+          label: "Sneaky default",
+          adapter: "openai_compatible",
+          baseUrl: "https://api.example.com/v1",
+          model: "gpt-x",
+          secret: "sk-test",
+          isEnabled: true,
+          isDefault: true,
+        }),
+      ).rejects.toThrow("Project providers must be allowed to use a project default provider");
+      expect(prisma.aiProviderConnection.create).not.toHaveBeenCalled();
+      expect(prisma.aiProjectPolicy.upsert).not.toHaveBeenCalled();
+    });
+
+    it("updateProvider refuses to flag a project provider as default while project providers are disabled", async () => {
+      prisma.user.findUnique.mockResolvedValue({ id: userId, role: "admin", disabledAt: null });
+      prisma.user.findUniqueOrThrow.mockResolvedValue({ id: userId, role: "admin" });
+      prisma.aiProviderConnection.findUniqueOrThrow.mockResolvedValue(buildProjectDefault());
+      prisma.aiProjectPolicy.findUnique.mockResolvedValue(buildPolicy({ allowProjectProviders: false }));
+
+      const caller = makeCaller(prisma, "admin");
+
+      await expect(caller.updateProvider({ id: projectDefaultId, isDefault: true })).rejects.toThrow(
+        "Project providers must be allowed to use a project default provider",
+      );
+      expect(prisma.aiProviderConnection.update).not.toHaveBeenCalled();
+      expect(prisma.aiProjectPolicy.upsert).not.toHaveBeenCalled();
+    });
+  });
 });

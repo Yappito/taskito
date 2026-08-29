@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   AiSummarizeError,
   SUMMARIZE_TASK_SYSTEM_PROMPT,
+  TASK_SUMMARY_CACHE_VERSION,
   TASK_SUMMARY_MAX_CHARS,
   buildTaskSummaryUserTurn,
   buildTaskSummaryResult,
+  computeTaskSummaryContentHash,
   isTaskSummaryResult,
   readStoredTaskAiSummary,
   summarizeTask,
@@ -131,11 +133,30 @@ describe("ai summarize service", () => {
     }
   });
 
+  it("hashes the serialized snapshot deterministically and sensitively", () => {
+    const snapshot = buildTaskSnapshot();
+
+    // Deterministic: same snapshot → same cache key.
+    expect(computeTaskSummaryContentHash(snapshot)).toBe(computeTaskSummaryContentHash(buildTaskSnapshot()));
+    expect(computeTaskSummaryContentHash(snapshot)).toMatch(/^[0-9a-f]{64}$/);
+
+    // Body edits change the key...
+    expect(computeTaskSummaryContentHash(buildTaskSnapshot({ body: "Edited body." }))).not.toBe(
+      computeTaskSummaryContentHash(snapshot),
+    );
+    // ...and so do comment-thread changes, which never bump task.updatedAt.
+    expect(
+      computeTaskSummaryContentHash(
+        buildTaskSnapshot({ comments: [...buildTaskSnapshot().comments, { id: "comment-3", content: "New", createdAt: new Date("2026-05-22T00:00:00.000Z"), author: null }] }),
+      ),
+    ).not.toBe(computeTaskSummaryContentHash(snapshot));
+  });
+
   it("validates the stored cache shape", () => {
     const valid = {
+      v: TASK_SUMMARY_CACHE_VERSION,
       generatedAt: "2026-05-21T12:00:00.000Z",
-      forUpdatedAt: "2026-05-21T11:00:00.000Z",
-      forLatestCommentAt: "2026-05-21T10:00:00.000Z",
+      forContentHash: "a".repeat(64),
       result: { summary: "s", decisions: [], openQuestions: [], nextSteps: ["a"] },
     };
     expect(readStoredTaskAiSummary(valid)).toEqual(valid);
@@ -151,7 +172,16 @@ describe("ai summarize service", () => {
     expect(readStoredTaskAiSummary("junk")).toBeNull();
     expect(readStoredTaskAiSummary({ ...valid, generatedAt: 42 })).toBeNull();
     expect(readStoredTaskAiSummary({ ...valid, result: { summary: 1 } })).toBeNull();
-    expect(readStoredTaskAiSummary({ ...valid, forLatestCommentAt: 7 })).toBeNull();
+    expect(readStoredTaskAiSummary({ ...valid, forContentHash: 7 })).toBeNull();
+    // Legacy v1 payloads (keyed on updatedAt) are ignored and regenerate.
+    expect(
+      readStoredTaskAiSummary({
+        generatedAt: "2026-05-21T12:00:00.000Z",
+        forUpdatedAt: "2026-05-21T11:00:00.000Z",
+        forLatestCommentAt: null,
+        result: { summary: "s", decisions: [], openQuestions: [], nextSteps: [] },
+      }),
+    ).toBeNull();
     expect(isTaskSummaryResult({ summary: "s" })).toBe(false);
   });
 });

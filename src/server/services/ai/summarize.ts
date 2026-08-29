@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ResolvedAiProvider } from "@/server/services/ai/provider-registry";
 import { serializeAiTask } from "@/server/services/ai/context-builder";
 import {
@@ -132,14 +134,41 @@ export function buildTaskBreakdownUserMessage(taskKey: string) {
 }
 
 /**
- * Cache shape stored in Task.aiSummary. `forUpdatedAt` + `forLatestCommentAt`
- * pin the summary to the exact task/thread state it was generated from.
+ * CITADEL-amv (summary cache CAS): cache version for the content-hash keyed
+ * summary payload. Version 1 keyed validity on task.updatedAt + newest comment
+ * time, which forced the cache write to restore task.updatedAt and allowed a
+ * concurrent edit to be rolled back (serving a stale summary afterwards).
+ * Version 2 keys validity on a hash of the exact serialized snapshot sent to
+ * the provider, stored entirely inside the aiSummary JSON — the cache write no
+ * longer needs to touch task.updatedAt at all.
+ */
+export const TASK_SUMMARY_CACHE_VERSION = 2;
+
+/**
+ * Cache shape stored in Task.aiSummary. `forContentHash` pins the summary to
+ * the exact serialized task/thread snapshot it was generated from; `v` lets
+ * older payload shapes be recognized and regenerated.
  */
 export interface StoredTaskAiSummary {
+  v: number;
   generatedAt: string;
-  forUpdatedAt: string;
-  forLatestCommentAt: string | null;
+  forContentHash: string;
   result: TaskSummaryResult;
+}
+
+/**
+ * CITADEL-amv (summary cache CAS): deterministic sha256 over the exact
+ * serialized task snapshot the provider summarizes (title, body, status,
+ * assignee, tags, comment thread, ...). Any edit to summary-relevant content
+ * — including a new or deleted comment, which does not bump task.updatedAt —
+ * changes the hash, while unrelated field churn does not force a miss. Used
+ * both as the cache validity key at read time and as the freshness check for
+ * the CAS cache write.
+ */
+export function computeTaskSummaryContentHash(taskSnapshot: Record<string, unknown>): string {
+  return createHash("sha256")
+    .update(JSON.stringify(serializeAiTask(taskSnapshot, { detailed: true })))
+    .digest("hex");
 }
 
 export function isTaskSummaryResult(value: unknown): value is TaskSummaryResult {
@@ -153,24 +182,27 @@ export function isTaskSummaryResult(value: unknown): value is TaskSummaryResult 
     && Array.isArray(record.nextSteps);
 }
 
-/** Shape-checks the cached column value; malformed caches are ignored. */
+/**
+ * Shape-checks the cached column value; malformed caches — including legacy
+ * version-1 payloads keyed on task.updatedAt — are ignored and regenerate.
+ */
 export function readStoredTaskAiSummary(value: unknown): StoredTaskAiSummary | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const record = value as Record<string, unknown>;
   if (
+    record.v !== TASK_SUMMARY_CACHE_VERSION ||
     typeof record.generatedAt !== "string" ||
-    typeof record.forUpdatedAt !== "string" ||
-    !(record.forLatestCommentAt === null || typeof record.forLatestCommentAt === "string") ||
+    typeof record.forContentHash !== "string" ||
     !isTaskSummaryResult(record.result)
   ) {
     return null;
   }
   return {
+    v: TASK_SUMMARY_CACHE_VERSION,
     generatedAt: record.generatedAt,
-    forUpdatedAt: record.forUpdatedAt,
-    forLatestCommentAt: record.forLatestCommentAt,
+    forContentHash: record.forContentHash,
     result: {
       summary: record.result.summary,
       decisions: readBoundedStringArray(record.result.decisions),
