@@ -5,6 +5,7 @@ import { getAlertConfig } from "@/lib/alert-utils";
 import { getAccessibleProjectIds } from "@/server/authz";
 import { readEmailChannelPreference } from "@/server/services/notifications";
 import { isEmailConfigured, logEmailError, sendEmail } from "@/server/services/email/smtp-client";
+import { assertTickAlive } from "@/server/services/scheduler-deadline";
 import { DIGEST_MAX_TASKS_PER_SECTION, renderDigestEmail, type DigestTask } from "@/server/services/email/templates";
 
 type PrismaLike = typeof prismaClient | Prisma.TransactionClient;
@@ -325,7 +326,11 @@ export async function buildDueSoonDigest(
  * keep the day open too: fresh ones resolve when their run finishes, stale
  * ones when a later run abandons them.
  */
-export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaClient): Promise<DigestJobResult> {
+export async function sendDueSoonDigests(
+  now: Date,
+  client: PrismaLike = prismaClient,
+  options: { signal?: AbortSignal } = {},
+): Promise<DigestJobResult> {
   const dayUtc = utcDayString(now);
   const staleBefore = new Date(now.getTime() - DIGEST_CLAIM_STALE_MS);
 
@@ -357,6 +362,12 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
   let skipped = 0;
 
   for (const user of recipients) {
+    // Wave-9 finding 2: stop promptly at the tick deadline (checked BETWEEN
+    // recipients and again right before each SMTP send) instead of walking
+    // the whole recipient list — a digest overrunning the tick budget would
+    // otherwise run for hours. Un-sent recipients keep their claimable state
+    // (no claim yet, or failed/stale-pending) and the next tick retries them.
+    assertTickAlive(options.signal);
     // Legacy settings-based guard, kept as a bootstrap for days already
     // completed before the claim table existed. It is NOT the uniqueness
     // boundary, only an additional read-only skip.
@@ -497,6 +508,12 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
     // this flip onward the outcome is ambiguous, so a crash makes the claim
     // un-reclaimable (see the stale-sending abandonment above) instead of
     // letting a later sweep duplicate the send.
+    //
+    // Wave-9 finding 2: the LAST tick-deadline check runs immediately before
+    // this flip — aborting here leaves the claim pending (fully retryable),
+    // whereas an abort after the flip lands in the same ambiguous window a
+    // mid-SMTP crash would (stale-sending ⇒ abandoned, at-most-once).
+    assertTickAlive(options.signal);
     const flipped = await client.emailDigestClaim.updateMany({
       where: { userId: user.id, dayUtc, status: "pending" },
       data: { status: "sending" },
@@ -614,8 +631,20 @@ let lastDigestRunDay: string | null = null;
  * failure (or an unfinished claim) remains, the next tick of the same UTC day
  * re-enters sendDueSoonDigests and retries failed recipients through their
  * failed/stale-pending claims instead of silently losing the day.
+ *
+ * Wave-9 finding 2: `options.signal` is the scheduler tick deadline. It is
+ * honored BETWEEN recipients and immediately before each SMTP send, so a
+ * large recipient population stops at the tick deadline instead of running
+ * for hours (and holding the scheduler's advisory lock past its budget with
+ * live work). A deadline abort throws before it becomes ambiguous (before
+ * the sending flip) where possible, so its work is fully retryable on the
+ * next tick; the durable per-user/day claims remain the exactly-once
+ * boundary either way.
  */
-export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJobResult | { skipped: true }> {
+export async function runDailyDigestJob(
+  now: Date = new Date(),
+  options: { signal?: AbortSignal } = {},
+): Promise<DigestJobResult | { skipped: true }> {
   const day = String(startOfUtcDay(now));
   if (lastDigestRunDay !== null && lastDigestRunDay === day) {
     return { skipped: true };
@@ -627,7 +656,7 @@ export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJ
 
   // A throw here propagates to the scheduler (which logs it) without marking
   // the day as done, so the same day can be retried on the next tick.
-  const result = await sendDueSoonDigests(now);
+  const result = await sendDueSoonDigests(now, prismaClient, options);
   if (result.retryable === 0) {
     lastDigestRunDay = day;
   }

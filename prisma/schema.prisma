@@ -500,6 +500,14 @@ model RecurrenceRule {
   dayOfMonth  Int?
   endDate     DateTime?
   nextDueDate DateTime
+  // Terminal state (dead-rule retirement): the recurrence processor sets
+  // this when the rule's current occurrence is already past its end day —
+  // the rule leaves the due pool in ONE step instead of walking one interval
+  // per tick. Retired rules are never selected again (all due-selection
+  // queries gate on retiredAt being null); (re-)saving a recurrence via the
+  // router's `set` mutation clears the flag, making an edit reactivate the
+  // rule.
+  retiredAt   DateTime?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 

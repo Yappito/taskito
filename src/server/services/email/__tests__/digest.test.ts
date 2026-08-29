@@ -41,6 +41,7 @@ import {
   runDailyDigestJob,
   sendDueSoonDigests,
 } from "../digest";
+import { TickDeadlineExceededError } from "@/server/services/scheduler-deadline";
 import { DIGEST_MAX_TASKS_PER_SECTION } from "../templates";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -701,6 +702,49 @@ describe("sendDueSoonDigests", () => {
     expect(result).toEqual({ sent: 0, skipped: 0, retryable: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
   });
+
+  // Wave-9 finding 2: the scheduler threads its tick deadline into the digest
+  // job. A large recipient population must stop BETWEEN recipients (and
+  // before each SMTP send) at the tick deadline instead of running for hours.
+  it("stops between recipients when the tick deadline signal aborts (wave-9 finding 2)", async () => {
+    const controller = new AbortController();
+    const prisma = makePrisma({
+      users: [
+        { id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } },
+        { id: "u2", name: "Bob", email: "bob@example.com", settings: { emailChannel: { digest: true } } },
+        { id: "u3", name: "Cy", email: "cy@example.com", settings: { emailChannel: { digest: true } } },
+      ],
+      userById: {
+        u1: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+        u2: { id: "u2", name: "Bob", email: "bob@example.com", settings: {} },
+        u3: { id: "u3", name: "Cy", email: "cy@example.com", settings: {} },
+      },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })]],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+    // The first SMTP send aborts the tick deadline signal — exactly what the
+    // scheduler's AbortSignal.timeout(SCHEDULER_TICK_TIMEOUT_MS) does mid-run.
+    sendEmail.mockImplementation(async () => {
+      controller.abort();
+    });
+
+    await expect(
+      sendDueSoonDigests(NOW, prisma as never, { signal: controller.signal }),
+    ).rejects.toThrow(TickDeadlineExceededError);
+
+    // Exactly one send landed; the deadline hit AFTER it, and recipients 2-3
+    // were never claimed or attempted.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(prisma.emailDigestClaim.create).toHaveBeenCalledTimes(1);
+    // The abort fired at the recipient boundary: only u1's claim was flipped
+    // to "sending"; u2/u3 were never claimed or attempted and stay fully
+    // retryable on the next tick.
+    const sendingFlips = (prisma.emailDigestClaim.updateMany.mock.calls as unknown as Array<[
+      { data: Record<string, unknown> },
+    ]>).filter((call) => call[0]?.data?.status === "sending");
+    expect(sendingFlips).toHaveLength(1); // u1's sending flip only
+  });
 });
 
 describe("runDailyDigestJob", () => {
@@ -770,5 +814,30 @@ describe("runDailyDigestJob", () => {
     // process-level guard; the DB-backed per-user guard remains in place.
     prismaRef.current = makePrisma({ users: [] }) as never;
     await expect(runDailyDigestJob(NOW)).resolves.toEqual({ sent: 0, skipped: 0, retryable: 0 });
+  });
+
+  // Wave-9 finding 2: runDailyDigestJob must THREAD the tick deadline signal
+  // into sendDueSoonDigests (the scheduler passes it to us) — not drop it.
+  it("threads the tick deadline signal into sendDueSoonDigests (wave-9 finding 2)", async () => {
+    prismaRef.current = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    }) as never;
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    // A pre-aborted signal (the tick expired before the job started): the
+    // first recipient check must throw BEFORE any claim or send.
+    await expect(runDailyDigestJob(NOW, { signal: AbortSignal.abort() })).rejects.toThrow(
+      TickDeadlineExceededError,
+    );
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect((prismaRef.current as { emailDigestClaim: { create: { mock: { calls: unknown[] } } } }).emailDigestClaim.create.mock.calls).toHaveLength(0);
+    // The deadline abort must not close the process-level day guard either:
+    // the very same day re-runs (here against an empty recipient list).
+    prismaRef.current = makePrisma({ users: [] }) as never;
+    const second = await runDailyDigestJob(NOW);
+    expect(second).toEqual({ sent: 0, skipped: 0, retryable: 0 });
   });
 });

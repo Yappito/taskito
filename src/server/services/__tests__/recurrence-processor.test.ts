@@ -253,33 +253,87 @@ describe("recurrence processor", () => {
     });
   });
 
-  it("retires a rule whose CURRENT occurrence is already past the end date with a standalone advance and no task (finding 9)", async () => {
+  it("retires a rule whose CURRENT occurrence is already past the end date in ONE step (terminal retiredAt, no task, wave-9 finding 3)", async () => {
     // CITADEL-ae2 (finding 4): reachable in normal operation now — the batch
     // query selects every rule with a due occurrence (nextDueDate <= now),
     // including rules whose end DAY has already passed (e.g. after scheduler
-    // downtime); those retire themselves here, one interval per tick, until
-    // nextDueDate moves past `now`.
+    // downtime). Wave-9 finding 3: the retirement is a SINGLE CAS setting the
+    // terminal `retiredAt` flag — the old interval-walk (one nextDueDate
+    // advance per tick) made a far-behind dead rule monopolize the due pool
+    // for thousands of ticks and starve healthy due rules.
     const prisma = createPrismaMock();
-    const current = new Date("2026-05-19T09:00:00.000Z");
+    const current = new Date("2020-01-06T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
       createRule({
         frequency: "weekly",
         interval: 1,
+        // Years behind the end date: the old branch would need thousands of
+        // weekly advances to drain this rule.
         nextDueDate: current,
-        endDate: new Date("2026-05-18T00:00:00.000Z"),
+        endDate: new Date("2020-01-01T00:00:00.000Z"),
+      }),
+    ]);
+
+    const now = new Date("2026-05-19T10:00:00.000Z");
+    const result = await processDueRecurrences(prisma as never, { now });
+
+    expect(result.createdTaskIds).toEqual([]);
+    expect(createTaskWithNextNumber).not.toHaveBeenCalled();
+    // Retirement: exactly ONE write, a CAS setting the terminal flag. No
+    // nextDueDate walk happens in this tick (or any later tick — the flag
+    // excludes the rule from selection forever).
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: { id: RULE_ID, nextDueDate: current },
+      data: { retiredAt: now },
+    });
+  });
+
+  it("does not starve a healthy due rule behind a batch of dead rules (wave-9 finding 3)", async () => {
+    // The selection is oldest-nextDueDate-first: a pile of dead rules used to
+    // fill every capped batch. A dead rule must retire in one CAS and the
+    // healthy rule in the SAME batch must still get its occurrence created.
+    const prisma = createPrismaMock();
+    const deadRuleId = "cmab8yxxp000di7p4k8n2v3qe";
+    const healthyRuleId = "cmab8yxxp000ei7p4k8n2v3qf";
+    const deadCurrent = new Date("2019-02-01T09:00:00.000Z");
+    const healthyCurrent = new Date("2026-05-19T09:00:00.000Z");
+    prisma.recurrenceRule.findMany.mockResolvedValue([
+      // Dead rule: oldest nextDueDate, so it sorts first, and its occurrence
+      // day (2019-02-01) is far past its end day (2019-01-01).
+      createRule({
+        id: deadRuleId,
+        frequency: "daily",
+        interval: 1,
+        nextDueDate: deadCurrent,
+        endDate: new Date("2019-01-01T00:00:00.000Z"),
+      }),
+      // Healthy rule: due now, no end date.
+      createRule({
+        id: healthyRuleId,
+        frequency: "daily",
+        interval: 1,
+        nextDueDate: healthyCurrent,
       }),
     ]);
 
     const result = await processDueRecurrences(prisma as never);
 
-    expect(result.createdTaskIds).toEqual([]);
-    expect(createTaskWithNextNumber).not.toHaveBeenCalled();
-    // Retirement advances the rule on the global client (no task creation
-    // follows, so there is no claim/create gap to protect).
+    // The healthy rule produced its task in the same tick.
+    expect(result.createdTaskIds).toEqual([CREATED_TASK_ID]);
+    expect(tx.task.create).toHaveBeenCalledTimes(1);
+    // The dead rule was retired in ONE step and no spurious task was created
+    // for it (2 total rules processed, 1 task).
+    expect(result.processed).toBe(2);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledTimes(1);
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
-      where: { id: RULE_ID, nextDueDate: current },
-      data: { nextDueDate: new Date("2026-05-26T09:00:00.000Z") },
+      where: { id: deadRuleId, nextDueDate: deadCurrent },
+      data: { retiredAt: new Date("2026-05-19T10:00:00.000Z") },
+    });
+    // The healthy rule's claim ran on the transaction client as usual.
+    expect(tx.recurrenceRule.updateMany).toHaveBeenCalledWith({
+      where: { id: healthyRuleId, nextDueDate: healthyCurrent },
+      data: { nextDueDate: new Date("2026-05-20T09:00:00.000Z") },
     });
   });
 
@@ -290,7 +344,7 @@ describe("recurrence processor", () => {
   // Selection now keys on a due occurrence existing (nextDueDate <= now);
   // end-date validity is decided per rule in the loop, on the router's
   // dateKey day granularity.
-  it("selects rules by due occurrence only — no endDate >= now gate on the batch query (finding 4)", async () => {
+  it("selects rules by due occurrence, excluding already-retired rules (finding 4 + wave-9 finding 3)", async () => {
     const prisma = createPrismaMock();
     const now = new Date("2026-05-21T10:00:00.000Z");
 
@@ -300,7 +354,9 @@ describe("recurrence processor", () => {
     const call = prisma.recurrenceRule.findMany.mock.calls[0][0] as {
       where: Record<string, unknown>;
     };
-    expect(call.where).toEqual({ nextDueDate: { lte: now } });
+    // `retiredAt: null` keeps terminally-retired dead rules out of the due
+    // pool forever — they leave it in one step and never return.
+    expect(call.where).toEqual({ nextDueDate: { lte: now }, retiredAt: null });
   });
 
   // The bead's headline scenario: nextDueDate=2026-05-19, endDate=2026-05-20,
@@ -357,7 +413,7 @@ describe("recurrence processor", () => {
     expect(tx.task.create.mock.calls[0][0].data).toMatchObject({ dueDate: current });
   });
 
-  it("retires without creating when the current occurrence's DAY is past the endDate's day (finding 4)", async () => {
+  it("retires without creating when the current occurrence's DAY is past the endDate's day (finding 4, one-step, wave-9 finding 3)", async () => {
     const prisma = createPrismaMock();
     const current = new Date("2026-05-21T09:00:00.000Z");
     prisma.recurrenceRule.findMany.mockResolvedValue([
@@ -369,13 +425,16 @@ describe("recurrence processor", () => {
       }),
     ]);
 
-    const result = await processDueRecurrences(prisma as never, { now: new Date("2026-05-21T10:00:00.000Z") });
+    const now = new Date("2026-05-21T10:00:00.000Z");
+    const result = await processDueRecurrences(prisma as never, { now });
 
     expect(result.createdTaskIds).toEqual([]);
     expect(createTaskWithNextNumber).not.toHaveBeenCalled();
+    // One-step terminal retirement — nextDueDate is NOT advanced (the flag
+    // alone removes the rule from every future selection).
     expect(prisma.recurrenceRule.updateMany).toHaveBeenCalledWith({
       where: { id: RULE_ID, nextDueDate: current },
-      data: { nextDueDate: new Date("2026-05-28T09:00:00.000Z") },
+      data: { retiredAt: now },
     });
   });
 

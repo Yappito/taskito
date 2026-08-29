@@ -8,6 +8,7 @@ import { createPinnedOutboundLookup } from "@/lib/ai-provider-validation";
 import {
   webhookDeliveryLeaseMs,
   webhookDeliveryPreflightDeadlineMs,
+  webhookLeaseMarginMs,
   webhookRequestTimeoutMs,
 } from "@/lib/webhook-limits";
 import {
@@ -746,6 +747,156 @@ describe("webhook dispatcher", () => {
       // (of POST/read/preflight) consumed before the row was even claimed.
       expect(leases[1].getTime()).toBe(batchStart.getTime() + INTER_ROW_DELAY_MS + leaseWindowMs);
       expect(leases[1].getTime() - leases[0].getTime()).toBe(INTER_ROW_DELAY_MS);
+    });
+  });
+
+  describe("claim lease RENEWAL before the POST (wave-9 finding 1)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    /**
+     * Finds the lease-RENEWAL update among the updateMany calls. Only the
+     * renewal has `status: "processing"` + a claim token in the where clause
+     * AND a non-null Date lease in the data (the claim stamps
+     * `status: "pending"`; the finalizes carry a non-lease `status` change
+     * and null out the lease).
+     */
+    function leaseRenewals(prisma: ReturnType<typeof createPrismaMock>) {
+      return (prisma.webhookDelivery.updateMany.mock.calls as unknown as Array<[
+        { where: Record<string, unknown>; data: Record<string, unknown> },
+      ]>)
+        .map(([args], index) => ({ args, index }))
+        .filter(
+          ({ args }) =>
+            args.where.status === "processing"
+            && args.where.claimToken !== undefined
+            && args.data.leaseExpiresAt instanceof Date
+            && args.data.status === undefined,
+        );
+    }
+
+    /** Creator-access stub whose lookup itself burns `delayMs` of fake time (slow claim round-trip + authz read). */
+
+    /** Creator-access stub whose lookup itself burns `delayMs` of fake time (slow claim round-trip + authz read). */
+    function stubSlowCreatorAccess(prisma: ReturnType<typeof createPrismaMock>, delayMs: number) {
+      prisma.user.findUnique.mockImplementation(async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+        if (args?.select && "projectMemberships" in args.select) {
+          vi.advanceTimersByTime(delayMs);
+          return {
+            id: "creator-1",
+            role: "manager",
+            disabledAt: null,
+            projectMemberships: [{ role: "manager" }],
+            projectPermissionGrants: [],
+            groupMemberships: [],
+          };
+        }
+        return { id: args?.where?.id ?? "creator-1", name: "Actor One" };
+      });
+    }
+
+    it("renews the lease immediately before the POST under the claim token, covering the full POST window after slow pre-stages", async () => {
+      const claimInstant = new Date("2026-01-01T00:00:00.000Z");
+      vi.setSystemTime(claimInstant);
+      // The pre-POST stages (claim round-trip, authz query, decrypt, DNS
+      // preflight) consume FAR more fake time than the static floored lease
+      // (preflight 15s + POST 10s = 25s) can cover.
+      const SLOW_STAGES_MS = 90_000;
+      const prisma = createPrismaMock();
+      stubSlowCreatorAccess(prisma, SLOW_STAGES_MS);
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+
+      const { transport, requests } = recordingTransport();
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now: claimInstant, transport });
+
+      // The delivery still went out...
+      expect(result.status).toBe("success");
+      expect(requests).toHaveLength(1);
+
+      // ...but only after a TOKEN-GATED lease renewal re-stamped the lease:
+      const renewals = leaseRenewals(prisma);
+      expect(renewals).toHaveLength(1);
+      const [{ args: renewal, index: renewalIndex }] = renewals;
+      expect(renewal.where).toEqual({
+        id: "delivery-1",
+        status: "processing",
+        claimToken: expect.any(String),
+      });
+      // The renewal lease = ITS OWN instant + the full POST timeout + margin
+      // — NOT the claim instant. It therefore still covers the POST even
+      // though the initial claim-time lease (claim + 25s floor) expired at
+      // least 65s worth of stages ago.
+      expect((renewal.data.leaseExpiresAt as Date).getTime()).toBe(
+        claimInstant.getTime() + SLOW_STAGES_MS + webhookRequestTimeoutMs() + webhookLeaseMarginMs(),
+      );
+      // The renewal ran BEFORE the POST (it guards exactly the POST window).
+      expect(prisma.webhookDelivery.updateMany.mock.invocationCallOrder[renewalIndex]).toBeLessThan(
+        transport.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("aborts WITHOUT POSTING when the claim token no longer matches at renewal time (claim lost mid-pipeline)", async () => {
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
+      // The claim succeeds; every later token-gated update matches 0 rows —
+      // the model of lease expiry + recovery + a second worker's re-claim.
+      prisma.webhookDelivery.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValue({ count: 0 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { transport } = recordingTransport(() => {
+        throw new Error("must never POST after losing the claim to another worker");
+      });
+
+      const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
+
+      // Skipped WITHOUT a POST and WITHOUT any finalize/requeue write (we no
+      // longer own the row — a second worker's claim must not be clobbered).
+      expect(transport).not.toHaveBeenCalled();
+      expect(result.status).toBe("skipped");
+      expect(result.error).toMatch(/claim was lost/i);
+      // Exactly two writes: the claim, then the rejected renewal.
+      expect(prisma.webhookDelivery.updateMany).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("lease renewal rejected before the POST"));
+    });
+
+    it("bounds the send-time authz query and fails closed on deadline (no POST, no unbounded stall)", async () => {
+      vi.stubEnv("WEBHOOK_PREFLIGHT_BUDGET_MS", "1000");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      vi.setSystemTime(now);
+      const prisma = createPrismaMock();
+      prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
+      // A stalled/stuck DB: the authz lookup NEVER resolves. Without the
+      // deadline the worker would hang forever holding its claim.
+      prisma.user.findUnique.mockImplementation(() => new Promise(() => {}));
+
+      const { transport } = recordingTransport(() => {
+        throw new Error("must never POST after a failed (timed-out) authorization");
+      });
+      const resultPromise = deliverWebhook(prisma as never, "delivery-1", { now, transport });
+      // Run the fake clock past the 1s authz deadline.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+
+      // Fail closed: no POST, no unbounded stall, and the claim is handed
+      // back through the bounded retry ladder (attempt 1 of 3 → retryable).
+      expect(transport).not.toHaveBeenCalled();
+      expect(result.status).toBe("pending");
+      expect(result.error).toMatch(/Webhook creator access re-check exceeded the 1s deadline/i);
+      const failureCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(failureCall.where).toEqual({ id: "delivery-1", status: "processing", claimToken: expect.any(String) });
+      expect(failureCall.data.status).toBe("pending");
+      expect(failureCall.data.nextAttemptAt).toEqual(new Date(now.getTime() + WEBHOOK_RETRY_DELAYS_MS[0]));
     });
   });
 

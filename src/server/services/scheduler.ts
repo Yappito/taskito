@@ -2,7 +2,11 @@ import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { runDailyDigestJob } from "@/server/services/email/digest";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
-import { assertTickAlive, TickDeadlineExceededError } from "@/server/services/scheduler-deadline";
+import {
+  assertTickAlive,
+  getSchedulerTickTimeoutMs,
+  TickDeadlineExceededError,
+} from "@/server/services/scheduler-deadline";
 import { createSchedulerLockConnection, SchedulerLockConnection } from "@/server/services/scheduler-lock-connection";
 import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
 import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatcher";
@@ -67,8 +71,14 @@ export const SCHEDULER_ADVISORY_LOCK_KEY = 684_513_207;
 const SCHEDULER_LOG_PREFIX = "[scheduler]";
 const DEFAULT_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 1_000;
-const DEFAULT_TICK_TIMEOUT_MS = 600_000;
 const DEFAULT_DIGEST_HOUR_UTC = 7;
+
+// The per-tick work budget (SCHEDULER_TICK_TIMEOUT_MS) lives in
+// scheduler-deadline.ts as `getSchedulerTickTimeoutMs` — shared with the lock
+// connection, which must floor its lock-transaction timeout above the tick
+// budget (wave-9 finding 2). Referred to with a local alias below so the
+// scheduler's call sites keep reading naturally.
+const getTickTimeoutMs = getSchedulerTickTimeoutMs;
 
 type SchedulerGlobal = typeof globalThis & {
   __taskitoSchedulerTimer?: ReturnType<typeof setInterval> | null;
@@ -101,19 +111,6 @@ export function getSchedulerIntervalMs() {
 
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function getTickTimeoutMs() {
-  const parsed = Number(process.env.SCHEDULER_TICK_TIMEOUT_MS);
-  if (Number.isFinite(parsed) && parsed > 0) {
-    return Math.floor(parsed);
-  }
-  if (process.env.SCHEDULER_TICK_TIMEOUT_MS) {
-    console.warn(
-      `${SCHEDULER_LOG_PREFIX} invalid SCHEDULER_TICK_TIMEOUT_MS "${process.env.SCHEDULER_TICK_TIMEOUT_MS}", using ${DEFAULT_TICK_TIMEOUT_MS}ms`,
-    );
-  }
-  return DEFAULT_TICK_TIMEOUT_MS;
 }
 
 /**
@@ -159,7 +156,10 @@ async function runDueDateAutomationJob(signal: AbortSignal) {
  * plus durable per-user/day EmailDigestClaim rows (unique on userId + dayUtc,
  * with explicit pending/succeeded/failed states so failed recipients are
  * retried on a later tick) — so repeated ticks and other replicas cannot
- * resend for the same UTC day.
+ * resend for the same UTC day. The tick deadline signal is threaded INTO the
+ * digest job (wave-9 finding 2) so a large recipient population stops at the
+ * tick deadline (per recipient, and before each SMTP send) instead of
+ * running for hours and holding the scheduler lock past its budget.
  */
 async function runDigestJob(now: Date, signal: AbortSignal) {
   assertTickAlive(signal);
@@ -167,7 +167,7 @@ async function runDigestJob(now: Date, signal: AbortSignal) {
   if (now.getUTCHours() < digestHour) {
     return;
   }
-  const result = await runDailyDigestJob(now);
+  const result = await runDailyDigestJob(now, { signal });
   if ("sent" in result && result.sent > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} daily digest sent to ${result.sent} user(s)`);
   }

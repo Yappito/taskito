@@ -1,5 +1,10 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 
+import {
+  getSchedulerTickTimeoutMs,
+  SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS,
+} from "./scheduler-deadline";
+
 /**
  * Dedicated Postgres connection + session pin for the scheduler's advisory
  * lock (codex_sol wave-6 findings 7 & 8, wave-8 finding 2).
@@ -61,11 +66,18 @@ import { Prisma, PrismaClient } from "@prisma/client";
  *
  *  - The dedicated client's transaction timeout is configured far above a
  *    normal run (`SCHEDULER_LOCK_TX_TIMEOUT_MS`, default 24h) so the
- *    transaction cannot expire mid-run. The tick deadline handed to jobs
- *    stays separate and unchanged. Jobs run on the GLOBAL prisma client —
- *    never on the lock transaction — which keeps the wave-6 finding 8
- *    guarantee (the dedicated pool's single connection serves nothing but
- *    the lock transaction itself).
+ *    transaction cannot expire mid-run — and it is CLAMPED (wave-9 finding 2)
+ *    to never fall below the tick budget + a safety margin: an operator who
+ *    sets `SCHEDULER_LOCK_TX_TIMEOUT_MS` below
+ *    `SCHEDULER_TICK_TIMEOUT_MS` would otherwise arm Prisma to release the
+ *    advisory lock (and the cross-replica exclusion) while a digest, webhook
+ *    sweep, or recurrence batch is still running. The configured value is
+ *    raised to `getSchedulerTickTimeoutMs() +
+ *    SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS` with a logged warning. The tick
+ *    deadline handed to jobs stays separate and unchanged. Jobs run on the
+ *    GLOBAL prisma client — never on the lock transaction — which keeps the
+ *    wave-6 finding 8 guarantee (the dedicated pool's single connection
+ *    serves nothing but the lock transaction itself).
  *
  * `pg` (node-postgres) is not part of this app's dependency tree, so the
  * dedicated connection is a per-acquisition PrismaClient instance whose
@@ -79,21 +91,41 @@ export const DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 /**
  * Timeout for the pinned lock transaction (`SCHEDULER_LOCK_TX_TIMEOUT_MS`,
  * default 86400000 = 24h, minimum 60s). It must comfortably exceed the
- * longest possible scheduler run (`SCHEDULER_TICK_TIMEOUT_MS` + job overrun)
- * because the scheduler callback is awaited inside the transaction; Prisma
- * would otherwise abort the transaction — and the lock with it — mid-run.
+ * longest possible scheduler run (the tick budget `SCHEDULER_TICK_TIMEOUT_MS`
+ * + job overrun) because the scheduler callback is awaited inside the
+ * transaction; Prisma would otherwise abort the transaction — and the lock
+ * with it — mid-run. Wave-9 finding 2: the value is CLAMPED so it can NEVER
+ * be configured below the tick budget plus
+ * {@linkcode SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS} — a too-low setting is
+ * raised with a logged warning instead of silently arming the lock to be
+ * released while the tick's jobs are still live (a digest job locking up a
+ * few hours would otherwise free the lock for another replica mid-run).
+ * The advisory lock itself is a best-effort cross-replica optimization:
+ * durable per-job idempotency (recurrence CAS/txn, digest claims, automation
+ * firings, webhook delivery leases + claim tokens) remains the
+ * authoritative exactly-once boundary.
  */
 export function schedulerLockTransactionTimeoutMs(): number {
+  // The lock must never expire before the tick deadline could stop the jobs:
+  // floor = tick budget + safety margin.
+  const floorMs = getSchedulerTickTimeoutMs() + SCHEDULER_LOCK_TX_SAFETY_MARGIN_MS;
   const parsed = Number(process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS);
   if (Number.isFinite(parsed) && parsed >= 60_000) {
-    return Math.floor(parsed);
+    const configured = Math.floor(parsed);
+    if (configured < floorMs) {
+      console.warn(
+        `[scheduler-lock] SCHEDULER_LOCK_TX_TIMEOUT_MS (${configured}ms) is below the tick deadline + safety margin (${floorMs}ms); raising it to ${floorMs}ms so the advisory lock can never be released before the tick deadline can stop the jobs`,
+      );
+      return floorMs;
+    }
+    return configured;
   }
   if (process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS) {
     console.warn(
-      `[scheduler-lock] invalid SCHEDULER_LOCK_TX_TIMEOUT_MS "${process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS}", using ${DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS}ms`,
+      `[scheduler-lock] invalid SCHEDULER_LOCK_TX_TIMEOUT_MS "${process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS}", using the default or the tick-based floor, whichever is higher`,
     );
   }
-  return DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS;
+  return Math.max(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS, floorMs);
 }
 
 /**
