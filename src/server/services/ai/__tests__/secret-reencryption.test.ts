@@ -79,6 +79,7 @@ describe("secret re-encryption core", () => {
     prisma.oidcProviderConnection.count.mockResolvedValue(0);
     prisma.storageSettings.findMany.mockResolvedValue([]);
     prisma.storageSettings.count.mockResolvedValue(0);
+    prisma.webhook.findMany.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -331,6 +332,34 @@ describe("secret re-encryption core", () => {
         /Failed to decrypt 1 row\(s\)/,
       );
       expect(prisma.aiProviderConnection.update).not.toHaveBeenCalled();
+    });
+
+    it("rewrites Webhook.encryptedSecret ciphertext under the same rotation (finding 10)", async () => {
+      const alreadyCurrent = encryptWithKey("already-current-hook-secret", MASTER_KEY);
+      const legacy = buildLegacyUnprefixed("legacy-hook-secret", MASTER_KEY);
+      const store = useStore("webhook", "encryptedSecret", [
+        { id: "hook-1", encrypted: alreadyCurrent },
+        { id: "hook-2", encrypted: legacy },
+        { id: "hook-3", encrypted: null },
+      ]);
+      // After a master-key cutover, old-key webhook ciphertext would fail to
+      // decrypt at dispatch time forever; the rotation must rewrite it.
+      const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
+      const newResolved: ResolvedKey = { key: Buffer.alloc(32, 13), source: "AI_SECRET_MASTER_KEY" };
+
+      const allStats = await reencryptAiSecrets(prisma, { oldResolved, newResolved, dryRun: false });
+
+      const hookStats = toTableStats(allStats, "Webhook.encryptedSecret");
+      // Different key material: both decryptable rows are rewritten (fresh IV),
+      // including the one that was current under the old key.
+      expect(hookStats).toMatchObject({ scanned: 3, reencrypted: 2, alreadyCurrent: 0, skipped: 1, failed: 0 });
+      expect(prisma.webhook.update).toHaveBeenCalledTimes(2);
+      // Both rows decrypt to the same plaintexts under the new key.
+      expect(store.get("hook-1")!.startsWith("v1:")).toBe(true);
+      expect(decryptWithKey(store.get("hook-1")!, newResolved.key)).toBe("already-current-hook-secret");
+      expect(store.get("hook-2")!.startsWith("v1:")).toBe(true);
+      expect(decryptWithKey(store.get("hook-2")!, newResolved.key)).toBe("legacy-hook-secret");
+      expect(store.get("hook-3")).toBe("");
     });
   });
 });

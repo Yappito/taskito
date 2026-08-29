@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import type { LookupFunction } from "node:net";
 
 /**
  * Typed error thrown when a provider base URL (or a redirect target reached
@@ -383,6 +384,70 @@ function isIpLiteralHostname(hostname: string) {
  * callers that need one should keep using the AI-provider helpers above.
  */
 export async function assertOutboundUrlAllowed(rawUrl: string, policy: OutboundUrlPolicy = {}): Promise<string> {
+  return (await validateOutboundUrl(rawUrl, policy)).url;
+}
+
+/**
+ * A connection target whose resolved addresses have been validated and whose
+ * connect target is pinned to one of those validated answers.
+ */
+export interface PinnedOutboundConnection {
+  /** Original URL (hash stripped) — the hostname is preserved so the real request keeps its TLS SNI and Host header. */
+  url: string;
+  /** Normalized hostname (IPv6 literal brackets removed). */
+  hostname: string;
+  /**
+   * The pre-validated address the connection must use, captured from the same
+   * DNS answer set that was checked against the block rules. Null when no
+   * resolution was required: an IP literal (cannot rebind), or the caller's
+   * `allowPrivateHosts` opt-in (self-hosted targets whose operators accept
+   * whatever their resolver returns).
+   */
+  pinned: { address: string; family: 4 | 6 } | null;
+}
+
+/**
+ * Outbound gate for requests that actually leave the process (webhook
+ * delivery, integrations). Same rules as {@link assertOutboundUrlAllowed},
+ * but instead of stopping at re-validation it also returns a pinned connect
+ * target: feed {@link createPinnedOutboundLookup} into the HTTP(s) agent so
+ * the connection can never re-resolve to a different (possibly private)
+ * address between validation and TCP connect — the DNS-rebinding TOCTOU that
+ * a plain `fetch(url)` would re-open after this check.
+ */
+export async function assertOutboundRequestPinned(
+  rawUrl: string,
+  policy: OutboundUrlPolicy = {},
+): Promise<PinnedOutboundConnection> {
+  return validateOutboundUrl(rawUrl, policy);
+}
+
+/**
+ * Builds the `lookup` override that pins a connection to the validated
+ * address. Every lookup the agent performs returns exactly the pre-validated
+ * answer — never a fresh resolution — so connect-time DNS cannot steer the
+ * request into private space. Returns undefined when the connection has no
+ * pinned target (IP literal / allowPrivateHosts) and normal resolution is
+ * acceptable.
+ */
+export function createPinnedOutboundLookup(connection: PinnedOutboundConnection): LookupFunction | undefined {
+  const pinned = connection.pinned;
+  if (!pinned) {
+    return undefined;
+  }
+  return ((hostname, options, callback) => {
+    // Deliberately ignores `hostname`: the entire point of the pin is that the
+    // connect-time resolution cannot differ from the validated one.
+    if (options?.all) {
+      callback(null, [{ address: pinned.address, family: pinned.family }], pinned.family);
+    } else {
+      callback(null, pinned.address, pinned.family);
+    }
+  }) as LookupFunction;
+}
+
+/** Core URL + DNS validation shared by the URL-only and pinned variants. */
+async function validateOutboundUrl(rawUrl: string, policy: OutboundUrlPolicy): Promise<PinnedOutboundConnection> {
   const label = policy.label ?? "Outbound URL";
   const trimmedUrl = rawUrl.trim();
   if (!trimmedUrl) {
@@ -431,10 +496,23 @@ export async function assertOutboundUrlAllowed(rawUrl: string, policy: OutboundU
         );
       }
     }
+    // Pin the connection to one of the answers we just validated, so the real
+    // request connects to THIS address regardless of what DNS says later
+    // (DNS-rebinding TOCTOU). Prefer an IPv4 answer; fall back to the first.
+    const chosen = addresses.find((answer) => answer.family === 4) ?? addresses[0];
+    parsed.hash = "";
+    return {
+      url: parsed.toString(),
+      hostname,
+      pinned: { address: chosen.address, family: chosen.family as 4 | 6 },
+    };
   }
 
   parsed.hash = "";
-  return parsed.toString();
+  // No resolution happened (IP literal or the private-host opt-in): nothing to
+  // pin — an IP literal cannot rebind, and opted-in callers accept whatever
+  // their resolver returns.
+  return { url: parsed.toString(), hostname, pinned: null };
 }
 
 function httpOrHttps(protocol: string) {

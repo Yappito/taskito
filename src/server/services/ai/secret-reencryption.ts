@@ -1,8 +1,8 @@
 /**
  * Re-encryption core for stored encrypted secrets (AI provider API keys, OIDC
- * client secrets, S3 storage credentials). Kept as a library module (without a
- * runtime dependency on Prisma) so the rotation logic can be unit-tested; the
- * CLI wrapper lives in `scripts/reencrypt-ai-secrets.ts`.
+ * client secrets, S3 storage credentials, webhook signing secrets). Kept as a
+ * library module (without a runtime dependency on Prisma) so the rotation
+ * logic can be unit-tested; the CLI wrapper lives in `scripts/reencrypt-ai-secrets.ts`.
  *
  * Key material (old / new), in order:
  *   1. AI_SECRET_MASTER_KEY_OLD / AI_SECRET_MASTER_KEY (base64-encoded 32-byte key)
@@ -277,6 +277,7 @@ export interface ReencryptTransactionClient {
   aiProviderConnection: ReencryptDelegate;
   oidcProviderConnection: ReencryptDelegate;
   storageSettings: ReencryptDelegate;
+  webhook: ReencryptDelegate;
 }
 
 export interface ReencryptDelegate {
@@ -415,6 +416,21 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.storageSettings.update({ where: { id }, data: { encryptedS3SessionToken: encrypted } }),
+        },
+        {
+          // Webhook signing secrets share the same master key: after a
+          // cutover without this plan, every delivery would fail
+          // decryption at dispatch time (bounded failure since the
+          // dispatcher fix, but the integrations would be dead until the
+          // secret was re-entered). Rotate them together, under the same
+          // writer lock.
+          label: "Webhook.encryptedSecret",
+          readRows: async (tx) => {
+            const rows = await tx.webhook.findMany({ select: { id: true, encryptedSecret: true } });
+            return rows.map((row) => ({ id: row.id, encrypted: row.encryptedSecret as string | null }));
+          },
+          updateRow: (tx, id, encrypted) =>
+            tx.webhook.update({ where: { id }, data: { encryptedSecret: encrypted } }),
         },
       ];
 

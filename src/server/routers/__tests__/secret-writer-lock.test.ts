@@ -4,6 +4,7 @@ import { REENCRYPT_ADVISORY_LOCK_KEY, withSecretRotationLock } from "@/server/se
 import { aiRouter } from "@/server/routers/ai";
 import { oidcRouter } from "@/server/routers/oidc";
 import { storageRouter } from "@/server/routers/storage";
+import { webhookRouter } from "@/server/routers/webhook";
 import { createCallerFactory } from "@/server/trpc";
 import { adminUser, callerFor, type WiredActor } from "@/test/actors";
 import { createPrismaMock, type PrismaMock } from "@/test/prisma-mock";
@@ -169,5 +170,31 @@ describe("secret writers take the rotation advisory lock (M6b)", () => {
 
     expectAdvisoryLockTaken(actor.prisma, "storage.save");
     expect(actor.prisma.storageSettings.upsert).toHaveBeenCalled();
+  });
+
+  it("webhook router create writes the signing secret inside the rotation lock", async () => {
+    // Webhook.encryptedSecret is covered by the rotation plan, so its writer
+    // must serialize with a rotation just like the AI/OIDC/S3 writers.
+    const actor = adminUser();
+    const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+    actor.prisma.webhook.count.mockResolvedValue(0);
+    actor.prisma.webhook.create.mockResolvedValue({
+      id: "cmab8yxxp000wi7p4k8n2v3qh",
+      url: "http://93.184.216.34/taskito",
+      events: ["task.created"],
+      isEnabled: true,
+      createdByUserId: actor.sessionUser.id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await caller.create({
+      projectId: "cmab8yxxp000pi7p4k8n2v3qp",
+      url: "http://93.184.216.34/taskito",
+      events: ["task.created"],
+    });
+
+    expectAdvisoryLockTaken(actor.prisma, "webhook.create");
+    expect(actor.prisma.webhook.create).toHaveBeenCalled();
   });
 });

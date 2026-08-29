@@ -1,11 +1,22 @@
 import crypto from "node:crypto";
+import http from "node:http";
+import https from "node:https";
+import type { IncomingMessage } from "node:http";
 
 import {
-  assertOutboundUrlAllowed,
+  assertOutboundRequestPinned,
+  createPinnedOutboundLookup,
   OutboundUrlValidationError,
+  type PinnedOutboundConnection,
 } from "@/lib/ai-provider-validation";
+import {
+  WEBHOOK_MAX_RESPONSE_BYTES,
+  webhookDeliveryConcurrency,
+  webhookDeliveryLeaseMs,
+} from "@/lib/webhook-limits";
 import { decryptSecret } from "@/lib/secret-crypto";
 import { isWebhookEvent, WEBHOOK_PING_EVENT } from "@/lib/webhook-events";
+import { getEffectiveProjectAccess } from "@/server/authz";
 
 import {
   computeWebhookSignature,
@@ -30,18 +41,35 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *
  * Delivery lifecycle:
  *  - `emitWebhookEvent` creates the rows (`status: "pending"`,
- *    `nextAttemptAt: now`) and hands each one to `deliverWebhook`
- *    fire-and-forget, so webhook failures never fail the originating mutation;
- *  - the scheduler's `processDueWebhookDeliveries` sweeps rows whose
- *    `nextAttemptAt` came due (retries + anything the inline pass missed
- *    because the process restarted);
+ *    `nextAttemptAt: now`) and enqueues them into a bounded worker queue
+ *    (`WEBHOOK_DELIVERY_CONCURRENCY` concurrent POSTs), so webhook failures
+ *    never fail the originating mutation and a large fan-out cannot open one
+ *    socket per webhook;
+ *  - the claim is exclusive: `deliverWebhook` atomically transitions
+ *    `pending -> processing` (`updateMany` where `status = pending` AND the
+ *    row is due) before any I/O, sets a lease deadline
+ *    (`leaseExpiresAt`), and only the claimer finalizes the row. Only the
+ *    worker whose update matched (`count === 1`) proceeds, so the inline pass
+ *    and the scheduler sweep can never double-deliver the same event;
+ *  - the scheduler's `processDueWebhookDeliveries` first deliberately recovers
+ *    expired `processing` leases back to `pending` (crashed worker), then
+ *    sweeps rows whose `nextAttemptAt` came due (retries + anything the
+ *    inline pass missed because the process restarted);
  *  - failures are retried on a 1m / 5m / 30m backoff ladder, capped at
  *    `WEBHOOK_MAX_ATTEMPTS` total attempts, then marked `"failed"`;
- *  - redirects are NEVER followed (`redirect: "manual"`): each hop would need
- *    re-validation and could steer a signed request to a different target;
- *  - the target URL is re-validated at send time (same SSRF policy as at
- *    create time — scheme, credentials, private/resolved addresses);
- *  - each request is capped by `WEBHOOK_TIMEOUT_MS`.
+ *  - target URLs are re-validated (same SSRF policy as at create time) AND
+ *    the connection is PINNED to the validated address: the dispatcher
+ *    resolves once, checks every A/AAAA answer against the block rules, then
+ *    issues the request through a lookup override that can only return the
+ *    pre-validated IP — the original hostname is preserved for TLS SNI and
+ *    the Host header, and connect-time DNS can never steer the request to a
+ *    private address (DNS-rebinding TOCTOU);
+ *  - redirects are never followed (the transport treats a 3xx as a failure):
+ *    each hop would need re-validation and could steer a signed request to a
+ *    different target;
+ *  - each request is capped by `WEBHOOK_TIMEOUT_MS` and response bodies are
+ *    stream-discarded after `WEBHOOK_MAX_RESPONSE_BYTES` — the delivery only
+ *    needs the status code.
  */
 
 const LOG_PREFIX = "[webhooks]";
@@ -92,6 +120,12 @@ export interface WebhookEventInput {
   event: string;
   payload?: WebhookEventPayload;
   actorId?: string | null;
+  /**
+   * Injectable outbound transport (used by tests); production requests go
+   * through {@link defaultWebhookTransport}, which pins the connection to the
+   * SSRF-validated address.
+   */
+  transport?: WebhookTransport;
 }
 
 /** The event envelope stored on the delivery row and POSTed verbatim. */
@@ -182,7 +216,7 @@ interface WebhookUpdateManyResult {
 }
 
 export interface DeliverWebhookResult {
-  status: "pending" | "success" | "failed" | "skipped";
+  status: "pending" | "processing" | "success" | "failed" | "skipped";
   responseCode?: number | null;
   error?: string;
 }
@@ -190,12 +224,15 @@ export interface DeliverWebhookResult {
 export interface DeliverWebhookOptions {
   now?: Date;
   timeoutMs?: number;
+  /** Injectable outbound transport (tests); defaults to the Node transport. */
+  transport?: WebhookTransport;
 }
 
 /**
- * Performs (or retries) one webhook delivery: claims the row atomically,
- * re-validates the URL, POSTs the signed payload, and records success or
- * schedules the next attempt. Never throws — all outcomes land in the row.
+ * Performs (or retries) one webhook delivery: claims the row exclusively
+ * (pending -> processing + lease), re-validates and pins the URL, decrypts the
+ * signing secret, POSTs the signed payload, and records success or schedules
+ * the next attempt. Never throws — all outcomes land in the row.
  */
 export async function deliverWebhook(
   prisma: PrismaClient,
@@ -220,11 +257,23 @@ export async function deliverWebhook(
     return { status: "skipped", error: "Webhook is disabled" };
   }
 
-  // Atomic claim: bump `attempts` only while the row is still pending so the
-  // inline pass and the scheduler can never double-deliver the same event.
+  // Exclusive claim: transition pending -> processing while the row is still
+  // pending AND due. Postgres evaluates this as a single UPDATE, so exactly
+  // one of two concurrent workers gets count === 1 and may deliver; the other
+  // must skip. During processing the row is invisible to further claims
+  // (status no longer pending), and the lease bounds the damage of a crashed
+  // worker (recovered by the scheduler sweep).
   const claim = (await prisma.webhookDelivery.updateMany({
-    where: { id: delivery.id, status: "pending" },
-    data: { attempts: { increment: 1 } },
+    where: {
+      id: delivery.id,
+      status: "pending",
+      nextAttemptAt: { lte: now },
+    },
+    data: {
+      status: "processing",
+      attempts: { increment: 1 },
+      leaseExpiresAt: new Date(now.getTime() + webhookDeliveryLeaseMs()),
+    },
   })) as WebhookUpdateManyResult;
   if (claim.count === 0) {
     return { status: "skipped", error: "Delivery already claimed by another worker" };
@@ -233,9 +282,11 @@ export async function deliverWebhook(
 
   // SSRF re-validation at send time: the webhook may have been created before
   // an operator-tightened environment, or DNS may have changed since create.
-  let targetUrl: string;
+  // The connection is pinned to the validated answer so the actual request
+  // cannot be re-steered by a lookup at connect time.
+  let target: PinnedOutboundConnection;
   try {
-    targetUrl = await assertOutboundUrlAllowed(delivery.webhook.url, {
+    target = await assertOutboundRequestPinned(delivery.webhook.url, {
       label: "Webhook URL",
       allowPrivateHosts: webhookAllowPrivateHosts(),
       privateHostsHint: "Set WEBHOOK_ALLOW_PRIVATE_HOSTS=true to allow webhook delivery to private, self-hosted targets",
@@ -248,29 +299,49 @@ export async function deliverWebhook(
     return { status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending", responseCode: null, error: error.message };
   }
 
-  const secret = decryptSecret(delivery.webhook.encryptedSecret);
+  // A decryption failure used to escape the failure path, leaving the row
+  // pending forever (retried every tick past WEBHOOK_MAX_ATTEMPTS) after a
+  // master-key rotation. Treat it as a normal bounded failure instead.
+  let secret: string;
+  try {
+    secret = decryptSecret(delivery.webhook.encryptedSecret);
+  } catch (error) {
+    const message = `Webhook secret could not be decrypted (${boundedError(error, "decryption failed")}); rotate stored secrets with npm run db:reencrypt-ai-secrets`;
+    await recordFailure(prisma, delivery.id, attempts, now, message, null);
+    return {
+      status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending",
+      responseCode: null,
+      error: message,
+    };
+  }
+
   const body = buildDeliveryBody(delivery.payload, delivery.id);
   const timestamp = Math.floor(now.getTime() / 1000).toString();
   const signature = computeWebhookSignature(secret, timestamp, body);
 
-  const outcome = await postWebhookRequest(targetUrl, {
+  const outcome = await postWebhookRequest(target.url, {
     body,
     event: delivery.event,
     deliveryId: delivery.id,
     signature,
     timestamp,
     timeoutMs: options.timeoutMs,
+    lookup: createPinnedOutboundLookup(target),
+    transport: options.transport,
   });
 
   if (outcome.ok && outcome.responseCode !== null) {
+    // Finalize only while still the processing owner: a recovered lease
+    // (another worker's re-claim) must never be clobbered by this worker.
     await prisma.webhookDelivery.updateMany({
-      where: { id: delivery.id, status: "pending" },
+      where: { id: delivery.id, status: "processing" },
       data: {
         status: "success",
         responseCode: outcome.responseCode,
         attempts: { set: attempts },
         lastError: null,
         nextAttemptAt: now,
+        leaseExpiresAt: null,
       },
     });
     return { status: "success", responseCode: outcome.responseCode };
@@ -297,13 +368,14 @@ async function recordFailure(
   const nextAttemptAt = exhausted ? now : new Date(now.getTime() + delay);
 
   await prisma.webhookDelivery.updateMany({
-    where: { id: deliveryId, status: "pending" },
+    where: { id: deliveryId, status: "processing" },
     data: {
       attempts: { set: attempts },
-      ...(exhausted ? { status: "failed" } : {}),
+      ...(exhausted ? { status: "failed" as const } : {}),
       responseCode,
       lastError: errorMessage,
       nextAttemptAt,
+      leaseExpiresAt: null,
     },
   });
   return { status: exhausted ? "failed" : "pending", responseCode };
@@ -316,7 +388,120 @@ export interface WebhookPostInit {
   signature: string;
   timestamp: string;
   timeoutMs?: number;
+  /** Pinned lookup override from {@link createPinnedOutboundLookup} — the connection must not re-resolve DNS. */
+  lookup?: import("node:net").LookupFunction;
+  transport?: WebhookTransport;
 }
+
+/** Describes one outbound request handed to a {@link WebhookTransport}. */
+export interface WebhookOutboundRequest {
+  url: string;
+  headers: Record<string, string>;
+  body: string;
+  timeoutMs: number;
+  /** Pinned `lookup` for the Node transport (undefined when no pin applies). */
+  lookup?: import("node:net").LookupFunction;
+}
+
+export interface WebhookOutboundResponse {
+  /** HTTP status, or null when the request failed at the transport level. */
+  status: number | null;
+  /** Taskito-authored error description; upstream response bodies are never reflected. */
+  error: string | null;
+}
+
+/**
+ * Pluggable outbound transport. Production uses {@link defaultWebhookTransport}
+ * (Node http/https with the pinned lookup + capped response drain); tests
+ * inject doubles here.
+ */
+export type WebhookTransport = (request: WebhookOutboundRequest) => Promise<WebhookOutboundResponse>;
+
+/**
+ * Production outbound transport: Node http/https with an optional pinned
+ * `lookup` (SSRF pin), a hard overall timeout, no redirect handling at all
+ * (3xx counts as failure), and a stream-discarded response body that is
+ * destroyed once it exceeds `WEBHOOK_MAX_RESPONSE_BYTES`.
+ */
+export const defaultWebhookTransport: WebhookTransport = (request) => {
+  return new Promise<WebhookOutboundResponse>((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    const timeout = { timer: undefined as NodeJS.Timeout | undefined };
+    const finish = (result: WebhookOutboundResponse) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout.timer) {
+        clearTimeout(timeout.timer);
+      }
+      resolve(result);
+    };
+    const timeoutMessage = `Webhook request timed out after ${Math.ceil(request.timeoutMs / 1000)} seconds`;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(request.url);
+    } catch {
+      finish({ status: null, error: "Webhook URL is invalid" });
+      return;
+    }
+
+    let req: http.ClientRequest;
+    try {
+      req = (parsed.protocol === "https:" ? https : http).request(parsed, {
+        method: "POST",
+        headers: request.headers,
+        // SSRF pin: connect straight to the validated address. The URL keeps
+        // the original hostname, so the Host header and (for https) the TLS
+        // SNI stay the hostname while TCP goes to the pinned address.
+        lookup: request.lookup,
+      });
+    } catch (error) {
+      finish({ status: null, error: boundedError(describeError(error), "Webhook request failed") });
+      return;
+    }
+
+    timeout.timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy();
+      finish({ status: null, error: timeoutMessage });
+    }, request.timeoutMs);
+
+    req.on("error", (error) => {
+      finish(
+        timedOut
+          ? { status: null, error: timeoutMessage }
+          : { status: null, error: boundedError(describeError(error) || "Webhook request failed", "Webhook request failed") },
+      );
+    });
+    req.end(request.body);
+
+    req.on("response", (res: IncomingMessage) => {
+      const status = res.statusCode ?? 0;
+      let received = 0;
+      // Stream-discard: the delivery only needs the status code. Any bytes
+      // beyond the cap cause the socket to be destroyed — the body is never
+      // accumulated in memory.
+      res.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > WEBHOOK_MAX_RESPONSE_BYTES) {
+          res.destroy();
+        }
+      });
+      res.on("end", () => finish({ status, error: null }));
+      // Fires when truncated at the cap or aborted mid-body — the status we
+      // already received stands.
+      res.on("close", () => finish({ status, error: null }));
+      res.on("error", () => {
+        // Truncation (cap reached) or an aborted body still yields the status.
+        finish(timedOut ? { status: null, error: timeoutMessage } : { status, error: null });
+      });
+      res.resume();
+    });
+  });
+};
 
 interface WebhookPostResult {
   ok: boolean;
@@ -329,55 +514,110 @@ interface WebhookPostResult {
 
 /**
  * The single outbound HTTP hop shared by deliveries and `ping` tests:
- * POST JSON with the X-Taskito-* headers, 10s timeout, redirects refused
- * (manual redirect handling = a 3xx is returned instead of followed and counts
- * as a failure), response bodies drained but never surfaced.
+ * POST JSON with the X-Taskito-* headers, bounded timeout, redirects are
+ * never followed (a 3xx is returned instead of followed and counts as a
+ * failure), response bodies stream-discarded and never surfaced.
  */
 export async function postWebhookRequest(url: string, init: WebhookPostInit): Promise<WebhookPostResult> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "user-agent": "Taskito-Webhook/1.0",
+    [WEBHOOK_EVENT_HEADER.toLowerCase()]: init.event,
+    [WEBHOOK_DELIVERY_HEADER.toLowerCase()]: init.deliveryId,
+    [WEBHOOK_TIMESTAMP_HEADER.toLowerCase()]: init.timestamp,
+    [WEBHOOK_SIGNATURE_HEADER.toLowerCase()]: `sha256=${init.signature}`,
+  };
+
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "user-agent": "Taskito-Webhook/1.0",
-        [WEBHOOK_EVENT_HEADER.toLowerCase()]: init.event,
-        [WEBHOOK_DELIVERY_HEADER.toLowerCase()]: init.deliveryId,
-        [WEBHOOK_TIMESTAMP_HEADER.toLowerCase()]: init.timestamp,
-        [WEBHOOK_SIGNATURE_HEADER.toLowerCase()]: `sha256=${init.signature}`,
-      },
+    const outcome = await (init.transport ?? defaultWebhookTransport)({
+      url,
+      headers,
       body: init.body,
-      redirect: "manual",
-      cache: "no-store",
-      signal: AbortSignal.timeout(init.timeoutMs ?? WEBHOOK_TIMEOUT_MS),
+      timeoutMs: init.timeoutMs ?? WEBHOOK_TIMEOUT_MS,
+      lookup: init.lookup,
     });
 
-    // Drain (best-effort) so the socket is released; never inspect or reflect
-    // the response body — it could contain anything the receiver controls.
-    try {
-      await response.arrayBuffer();
-    } catch {
-      // ignore
+    if (outcome.status !== null && outcome.status >= 200 && outcome.status < 300) {
+      return { ok: true, responseCode: outcome.status, error: null };
     }
-
-    if (!response.ok) {
-      return { ok: false, responseCode: response.status, error: `Webhook responded with HTTP status ${response.status}` };
+    if (outcome.status !== null) {
+      return { ok: false, responseCode: outcome.status, error: `Webhook responded with HTTP status ${outcome.status}` };
     }
-    return { ok: true, responseCode: response.status, error: null };
+    return { ok: false, responseCode: null, error: boundedError(outcome.error ?? "Webhook request failed", "Webhook request failed") };
   } catch (error) {
-    const normalizedName = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
-    const message = normalizedName
-      ? `Webhook request timed out after ${Math.ceil((init.timeoutMs ?? WEBHOOK_TIMEOUT_MS) / 1000)} seconds`
-      : describeError(error) || "Webhook request failed";
-    return { ok: false, responseCode: null, error: boundedError(message, "Webhook request failed") };
+    return { ok: false, responseCode: null, error: boundedError(describeError(error) || "Webhook request failed", "Webhook request failed") };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded delivery queue
+// ---------------------------------------------------------------------------
+
+interface QueuedDelivery {
+  prisma: PrismaClient;
+  deliveryId: string;
+  transport?: WebhookTransport;
+}
+
+const outboundDeliveryQueue: QueuedDelivery[] = [];
+let activeDeliveryPosts = 0;
+
+function pumpWebhookDeliveryQueue() {
+  const limit = webhookDeliveryConcurrency();
+  while (activeDeliveryPosts < limit && outboundDeliveryQueue.length > 0) {
+    const next = outboundDeliveryQueue.shift()!;
+    activeDeliveryPosts += 1;
+    void deliverWebhook(next.prisma, next.deliveryId, { transport: next.transport })
+      .catch(() => {
+        // deliverWebhook is contractually non-throwing; belt and braces.
+      })
+      .finally(() => {
+        activeDeliveryPosts -= 1;
+        pumpWebhookDeliveryQueue();
+      });
+  }
+}
+
+/** Fire-and-forget enqueue: the bounded worker queue delivers concurrently. */
+function enqueueWebhookDelivery(prisma: PrismaClient, deliveryId: string, transport?: WebhookTransport) {
+  outboundDeliveryQueue.push({ prisma, deliveryId, transport });
+  pumpWebhookDeliveryQueue();
+}
+
+/** Returns the queue depth + in-flight count (exposed for tests/monitoring). */
+export function outboundDeliveryQueueState() {
+  return { queued: outboundDeliveryQueue.length, active: activeDeliveryPosts };
+}
+
+/**
+ * Re-checks that the webhook's creator still holds BOTH `automation_manage`
+ * AND `task_read` on the project. Webhook endpoints receive task metadata, so
+ * a principal that registered one must not keep it flowing after losing read
+ * access (confused-deputy exfiltration). Fails closed on lookup errors.
+ */
+export async function webhookCreatorMayDeliver(
+  prisma: PrismaClient,
+  creatorId: string,
+  projectId: string,
+): Promise<boolean> {
+  try {
+    const access = await getEffectiveProjectAccess(prisma, creatorId, projectId);
+    return access.permissions.has("automation_manage") && access.permissions.has("task_read");
+  } catch {
+    return false;
   }
 }
 
 /**
  * Fans one event out to every enabled+subscribed webhook of the project:
  * creates a `WebhookDelivery` row per webhook (status `pending`, due now) and
- * kicks delivery off fire-and-forget. Callers invoke it with
- * `void emitWebhookEvent(...).catch(() => {})` so it can never fail a
+ * hands each one to the bounded delivery queue fire-and-forget. Callers invoke
+ * it with `void emitWebhookEvent(...).catch(() => {})` so it can never fail a
  * mutation; slice/part failures inside only affect the fan-out itself.
+ *
+ * Webhooks whose creator no longer holds `automation_manage` + `task_read`
+ * are skipped (the endpoint could otherwise keep receiving task metadata
+ * after the principal lost read access).
  */
 export async function emitWebhookEvent(
   prisma: PrismaClient,
@@ -398,12 +638,31 @@ export async function emitWebhookEvent(
         isEnabled: true,
         events: { has: input.event },
       },
-      select: { id: true },
+      select: { id: true, createdByUserId: true },
     }),
   ]);
 
   if (!project || webhooks.length === 0) {
     return { delivered: 0 };
+  }
+
+  // Confused-deputy guard: resolve creator permissions once per distinct
+  // creator for this fan-out.
+  const creatorAllowed = new Map<string, boolean>();
+  const deliverableWebhooks: Array<{ id: string; createdByUserId: string }> = [];
+  for (const webhook of webhooks) {
+    let allowed = creatorAllowed.get(webhook.createdByUserId);
+    if (allowed === undefined) {
+      allowed = await webhookCreatorMayDeliver(prisma, webhook.createdByUserId, input.projectId);
+      creatorAllowed.set(webhook.createdByUserId, allowed);
+    }
+    if (allowed) {
+      deliverableWebhooks.push(webhook);
+    } else {
+      console.warn(
+        `${LOG_PREFIX} skipping webhook ${webhook.id} for event ${input.event}: creator ${webhook.createdByUserId} no longer holds automation_manage + task_read on project ${input.projectId}`,
+      );
+    }
   }
 
   const actor = input.actorId
@@ -425,8 +684,7 @@ export async function emitWebhookEvent(
     ...(changes ? { changes } : {}),
   };
 
-  let delivered = 0;
-  for (const webhook of webhooks) {
+  for (const webhook of deliverableWebhooks) {
     const created = (await prisma.webhookDelivery.create({
       data: {
         webhookId: webhook.id,
@@ -445,14 +703,12 @@ export async function emitWebhookEvent(
       data: { payload: { ...envelopeBase, id: created.id } as unknown as import("@prisma/client").Prisma.InputJsonValue },
     });
 
-    delivered += 1;
-
-    // Fire-and-forget: enqueue the POST without waiting; the scheduler sweep
-    // is the safety net for anything left pending (restart, transient failure).
-    void deliverWebhook(prisma, created.id).catch(() => {});
+    // Fire-and-forget: enqueue the POST (bounded concurrency); the scheduler
+    // sweep is the safety net for anything left pending (restart, failure).
+    enqueueWebhookDelivery(prisma, created.id, input.transport);
   }
 
-  return { delivered };
+  return { delivered: deliverableWebhooks.length };
 }
 
 /**
@@ -469,6 +725,7 @@ export async function emitTaskWebhookEvent(
     actorId?: string | null;
     changes?: Record<string, { from: unknown; to: unknown }>;
     commentId?: string | null;
+    transport?: WebhookTransport;
   },
 ): Promise<{ delivered: number }> {
   const task = await prisma.task.findUnique({
@@ -491,19 +748,50 @@ export async function emitTaskWebhookEvent(
     event: input.event,
     actorId: input.actorId,
     payload: { task, changes: input.changes, commentId: input.commentId },
+    transport: input.transport,
   });
 }
 
 /**
- * Scheduler-facing sweep: delivers every still-`pending` delivery whose
- * `nextAttemptAt` has come due. Each delivery is isolated (failures are
- * logged, never abort the sweep) and claim-guarded inside `deliverWebhook`.
+ * Deliberately recovers deliveries whose `processing` lease has expired (the
+ * claiming worker crashed mid-POST): they are handed back to `pending` so the
+ * normal sweep re-claims them. Runs under the same scheduler entry point as
+ * the sweep so recovery can never be forgotten.
+ */
+export async function recoverExpiredWebhookDeliveryLeases(
+  prisma: PrismaClient,
+  now: Date = new Date(),
+): Promise<number> {
+  const result = (await prisma.webhookDelivery.updateMany({
+    where: {
+      status: "processing",
+      leaseExpiresAt: { lte: now },
+    },
+    data: {
+      status: "pending",
+      nextAttemptAt: now,
+      leaseExpiresAt: null,
+    },
+  })) as WebhookUpdateManyResult;
+  if (result.count > 0) {
+    console.warn(`${LOG_PREFIX} recovered ${result.count} expired processing webhook lease(s) back to pending`);
+  }
+  return result.count;
+}
+
+/**
+ * Scheduler-facing sweep: first recovers expired `processing` leases, then
+ * delivers every still-`pending` delivery whose `nextAttemptAt` has come due.
+ * Each delivery is isolated (failures are logged, never abort the sweep) and
+ * claim-guarded inside `deliverWebhook`.
  */
 export async function processDueWebhookDeliveries(
   prisma: PrismaClient,
   now: Date = new Date(),
-  options: { limit?: number } = {},
+  options: { limit?: number; transport?: WebhookTransport } = {},
 ): Promise<{ processed: number; succeeded: number }> {
+  await recoverExpiredWebhookDeliveryLeases(prisma, now);
+
   const due = (await prisma.webhookDelivery.findMany({
     where: {
       status: "pending",
@@ -518,7 +806,7 @@ export async function processDueWebhookDeliveries(
   let succeeded = 0;
   for (const delivery of due) {
     try {
-      const result = await deliverWebhook(prisma, delivery.id, { now });
+      const result = await deliverWebhook(prisma, delivery.id, { now, transport: options.transport });
       if (result.status === "success") {
         succeeded += 1;
       }
@@ -540,8 +828,8 @@ export interface SendWebhookPingResult {
 /**
  * Synchronous `ping` used by the router's `testDelivery` procedure. Sends one
  * signed webhook with the `ping` event and reports `{ status, responseCode,
- * error }` — bounded error text, no upstream body reflection. Never persists
- * a delivery row.
+ * error }` — bounded error text, no upstream body reflection, SSRF-pinned
+ * connection. Never persists a delivery row.
  */
 export async function sendWebhookPing(
   prisma: PrismaClient,
@@ -552,13 +840,14 @@ export async function sendWebhookPing(
     projectId: string;
     now?: Date;
     timeoutMs?: number;
+    transport?: WebhookTransport;
   },
 ): Promise<SendWebhookPingResult> {
   const now = input.now ?? new Date();
 
-  let targetUrl: string;
+  let target: PinnedOutboundConnection;
   try {
-    targetUrl = await assertOutboundUrlAllowed(input.url, {
+    target = await assertOutboundRequestPinned(input.url, {
       label: "Webhook URL",
       allowPrivateHosts: webhookAllowPrivateHosts(),
       privateHostsHint: "Set WEBHOOK_ALLOW_PRIVATE_HOSTS=true to allow webhook delivery to private, self-hosted targets",
@@ -588,13 +877,15 @@ export async function sendWebhookPing(
   const timestamp = Math.floor(now.getTime() / 1000).toString();
   const signature = computeWebhookSignature(secret, timestamp, body);
 
-  const result = await postWebhookRequest(targetUrl, {
+  const result = await postWebhookRequest(target.url, {
     body,
     event: WEBHOOK_PING_EVENT,
     deliveryId,
     timestamp,
     signature,
     timeoutMs: input.timeoutMs,
+    lookup: createPinnedOutboundLookup(target),
+    transport: input.transport,
   });
 
   return {
@@ -603,3 +894,7 @@ export async function sendWebhookPing(
     error: result.error,
   };
 }
+
+// Re-export for callers that need the pinned-connection type alongside the
+// dispatcher API.
+export type { PinnedOutboundConnection };
