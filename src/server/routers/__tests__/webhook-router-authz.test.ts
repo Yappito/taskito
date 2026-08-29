@@ -177,20 +177,112 @@ describe("webhook router authorization", () => {
       expect(actor.prisma.webhook.delete).not.toHaveBeenCalled();
     });
 
-    it("redeliver is FORBIDDEN", async () => {
+    it("list is FORBIDDEN (endpoint config + creator identity need task_read too)", async () => {
+      const actor = denyTaskReadActor();
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.list({ projectId: PROJECT_A })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhook.findMany).not.toHaveBeenCalled();
+    });
+
+    it("listDeliveries is FORBIDDEN (delivery history needs task_read too)", async () => {
+      const actor = denyTaskReadActor();
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+      await expect(caller.listDeliveries({ projectId: PROJECT_A })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhookDelivery.findMany).not.toHaveBeenCalled();
+    });
+
+    it("redeliver is FORBIDDEN and performs no write", async () => {
       const actor = denyTaskReadActor();
       actor.prisma.webhookDelivery.findUnique.mockResolvedValue({
         id: DELIVERY_IN_B,
         status: "failed",
+        leaseExpiresAt: null,
         webhook: { projectId: PROJECT_A, isEnabled: true },
       });
       const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
       await expect(caller.redeliver({ id: DELIVERY_IN_B })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(actor.prisma.webhookDelivery.updateMany).not.toHaveBeenCalled();
       expect(actor.prisma.webhookDelivery.update).not.toHaveBeenCalled();
     });
   });
 
-  describe("per-project webhook count cap (finding 9)", () => {
+  describe("redeliver vs active claims (claim-token lease, wave-6 finding 2)", () => {
+    it("refuses to disrupt an unexpired processing claim (no requeue, no duplicate POST)", async () => {
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      actor.prisma.webhookDelivery.findUnique.mockResolvedValue({
+        id: DELIVERY_IN_B,
+        status: "processing",
+        leaseExpiresAt: new Date(Date.now() + 100_000),
+        webhook: { projectId: PROJECT_A, isEnabled: true },
+      });
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      await expect(caller.redeliver({ id: DELIVERY_IN_B })).rejects.toMatchObject({
+        code: "CONFLICT",
+        message: /currently being processed/i,
+      });
+      // No unconditional write and no duplicate fire-and-forget delivery: the
+      // only write attempted is the atomically-guarded requeue, which carries
+      // the not-processing/expired predicate (so even a racing claim could not
+      // be clobbered into a second POST).
+      expect(actor.prisma.webhookDelivery.update).not.toHaveBeenCalled();
+      const attempts = actor.prisma.webhookDelivery.updateMany.mock.calls as Array<[
+        { where: { OR?: unknown[] } },
+      ]>;
+      for (const [args] of attempts) {
+        expect(args.where.OR).toBeDefined();
+      }
+    });
+
+    it("requeues an EXPIRED processing claim (atomic expiry branch) and revokes the stale token", async () => {
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      actor.prisma.webhookDelivery.findUnique.mockResolvedValue({
+        id: DELIVERY_IN_B,
+        status: "processing",
+        leaseExpiresAt: new Date(Date.now() - 5_000),
+        webhook: { projectId: PROJECT_A, isEnabled: true },
+      });
+      actor.prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      const result = (await caller.redeliver({ id: DELIVERY_IN_B })) as { success: boolean };
+      expect(result.success).toBe(true);
+
+      const call = actor.prisma.webhookDelivery.updateMany.mock.calls[0][0] as {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      };
+      expect(call.where).toMatchObject({ id: DELIVERY_IN_B });
+      // The not-processing/expired branch is re-evaluated atomically at write time.
+      expect(call.where.OR).toBeDefined();
+      expect(call.data).toMatchObject({
+        status: "pending",
+        attempts: 0,
+        claimToken: null,
+        leaseExpiresAt: null,
+      });
+    });
+
+    it("requeues a failed delivery with a fresh attempt budget", async () => {
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      actor.prisma.webhookDelivery.findUnique.mockResolvedValue({
+        id: DELIVERY_IN_B,
+        status: "failed",
+        leaseExpiresAt: null,
+        webhook: { projectId: PROJECT_A, isEnabled: true },
+      });
+      actor.prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      const result = (await caller.redeliver({ id: DELIVERY_IN_B })) as { success: boolean };
+      expect(result.success).toBe(true);
+      const call = actor.prisma.webhookDelivery.updateMany.mock.calls[0][0] as { data: Record<string, unknown> };
+      expect(call.data.status).toBe("pending");
+      expect(call.data.claimToken).toBeNull();
+    });
+  });
+
+  describe("per-project webhook count cap (finding 9 + wave-6 finding 4)", () => {
     it("rejects the (N+1)th webhook with BAD_REQUEST and performs no write", async () => {
       vi.stubEnv("WEBHOOK_MAX_WEBHOOKS_PER_PROJECT", "1");
       const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
@@ -226,6 +318,74 @@ describe("webhook router authorization", () => {
       expect(result.secret.startsWith("whsec_")).toBe(true);
       // withSecretRotationLock wraps the write in a transaction.
       expect(actor.prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not trust the pre-lock count: the cap is re-read inside the rotation lock (TOCTOU)", async () => {
+      vi.stubEnv("WEBHOOK_MAX_WEBHOOKS_PER_PROJECT", "5");
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+      // The loose pre-lock check sees 4 (< 5) and passes, but by the time the
+      // serialized critical section runs, a concurrent create pushed the
+      // project to the cap — the recount under the lock must reject.
+      let countCalls = 0;
+      actor.prisma.webhook.count.mockImplementation(async () => (countCalls++ === 0 ? 4 : 5));
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      await expect(
+        caller.create({ projectId: PROJECT_A, url: PUBLIC_URL, events: ["task.created"] }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST", message: /per-project limit of 5/ });
+      expect(actor.prisma.webhook.create).not.toHaveBeenCalled();
+    });
+
+    it("concurrent creates cannot exceed the cap (count + insert enclosed by the serialized boundary)", async () => {
+      vi.stubEnv("WEBHOOK_MAX_WEBHOOKS_PER_PROJECT", "3");
+      const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "manager" } });
+
+      // Emulate the pg advisory lock: transactions run strictly serialized.
+      const originalTransaction = actor.prisma.$transaction.getMockImplementation() as
+        | ((input: unknown) => Promise<unknown>)
+        | undefined;
+      let tail: Promise<unknown> = Promise.resolve();
+      actor.prisma.$transaction.mockImplementation(async (input: unknown) => {
+        if (typeof input !== "function") {
+          if (!originalTransaction) {
+            throw new Error("original $transaction implementation unavailable");
+          }
+          return originalTransaction(input);
+        }
+        const run = tail.then(() => (input as (tx: unknown) => Promise<unknown>)(actor.prisma));
+        tail = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        return run;
+      });
+
+      let created = 0;
+      // Live count: reflects every insert that has landed so far (both the
+      // pre-check and the recount-under-lock call this mock).
+      actor.prisma.webhook.count.mockImplementation(async () => created);
+      actor.prisma.webhook.create.mockImplementation(async () => {
+        created += 1;
+        return { id: `new-webhook-${created}`, createdAt: new Date(), updatedAt: new Date() };
+      });
+      const caller = callerFor(webhookRouter, actor.prisma, actor.sessionUser);
+
+      const settled = await Promise.allSettled(
+        Array.from({ length: 10 }, () =>
+          caller.create({ projectId: PROJECT_A, url: PUBLIC_URL, events: ["task.created"] }),
+        ),
+      );
+
+      // The cap is never exceeded, no matter how the callers interleave.
+      expect(created).toBeLessThanOrEqual(3);
+      const rejected = settled.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+      const fulfilled = settled.filter((r) => r.status === "fulfilled");
+      expect(fulfilled).toHaveLength(created);
+      expect(rejected.length).toBe(10 - created);
+      for (const rejection of rejected) {
+        expect((rejection.reason as { code?: string }).code).toBe("BAD_REQUEST");
+        expect((rejection.reason as Error).message).toMatch(/per-project limit of 3/);
+      }
     });
   });
 

@@ -11,9 +11,16 @@ import {
 } from "@/lib/ai-provider-validation";
 import {
   WEBHOOK_MAX_RESPONSE_BYTES,
+  WEBHOOK_TIMEOUT_MS,
   webhookDeliveryConcurrency,
   webhookDeliveryLeaseMs,
+  webhookDeliveryPreflightDeadlineMs,
+  webhookDeliveryQueueMaxDepth,
 } from "@/lib/webhook-limits";
+
+// Kept as part of the dispatcher's public surface (moved into webhook-limits
+// so the claim-lease floor can be derived from it).
+export { WEBHOOK_TIMEOUT_MS };
 import { decryptSecret } from "@/lib/secret-crypto";
 import { isWebhookEvent, WEBHOOK_PING_EVENT } from "@/lib/webhook-events";
 import { getEffectiveProjectAccess } from "@/server/authz";
@@ -46,18 +53,31 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *    (`WEBHOOK_DELIVERY_CONCURRENCY` concurrent POSTs), so webhook failures
  *    never fail the originating mutation and a large fan-out cannot open one
  *    socket per webhook;
- *  - the claim is exclusive: `deliverWebhook` atomically transitions
- *    `pending -> processing` (`updateMany` where `status = pending` AND the
- *    row is due) before any I/O, sets a lease deadline
- *    (`leaseExpiresAt`), and only the claimer finalizes the row. Only the
- *    worker whose update matched (`count === 1`) proceeds, so the inline pass
- *    and the scheduler sweep can never double-deliver the same event;
+ *  - the claim is exclusive AND owned: `deliverWebhook` atomically
+ *    transitions `pending -> processing` (`updateMany` where
+ *    `status = pending` AND the row is due) before any I/O, stamps a random
+ *    per-claim `claimToken` + lease deadline (`leaseExpiresAt`), and only the
+ *    claim token owner finalizes the row — every success/failure/requeue
+ *    update must present the SAME token (`updateMany` where `id AND status
+ *    = processing AND claimToken = ours`), so a worker whose lease expired
+ *    and was recovered by another worker can never clobber the new claim.
+ *    Only the worker whose update matched (`count === 1`) proceeds, so the
+ *    inline pass and the scheduler sweep can never double-deliver the same
+ *    event;
  *  - the scheduler's `processDueWebhookDeliveries` first deliberately recovers
- *    expired `processing` leases back to `pending` (crashed worker), then
- *    sweeps rows whose `nextAttemptAt` came due (retries + anything the
- *    inline pass missed because the process restarted);
- *  - failures are retried on a 1m / 5m / 30m backoff ladder, capped at
- *    `WEBHOOK_MAX_ATTEMPTS` total attempts, then marked `"failed"`;
+ *    expired `processing` leases back to `pending` and clears the claim token
+ *    (crashed worker), then sweeps rows whose `nextAttemptAt` came due
+ *    (retries + anything the inline pass missed because the process restarted);
+ *  - failures ALWAYS leave the row schedulable: a non-exhausted failure hands
+ *    the owned claim back to `pending` (status + backoff `nextAttemptAt`, no
+ *    lease) so the sweep re-claims it; only exhausted attempts mark "failed";
+ *  - before decrypt/sign/POST, the delivery re-checks that the webhook's
+ *    creator STILL holds `automation_manage` + `task_read` on the project and
+ *    is not disabled (fail closed) — an already-queued delivery must not keep
+ *    POSTing task metadata after its creator lost read access;
+ *  - the preflight (URL validation + DNS pin) runs under an explicit deadline
+ *    (`webhookDeliveryPreflightDeadlineMs`) so it cannot outlive the lease,
+ *    and the configured lease is floored at preflight budget + POST timeout;
  *  - target URLs are re-validated (same SSRF policy as at create time) AND
  *    the connection is PINNED to the validated address: the dispatcher
  *    resolves once, checks every A/AAAA answer against the block rules, then
@@ -70,7 +90,8 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *    different target;
  *  - each request is capped by `WEBHOOK_TIMEOUT_MS` and response bodies are
  *    stream-discarded after `WEBHOOK_MAX_RESPONSE_BYTES` — the delivery only
- *    needs the status code.
+ *    needs the status code. The in-process inline queue is depth-capped;
+ *    overflow falls back to the durable `pending` rows + scheduler sweep.
  */
 
 const LOG_PREFIX = "[webhooks]";
@@ -80,9 +101,6 @@ export const WEBHOOK_MAX_ATTEMPTS = 3;
 
 /** Backoff ladder by failed-attempt count: retry 1 after 1m, retry 2 after 5m (30m tail kept for clarity if the attempt cap is raised). */
 export const WEBHOOK_RETRY_DELAYS_MS = [60_000, 300_000, 1_800_000] as const;
-
-/** Outbound POST timeout. */
-export const WEBHOOK_TIMEOUT_MS = 10_000;
 
 /** Largest error string persisted on a delivery (authored by Taskito, never upstream response bodies). */
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -245,7 +263,16 @@ export async function deliverWebhook(
   const delivery = await prisma.webhookDelivery.findUnique({
     where: { id: deliveryId },
     include: {
-      webhook: { select: { id: true, url: true, encryptedSecret: true, isEnabled: true } },
+      webhook: {
+        select: {
+          id: true,
+          url: true,
+          encryptedSecret: true,
+          isEnabled: true,
+          projectId: true,
+          createdByUserId: true,
+        },
+      },
     },
   });
   if (!delivery || !delivery.webhook) {
@@ -258,12 +285,17 @@ export async function deliverWebhook(
     return { status: "skipped", error: "Webhook is disabled" };
   }
 
-  // Exclusive claim: transition pending -> processing while the row is still
-  // pending AND due. Postgres evaluates this as a single UPDATE, so exactly
-  // one of two concurrent workers gets count === 1 and may deliver; the other
-  // must skip. During processing the row is invisible to further claims
-  // (status no longer pending), and the lease bounds the damage of a crashed
-  // worker (recovered by the scheduler sweep).
+  // Exclusive, OWNED claim: transition pending -> processing while the row is
+  // still pending AND due, stamping a random per-claim owner token. Postgres
+  // evaluates this as a single UPDATE, so exactly one of two concurrent
+  // workers gets count === 1 and may deliver; the other must skip. During
+  // processing the row is invisible to further claims (status no longer
+  // pending), and every finalize/requeue update must present the SAME token —
+  // a worker whose lease expired and was recovered/re-claimed by another
+  // worker can no longer match its own token and cannot clobber the new
+  // claim. The lease bounds the damage of a crashed worker (recovered by the
+  // scheduler sweep, which mints a fresh token on the next claim).
+  const claimToken = crypto.randomUUID();
   const claim = (await prisma.webhookDelivery.updateMany({
     where: {
       id: delivery.id,
@@ -273,6 +305,7 @@ export async function deliverWebhook(
     data: {
       status: "processing",
       attempts: { increment: 1 },
+      claimToken,
       leaseExpiresAt: new Date(now.getTime() + webhookDeliveryLeaseMs()),
     },
   })) as WebhookUpdateManyResult;
@@ -281,22 +314,47 @@ export async function deliverWebhook(
   }
   const attempts = delivery.attempts + 1;
 
+  // Send-time confused-deputy re-check, BEFORE decrypt/sign/POST: the
+  // delivery may have been enqueued long before the creator was disabled,
+  // demoted, or denied task_read — the endpoint still receives task
+  // metadata, so access must hold at send time, not just at enqueue time.
+  // Fail closed: mark the delivery failed (no further retries) instead of
+  // POSTing.
+  const creatorMayDeliver = await webhookCreatorMayDeliver(prisma, delivery.webhook.createdByUserId, delivery.webhook.projectId);
+  if (!creatorMayDeliver) {
+    const message = `Webhook creator no longer holds automation_manage + task_read on the project; delivery cancelled without sending`;
+    await finalizeOwnedClaim(prisma, delivery.id, claimToken, {
+      status: "failed" as const,
+      attempts,
+      responseCode: null,
+      lastError: message,
+      nextAttemptAt: now,
+    });
+    return { status: "failed", responseCode: null, error: message };
+  }
+
   // SSRF re-validation at send time: the webhook may have been created before
   // an operator-tightened environment, or DNS may have changed since create.
   // The connection is pinned to the validated answer so the actual request
-  // cannot be re-steered by a lookup at connect time.
+  // cannot be re-steered by a lookup at connect time. The preflight runs
+  // under an explicit deadline (DNS lookups have no timeout of their own);
+  // the deadline is derived from the claim lease so validation can never
+  // outlive the claim.
   let target: PinnedOutboundConnection;
   try {
-    target = await assertOutboundRequestPinned(delivery.webhook.url, {
-      label: "Webhook URL",
-      allowPrivateHosts: webhookAllowPrivateHosts(),
-      privateHostsHint: "Set WEBHOOK_ALLOW_PRIVATE_HOSTS=true to allow webhook delivery to private, self-hosted targets",
-    });
+    target = await runWithDeadline(
+      assertOutboundRequestPinned(delivery.webhook.url, {
+        label: "Webhook URL",
+        allowPrivateHosts: webhookAllowPrivateHosts(),
+        privateHostsHint: "Set WEBHOOK_ALLOW_PRIVATE_HOSTS=true to allow webhook delivery to private, self-hosted targets",
+      }),
+      webhookDeliveryPreflightDeadlineMs(),
+    );
   } catch (error) {
-    if (!(error instanceof OutboundUrlValidationError)) {
+    if (!(error instanceof OutboundUrlValidationError || error instanceof WebhookPreflightDeadlineError)) {
       throw error;
     }
-    await recordFailure(prisma, delivery.id, attempts, now, error.message, null);
+    await recordFailure(prisma, delivery.id, claimToken, attempts, now, error.message, null);
     return { status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending", responseCode: null, error: error.message };
   }
 
@@ -308,7 +366,7 @@ export async function deliverWebhook(
     secret = decryptSecret(delivery.webhook.encryptedSecret);
   } catch (error) {
     const message = `Webhook secret could not be decrypted (${boundedError(error, "decryption failed")}); rotate stored secrets with npm run db:reencrypt-ai-secrets`;
-    await recordFailure(prisma, delivery.id, attempts, now, message, null);
+    await recordFailure(prisma, delivery.id, claimToken, attempts, now, message, null);
     return {
       status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending",
       responseCode: null,
@@ -332,10 +390,11 @@ export async function deliverWebhook(
   });
 
   if (outcome.ok && outcome.responseCode !== null) {
-    // Finalize only while still the processing owner: a recovered lease
-    // (another worker's re-claim) must never be clobbered by this worker.
-    await prisma.webhookDelivery.updateMany({
-      where: { id: delivery.id, status: "processing" },
+    // Finalize only while still the processing owner (same claim token): a
+    // recovered lease (another worker's re-claim) must never be clobbered by
+    // this worker's late write.
+    const finalize = (await prisma.webhookDelivery.updateMany({
+      where: { id: delivery.id, status: "processing", claimToken },
       data: {
         status: "success",
         responseCode: outcome.responseCode,
@@ -344,11 +403,16 @@ export async function deliverWebhook(
         nextAttemptAt: now,
         leaseExpiresAt: null,
       },
-    });
+    })) as WebhookUpdateManyResult;
+    if (finalize.count === 0) {
+      console.warn(
+        `${LOG_PREFIX} stale claim on delivery ${delivery.id}: success finalize rejected (lease recovered or redelivered while POST was in flight)`,
+      );
+    }
     return { status: "success", responseCode: outcome.responseCode };
   }
 
-  await recordFailure(prisma, delivery.id, attempts, now, outcome.error ?? "Webhook delivery failed", outcome.responseCode);
+  await recordFailure(prisma, delivery.id, claimToken, attempts, now, outcome.error ?? "Webhook delivery failed", outcome.responseCode);
   return {
     status: attempts >= WEBHOOK_MAX_ATTEMPTS ? "failed" : "pending",
     responseCode: outcome.responseCode,
@@ -356,9 +420,80 @@ export async function deliverWebhook(
   };
 }
 
+/**
+ * Deadline error for the send-time preflight (URL validation + DNS). Treated
+ * like any other pre-flight failure: bounded retry, never an unhandled throw.
+ */
+export class WebhookPreflightDeadlineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebhookPreflightDeadlineError";
+  }
+}
+
+/**
+ * Races `promise` against a hard deadline so a hung DNS validation cannot
+ * outlive the claim lease. The losing promise is NOT cancelled (Node DNS has
+ * no cancellation) — it is simply abandoned.
+ */
+async function runWithDeadline<T>(promise: Promise<T>, deadlineMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new WebhookPreflightDeadlineError(
+          `Webhook URL validation (DNS) exceeded the ${Math.ceil(deadlineMs / 1000)}s preflight deadline`,
+        ),
+      );
+    }, deadlineMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Finalizes a claim the worker still owns: every success/failure/requeue
+ * update is gated on `id` + `status: "processing"` + the claim's own token.
+ * A worker whose lease expired and was recovered (or whose row was
+ * redelivered) no longer matches — its update affects 0 rows and the new
+ * claim is left untouched.
+ */
+async function finalizeOwnedClaim(
+  prisma: PrismaClient,
+  deliveryId: string,
+  claimToken: string,
+  data: {
+    status: "success" | "failed" | "pending";
+    attempts: number;
+    responseCode: number | null;
+    lastError: string | null;
+    nextAttemptAt: Date;
+  },
+) {
+  return (await prisma.webhookDelivery.updateMany({
+    where: { id: deliveryId, status: "processing", claimToken },
+    data: {
+      attempts: { set: data.attempts },
+      status: data.status,
+      ...(data.status === "pending" ? { claimToken: null } : {}),
+      responseCode: data.responseCode,
+      lastError: data.lastError,
+      nextAttemptAt: data.nextAttemptAt,
+      leaseExpiresAt: null,
+    },
+  })) as WebhookUpdateManyResult;
+}
+
 async function recordFailure(
   prisma: PrismaClient,
   deliveryId: string,
+  claimToken: string,
   attempts: number,
   now: Date,
   errorMessage: string,
@@ -368,16 +503,20 @@ async function recordFailure(
   const delay = WEBHOOK_RETRY_DELAYS_MS[Math.min(attempts - 1, WEBHOOK_RETRY_DELAYS_MS.length - 1)];
   const nextAttemptAt = exhausted ? now : new Date(now.getTime() + delay);
 
-  await prisma.webhookDelivery.updateMany({
-    where: { id: deliveryId, status: "processing" },
-    data: {
-      attempts: { set: attempts },
-      ...(exhausted ? { status: "failed" as const } : {}),
-      responseCode,
-      lastError: errorMessage,
-      nextAttemptAt,
-      leaseExpiresAt: null,
-    },
+  // Every failure must leave the row schedulable. Non-exhausted failures hand
+  // the OWNED claim back to `pending` (with a future nextAttemptAt): the
+  // pending sweep then re-claims and re-delivers. (Previously a non-exhausted
+  // failure left the row `processing` with a null lease — invisible to the
+  // sweep and unrecoverable by lease recovery, which permanently stranded ALL
+  // webhook retries.) Only exhausted attempts stop the ladder with `failed`.
+  // Both transitions are guarded by the claim token so a stale worker can
+  // never reschedule another worker's re-claim.
+  await finalizeOwnedClaim(prisma, deliveryId, claimToken, {
+    status: exhausted ? "failed" : "pending",
+    attempts,
+    responseCode,
+    lastError: errorMessage,
+    nextAttemptAt,
   });
   return { status: exhausted ? "failed" : "pending", responseCode };
 }
@@ -579,10 +718,25 @@ function pumpWebhookDeliveryQueue() {
   }
 }
 
-/** Fire-and-forget enqueue: the bounded worker queue delivers concurrently. */
-function enqueueWebhookDelivery(prisma: PrismaClient, deliveryId: string, transport?: WebhookTransport) {
+/**
+ * Fire-and-forget enqueue: the bounded worker queue delivers concurrently.
+ *
+ * Backpressure policy: the in-process queue is depth-capped
+ * (`webhookDeliveryQueueMaxDepth`). When the queue is full the inline attempt
+ * is dropped — the durable `pending` delivery row remains (due immediately),
+ * so the scheduler sweep re-claims and delivers it on the next tick. This
+ * bounds worker memory instead of growing an unbounded array.
+ */
+function enqueueWebhookDelivery(prisma: PrismaClient, deliveryId: string, transport?: WebhookTransport): boolean {
+  if (outboundDeliveryQueue.length >= webhookDeliveryQueueMaxDepth()) {
+    console.warn(
+      `${LOG_PREFIX} outbound delivery queue is full (depth >= ${webhookDeliveryQueueMaxDepth()}); leaving delivery ${deliveryId} pending for the scheduler sweep instead of enqueueing`,
+    );
+    return false;
+  }
   outboundDeliveryQueue.push({ prisma, deliveryId, transport });
   pumpWebhookDeliveryQueue();
+  return true;
 }
 
 /** Returns the queue depth + in-flight count (exposed for tests/monitoring). */
@@ -704,8 +858,9 @@ export async function emitWebhookEvent(
       data: { payload: { ...envelopeBase, id: created.id } as unknown as import("@prisma/client").Prisma.InputJsonValue },
     });
 
-    // Fire-and-forget: enqueue the POST (bounded concurrency); the scheduler
-    // sweep is the safety net for anything left pending (restart, failure).
+    // Fire-and-forget: enqueue the POST (bounded concurrency + depth); the
+    // scheduler sweep is the safety net for anything left pending (restart,
+    // failure, or an overflowed inline queue).
     enqueueWebhookDelivery(prisma, created.id, input.transport);
   }
 
@@ -756,8 +911,11 @@ export async function emitTaskWebhookEvent(
 /**
  * Deliberately recovers deliveries whose `processing` lease has expired (the
  * claiming worker crashed mid-POST): they are handed back to `pending` so the
- * normal sweep re-claims them. Runs under the same scheduler entry point as
- * the sweep so recovery can never be forgotten.
+ * normal sweep re-claims them. Recovery also clears the claim token, which
+ * permanently revokes the old worker's ownership: its late finalize/requeue
+ * update (gated on the now-stale token) can no longer match — the next claim
+ * mints a fresh token. Runs under the same scheduler entry point as the sweep
+ * so recovery can never be forgotten.
  */
 export async function recoverExpiredWebhookDeliveryLeases(
   prisma: PrismaClient,
@@ -772,6 +930,7 @@ export async function recoverExpiredWebhookDeliveryLeases(
       status: "pending",
       nextAttemptAt: now,
       leaseExpiresAt: null,
+      claimToken: null,
     },
   })) as WebhookUpdateManyResult;
   if (result.count > 0) {

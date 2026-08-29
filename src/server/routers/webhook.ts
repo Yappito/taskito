@@ -98,7 +98,13 @@ export const webhookRouter = createTRPCRouter({
   list: protectedProcedure
     .input(z.object({ projectId: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
+      // Same automation_manage + task_read gate as every other webhook
+      // procedure: the list exposes endpoint configuration and creator
+      // identity, and the delivery history exposes received task metadata —
+      // a principal denied task read must not read it back either.
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+        permissions: WEBHOOK_MANAGE_PERMISSIONS,
+      });
       return ctx.prisma.webhook.findMany({
         where: { projectId: input.projectId },
         select: webhookSelect,
@@ -133,9 +139,21 @@ export const webhookRouter = createTRPCRouter({
       const secret = `whsec_${crypto.randomBytes(24).toString("hex")}`;
       // The encryptedSecret is written under the shared rotation lock so a
       // concurrent master-key rotation can neither miss this row nor stomp it
-      // with stale ciphertext (same guarantee as the AI/OIDC/S3 secret writers).
-      const webhook = await withSecretRotationLock(ctx.prisma, (tx) =>
-        tx.webhook.create({
+      // with stale ciphertext (same guarantee as the AI/OIDC/S3 secret
+      // writers). The rotation lock also SERIALIZES webhook creates, so the
+      // count + insert below form a serialized critical section: the cap is
+      // re-checked INSIDE the lock (the loose pre-check above only gives a
+      // nicer early error for the common case) and concurrent creates cannot
+      // all slip past the same stale count (TOCTOU).
+      const webhook = await withSecretRotationLock(ctx.prisma, async (tx) => {
+        const countUnderLock = Number((await tx.webhook.count({ where: { projectId: input.projectId } })) ?? 0);
+        if (countUnderLock >= limit) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `This project already has ${countUnderLock} webhook(s), which meets the per-project limit of ${limit}. Remove one before adding another.`,
+          });
+        }
+        return tx.webhook.create({
           data: {
             projectId: input.projectId,
             url: input.url,
@@ -145,8 +163,8 @@ export const webhookRouter = createTRPCRouter({
             encryptedSecret: encryptSecret(secret),
           },
           select: webhookSelect,
-        }),
-      );
+        });
+      });
 
       return { ...webhook, secret };
     }),
@@ -224,7 +242,11 @@ export const webhookRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
-      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
+      // Delivery history is task metadata derived: same automation_manage +
+      // task_read gate as the rest of the webhook surface.
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+        permissions: WEBHOOK_MANAGE_PERMISSIONS,
+      });
       return ctx.prisma.webhookDelivery.findMany({
         where: { webhook: { projectId: input.projectId }, ...(input.webhookId ? { webhookId: input.webhookId } : {}) },
         select: deliverySelect,
@@ -239,8 +261,18 @@ export const webhookRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const delivery = (await ctx.prisma.webhookDelivery.findUnique({
         where: { id: input.id },
-        select: { id: true, status: true, webhook: { select: { projectId: true, isEnabled: true } } },
-      })) as { id: string; status: string; webhook: { projectId: string; isEnabled: boolean } } | null;
+        select: {
+          id: true,
+          status: true,
+          leaseExpiresAt: true,
+          webhook: { select: { projectId: true, isEnabled: true } },
+        },
+      })) as {
+        id: string;
+        status: string;
+        leaseExpiresAt: Date | null;
+        webhook: { projectId: string; isEnabled: boolean };
+      } | null;
       if (!delivery) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Delivery not found" });
       }
@@ -251,17 +283,44 @@ export const webhookRouter = createTRPCRouter({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Webhook is disabled" });
       }
 
-      await ctx.prisma.webhookDelivery.update({
-        where: { id: delivery.id },
+      const now = new Date();
+      // Requeue from the log WITHOUT disrupting an active claim: only rows
+      // that are not being processed — or whose processing lease has already
+      // expired (crashed worker) — may be flipped back to pending. The same
+      // predicate is re-evaluated atomically at write time (updateMany), so a
+      // claim that lands between the read and the write cannot be clobbered
+      // into a duplicate POST. Any stale claim token is revoked.
+      const requeued = (await ctx.prisma.webhookDelivery.updateMany({
+        where: {
+          id: delivery.id,
+          OR: [
+            { status: { not: "processing" } },
+            {
+              status: "processing",
+              OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
+            },
+          ],
+        },
         data: {
           status: "pending",
           attempts: 0,
           responseCode: null,
           lastError: null,
-          nextAttemptAt: new Date(),
+          nextAttemptAt: now,
           leaseExpiresAt: null,
+          claimToken: null,
         },
-      });
+      })) as { count: number };
+      // Fail safe: an unknown/missing write outcome is treated as "claimed by
+      // a worker" — never re-dispatch over a row we could not prove idle.
+      const requeuedCount = Number(requeued?.count ?? 0);
+      if (requeuedCount === 0) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message:
+            "Delivery is currently being processed; wait for the active attempt to finish (or its lease to expire) before redelivering",
+        });
+      }
 
       // Fire-and-forget: the POST happens outside the mutation; the row is
       // already requeued, so the scheduler sweep would also pick it up.
