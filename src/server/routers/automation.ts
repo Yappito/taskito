@@ -2,7 +2,11 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { requireProjectAccess } from "@/server/authz";
-import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
+import {
+  getAutomationActionPermission,
+  processDueDateAutomationRules,
+  validateAutomationRuleReferences,
+} from "@/server/services/automation-evaluator";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
 const automationTrigger = z.enum(["taskCreated", "statusChanged", "taskAssigned", "commentAdded", "dueDatePassed"]);
@@ -56,10 +60,25 @@ export const automationRouter = createTRPCRouter({
     .input(ruleInput)
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
+      // H3c at create time: authoring a rule for an action already requires the
+      // permission that action needs (otherwise the scheduler would run a denied
+      // action on the author's behalf later).
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, {
+        permission: getAutomationActionPermission(input.action),
+      });
       const validated = validateRulePayload(input);
+      await validateAutomationRuleReferences(ctx.prisma, input.projectId, {
+        action: input.action,
+        actionPayload: validated.actionPayload ?? {},
+        triggerCondition: validated.triggerCondition,
+        context: "Automation rule",
+      });
       return ctx.prisma.automationRule.create({
         data: {
           projectId: input.projectId,
+          // H3a: attribution — scheduled executions run as this user, so store
+          // who authored the rule.
+          createdByUserId: ctx.session.user.id,
           name: input.name,
           isEnabled: input.isEnabled,
           trigger: input.trigger,
@@ -73,13 +92,27 @@ export const automationRouter = createTRPCRouter({
   update: protectedProcedure
     .input(ruleInput.omit({ projectId: true }).partial().extend({ id: z.string().cuid() }))
     .mutation(async ({ ctx, input }) => {
-      const rule = await ctx.prisma.automationRule.findUniqueOrThrow({ where: { id: input.id }, select: { projectId: true } });
+      const rule = await ctx.prisma.automationRule.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { projectId: true, action: true, createdByUserId: true },
+      });
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, { permission: "automation_manage" });
       if (input.action !== undefined && input.actionPayload === undefined) {
         throw new Error("Changing an automation action requires a matching actionPayload");
       }
-      const action = input.action ?? (await ctx.prisma.automationRule.findUniqueOrThrow({ where: { id: input.id }, select: { action: true } })).action;
+      const action = input.action ?? rule.action;
+      // H3c at create/update time: editing or re-pointing an action requires
+      // the permission the (resulting) action type needs.
+      await requireProjectAccess(ctx.prisma, ctx.session.user.id, rule.projectId, {
+        permission: getAutomationActionPermission(action),
+      });
       const validated = validateRulePayload({ action, actionPayload: input.actionPayload, triggerCondition: input.triggerCondition });
+      await validateAutomationRuleReferences(ctx.prisma, rule.projectId, {
+        action,
+        actionPayload: validated.actionPayload ?? {},
+        triggerCondition: validated.triggerCondition,
+        context: "Automation rule",
+      });
       return ctx.prisma.automationRule.update({
         where: { id: input.id },
         data: {
@@ -89,6 +122,9 @@ export const automationRouter = createTRPCRouter({
           ...(input.triggerCondition !== undefined ? { triggerCondition: (validated.triggerCondition ?? Prisma.JsonNull) as Prisma.InputJsonValue } : {}),
           ...(input.action !== undefined ? { action: input.action } : {}),
           ...(input.actionPayload !== undefined ? { actionPayload: validated.actionPayload as Prisma.InputJsonValue } : {}),
+          // H3a: keep the original creator for attribution; back-fill the
+          // column when editing a rule created before it existed.
+          createdByUserId: rule.createdByUserId ?? ctx.session.user.id,
         },
       });
     }),
@@ -121,7 +157,7 @@ export const automationRouter = createTRPCRouter({
       return processDueDateAutomationRules(ctx.prisma, {
         projectId: input.projectId,
         actorId: ctx.session.user.id,
-        limit: input.limit,
+        pageSize: input.limit,
       });
     }),
 });

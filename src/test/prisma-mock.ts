@@ -23,8 +23,9 @@ export type PrismaModelMock = Record<string, Mock>;
 export type PrismaMock = Record<string, PrismaModelMock> & {
   /** Interactive / batch transactions run against this same mock. */
   $transaction: Mock;
-  /** Client-level raw query stub (resolves to an empty result set). */
+  /** Raw-query escape hatch (advisory locks etc.) — a callable mock. */
   $queryRaw: Mock;
+  $executeRaw: Mock;
 };
 
 const NON_DELEGATE_KEYS = new Set(["then", "catch", "finally"]);
@@ -74,7 +75,10 @@ export function createPrismaMock(): PrismaMock {
     return callback(proxy);
   }).mockName("prisma.$transaction");
 
-  const queryRaw = vi.fn(async () => []).mockName("prisma.$queryRaw");
+  // Raw queries (e.g. pg_advisory_xact_lock) are callable mocks available both
+  // on the client and on the transaction client (they are the same object).
+  const queryRaw = vi.fn(() => Promise.resolve([[]])).mockName("prisma.$queryRaw");
+  const executeRaw = vi.fn(() => Promise.resolve(0)).mockName("prisma.$executeRaw");
 
   const proxy = new Proxy({} as Record<string | symbol, unknown>, {
     get(_target, prop) {
@@ -86,6 +90,9 @@ export function createPrismaMock(): PrismaMock {
       }
       if (prop === "$queryRaw") {
         return queryRaw;
+      }
+      if (prop === "$executeRaw") {
+        return executeRaw;
       }
       return delegateFor(models, prop);
     },

@@ -6,10 +6,7 @@ const {
 } = vi.hoisted(() => ({
   processDueRecurrences: vi.fn(),
   prismaMock: {
-    recurrenceRule: {
-      findMany: vi.fn(),
-      update: vi.fn(),
-    },
+    $transaction: vi.fn(),
   },
 }));
 
@@ -26,6 +23,10 @@ import { POST } from "@/app/api/cron/process-recurring/route";
 const CRON_SECRET = "test-cron-secret";
 const SUCCESS_BODY = { processed: 2, createdTaskIds: ["cmab8yxxp0001i7p4k8n2v3q4"] };
 
+// Stand-in for the interactive-transaction client: the scheduler lock query
+// runs on the tx connection.
+let txMock: { $queryRaw: ReturnType<typeof vi.fn> };
+
 function postRequest(authorization?: string) {
   return new Request("http://localhost:3000/api/cron/process-recurring", {
     method: "POST",
@@ -38,6 +39,8 @@ describe("POST /api/cron/process-recurring", () => {
     vi.clearAllMocks();
     process.env.CRON_SECRET = CRON_SECRET;
     processDueRecurrences.mockResolvedValue(SUCCESS_BODY);
+    txMock = { $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) };
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => unknown) => callback(txMock));
   });
 
   afterEach(() => {
@@ -78,12 +81,46 @@ describe("POST /api/cron/process-recurring", () => {
     expect(processDueRecurrences).not.toHaveBeenCalled();
   });
 
-  it("delegates to the recurrence processor and returns 200 with the result", async () => {
+  it("delegates to the recurrence processor under the scheduler lock and returns 200 with the result", async () => {
     const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual(SUCCESS_BODY);
     expect(processDueRecurrences).toHaveBeenCalledTimes(1);
     expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100 });
+    // M8: the processor ran inside the scheduler lock transaction.
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(txMock.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips with 409 { skipped: true } when the scheduler lock is held (M8)", async () => {
+    txMock.$queryRaw.mockResolvedValue([{ locked: false }]);
+
+    const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ skipped: true });
+    expect(processDueRecurrences).not.toHaveBeenCalled();
+  });
+
+  it("skips with 409 when the lock transaction fails", async () => {
+    prismaMock.$transaction.mockRejectedValue(new Error("database unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(postRequest(`Bearer ${CRON_SECRET}`));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ skipped: true });
+    expect(processDueRecurrences).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("rejects a token of a different length without throwing (L12)", async () => {
+    // A wrong-length secret must be rejected (never compared via early-exit
+    // equality on the raw strings).
+    const response = await POST(postRequest("Bearer x"));
+
+    expect(response.status).toBe(401);
+    expect(processDueRecurrences).not.toHaveBeenCalled();
   });
 });

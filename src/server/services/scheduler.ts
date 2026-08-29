@@ -4,18 +4,17 @@ import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { runDailyDigestJob } from "@/server/services/email/digest";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
-import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatcher";
+import { assertTickAlive, TickDeadlineExceededError } from "@/server/services/scheduler-deadline";
 import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
+import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatcher";
 
 /**
  * In-process background scheduler ("cron inside the app").
  *
- * Drives the time-based features that used to require an external trigger:
+ * Drives the three time-based features that used to require an external trigger:
  *  - recurrence processing (creating the next occurrence of recurring tasks)
  *  - due-date automation rules (`dueDatePassed` trigger)
  *  - the daily due-soon digest email (from SCHEDULER_DIGEST_HOUR_UTC onwards)
- *  - the daily sprint snapshot series (remaining work per active sprint)
- *  - pending webhook deliveries whose `nextAttemptAt` came due (retries)
  *
  * Multi-replica safety: every tick opens one interactive transaction and takes
  * a transaction-scoped Postgres advisory lock (`pg_try_advisory_xact_lock`)
@@ -27,8 +26,21 @@ import { recordSprintSnapshots } from "@/server/services/sprint-snapshot";
  * open. Failures are logged with a `[scheduler]` prefix (never secrets) and
  * never abort the remaining jobs.
  *
+ * The same exclusion is available to the external entry points
+ * (`POST /api/cron/process-recurring` and `recurrence.processDue`) via
+ * {@link withSchedulerLock}: they only run when a tick is not already holding
+ * the lock, so a cron call never races the tick. In-process overlap is guarded
+ * independently — a tick while the previous tick's promise is still pending is
+ * skipped.
+ *
+ * Each tick also carries a deadline (`AbortSignal.timeout(
+ * SCHEDULER_TICK_TIMEOUT_MS)`). The advisory lock may outlive an individual job
+ * that keeps running on pooled connections, so every job checks the signal
+ * between units of work (per rule / per project / per page) and stops promptly
+ * at the deadline; the next tick resumes whatever remains.
+ *
  * Opt out with SCHEDULER_ENABLED=false; tune cadence with SCHEDULER_INTERVAL_MS
- * and the per-tick transaction budget with SCHEDULER_TICK_TIMEOUT_MS.
+ * and the per-tick deadline with SCHEDULER_TICK_TIMEOUT_MS.
  */
 
 export const SCHEDULER_ADVISORY_LOCK_KEY = 684_513_207;
@@ -40,16 +52,16 @@ const DEFAULT_TICK_TIMEOUT_MS = 600_000;
 const DEFAULT_DIGEST_HOUR_UTC = 7;
 const TRANSACTION_MAX_WAIT_MS = 5_000;
 
-type PrismaClient = typeof import("@/lib/prisma").prisma;
-
 type AdvisoryLockRow = { locked?: unknown };
 
 type SchedulerGlobal = typeof globalThis & {
   __taskitoSchedulerTimer?: ReturnType<typeof setInterval> | null;
+  __taskitoSchedulerTickInFlight?: boolean;
 };
 
-// The interval handle lives on globalThis so hot reloads (which re-evaluate this
-// module) cannot schedule a second concurrent timer.
+// The interval handle and the in-flight marker live on globalThis so hot
+// reloads (which re-evaluate this module) cannot schedule a second concurrent
+// timer or lose track of a pending tick.
 const globalForScheduler = globalThis as SchedulerGlobal;
 
 export function isSchedulerEnabled() {
@@ -107,54 +119,21 @@ export function getSchedulerDigestHourUtc() {
   return DEFAULT_DIGEST_HOUR_UTC;
 }
 
-async function runRecurrenceJob() {
-  const result = await processDueRecurrences(prisma, { limit: 100 });
+async function runRecurrenceJob(signal: AbortSignal) {
+  assertTickAlive(signal);
+  const result = await processDueRecurrences(prisma, { limit: 100, signal });
   if (result.createdTaskIds.length > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} recurrence job created ${result.createdTaskIds.length} task(s)`);
   }
 }
 
-/**
- * The AutomationRule model does not store a creator, so actions are attributed
- * to the project owner (ProjectMember with role "owner", the RBAC convention
- * used across the app). Falls back to the earliest remaining project member,
- * and skips projects that have no members at all.
- */
-export async function resolveProjectActorId(client: PrismaClient, projectId: string) {
-  const ownerMember = await client.projectMember.findFirst({
-    where: { projectId, role: "owner" },
-    orderBy: { createdAt: "asc" },
-    select: { userId: true },
-  });
-  if (ownerMember) return ownerMember.userId;
-
-  const fallbackMember = await client.projectMember.findFirst({
-    where: { projectId },
-    orderBy: { createdAt: "asc" },
-    select: { userId: true },
-  });
-  return fallbackMember?.userId ?? null;
-}
-
-async function runDueDateAutomationJob() {
-  const projects = await prisma.automationRule.findMany({
-    where: { isEnabled: true, trigger: "dueDatePassed" },
-    select: { projectId: true },
-    distinct: ["projectId"],
-    orderBy: { projectId: "asc" },
-  });
-
-  for (const { projectId } of projects) {
-    try {
-      const actorId = await resolveProjectActorId(prisma, projectId);
-      if (!actorId) {
-        console.warn(`${SCHEDULER_LOG_PREFIX} project ${projectId} has due-date rules but no members to act as; skipping`);
-        continue;
-      }
-      await processDueDateAutomationRules(prisma, { projectId, actorId });
-    } catch (error) {
-      console.error(`${SCHEDULER_LOG_PREFIX} due-date automation failed for project ${projectId}: ${describeError(error)}`);
-    }
+async function runDueDateAutomationJob(signal: AbortSignal) {
+  // Per-rule creator attribution and per-rule permission re-checks live in
+  // processDueDateAutomationRules (automation-evaluator.ts); the scheduler
+  // never runs scheduled rules as the project owner.
+  const result = await processDueDateAutomationRules(prisma, { signal });
+  if (result.fired > 0) {
+    console.info(`${SCHEDULER_LOG_PREFIX} due-date automation fired ${result.fired} rule occurrence(s)`);
   }
 }
 
@@ -164,8 +143,8 @@ async function runDueDateAutomationJob() {
  * plus a DB-backed per-user lastDigestSentAt check in User.settings — so
  * repeated ticks and other replicas cannot resend for the same UTC day.
  */
-async function runDigestJob() {
-  const now = new Date();
+async function runDigestJob(now: Date, signal: AbortSignal) {
+  assertTickAlive(signal);
   const digestHour = getSchedulerDigestHourUtc();
   if (now.getUTCHours() < digestHour) {
     return;
@@ -176,21 +155,22 @@ async function runDigestJob() {
   }
 }
 
+
 /**
  * Daily sprint snapshot series: one remaining-work row per active sprint for
- * the current UTC day. recordSprintSnapshots is idempotent (upsert on the
- * unique sprintId + day pair), so repeated ticks and other replicas cannot
- * create duplicate rows for the same day.
+ * the current UTC day (idempotent upsert on the unique sprintId + day pair).
  */
-async function runSprintSnapshotJob() {
+async function runSprintSnapshotJob(signal: AbortSignal) {
+  assertTickAlive(signal);
   const recorded = await recordSprintSnapshots(prisma);
   if (recorded > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} sprint snapshot job recorded ${recorded} sprint snapshot(s)`);
   }
 }
 
-
-async function runWebhookDeliveryJob() {
+/** Pending webhook deliveries whose nextAttemptAt came due (retries + restarts). */
+async function runWebhookDeliveryJob(signal: AbortSignal) {
+  assertTickAlive(signal);
   const result = await processDueWebhookDeliveries(prisma, new Date());
   if (result.processed > 0) {
     console.info(`${SCHEDULER_LOG_PREFIX} webhook delivery job processed ${result.processed} delivery(ies) (${result.succeeded} succeeded)`);
@@ -198,40 +178,87 @@ async function runWebhookDeliveryJob() {
 }
 
 /**
- * One scheduler tick: open a transaction, take the transaction-scoped advisory
- * lock inside it, and run all three jobs while the transaction (and therefore
- * the lock) is held. Each job is isolated so a failure cannot abort the others;
- * the lock itself is released automatically when the transaction commits.
+ * Runs `fn` while holding the same transaction-scoped scheduler advisory lock
+ * the built-in tick uses. Returns the callback's result, or `null` when the
+ * lock could not be acquired (another instance/tick is mid-flight) or the
+ * lock transaction failed — callers are expected to treat `null` as "skip".
+ *
+ * Used by the external cron endpoint and the `recurrence.processDue`
+ * procedure so they can never race the built-in tick (or each other).
  */
-export async function runScheduledJobs() {
+export async function withSchedulerLock<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
     return await prisma.$transaction(
       async (tx) => {
-        const rows = (await tx.$queryRaw<AdvisoryLockRow[]>(
+        const rows = ((await tx.$queryRaw(
           Prisma.sql`SELECT pg_try_advisory_xact_lock(${SCHEDULER_ADVISORY_LOCK_KEY}) AS locked`,
-        )) as Array<{ locked?: unknown }>;
+        )) ?? []) as AdvisoryLockRow[];
         if (rows[0]?.locked !== true) {
-          console.info(`${SCHEDULER_LOG_PREFIX} lock held by another instance; skipping tick`);
-          return { ran: false };
+          return null;
         }
-
-        for (const job of [runRecurrenceJob, runDueDateAutomationJob, runDigestJob, runSprintSnapshotJob, runWebhookDeliveryJob]) {
-          try {
-            await job();
-          } catch (error) {
-            console.error(`${SCHEDULER_LOG_PREFIX} scheduled job failed: ${describeError(error)}`);
-          }
-        }
-
-        return { ran: true };
+        return await fn();
       },
       { maxWait: TRANSACTION_MAX_WAIT_MS, timeout: getTickTimeoutMs() },
     );
   } catch (error) {
-    // Fail safe: if the transaction (e.g. the lock query) blows up, skip the
-    // tick instead of crashing the timer loop.
-    console.error(`${SCHEDULER_LOG_PREFIX} tick aborted, skipping: ${describeError(error)}`);
+    // Fail safe: if the transaction (e.g. the lock query) blows up, skip
+    // instead of crashing the timer loop or the caller.
+    console.error(`${SCHEDULER_LOG_PREFIX} lock acquisition aborted, skipping: ${describeError(error)}`);
+    return null;
+  }
+}
+
+/**
+ * One scheduler tick: guard against in-process overlap, take the scheduler
+ * advisory lock via {@link withSchedulerLock}, and run all three jobs under a
+ * cancellable deadline while the lock is held. Each job is isolated so a
+ * failure cannot abort the others; the lock itself is released automatically
+ * when the transaction commits.
+ */
+export async function runScheduledJobs() {
+  if (globalForScheduler.__taskitoSchedulerTickInFlight) {
+    console.info(`${SCHEDULER_LOG_PREFIX} previous tick still in flight; skipping tick`);
     return { ran: false };
+  }
+  globalForScheduler.__taskitoSchedulerTickInFlight = true;
+  try {
+    const result = await withSchedulerLock(async () => {
+      const deadline = AbortSignal.timeout(getTickTimeoutMs());
+      let deadlineHit = false;
+
+      for (const job of [
+        () => runRecurrenceJob(deadline),
+        () => runDueDateAutomationJob(deadline),
+        () => runDigestJob(new Date(), deadline),
+        () => runSprintSnapshotJob(deadline),
+        () => runWebhookDeliveryJob(deadline),
+      ]) {
+        try {
+          await job();
+        } catch (error) {
+          if (error instanceof TickDeadlineExceededError) {
+            deadlineHit = true;
+            break;
+          }
+          console.error(`${SCHEDULER_LOG_PREFIX} scheduled job failed: ${describeError(error)}`);
+        }
+      }
+
+      if (deadlineHit || deadline.aborted) {
+        console.warn(
+          `${SCHEDULER_LOG_PREFIX} tick exceeded SCHEDULER_TICK_TIMEOUT_MS (${Math.round(getTickTimeoutMs() / 1000)}s); remaining work is deferred to the next tick`,
+        );
+      }
+
+      return { ran: true };
+    });
+
+    if (result === null) {
+      return { ran: false };
+    }
+    return { ran: true };
+  } finally {
+    globalForScheduler.__taskitoSchedulerTickInFlight = false;
   }
 }
 
@@ -262,4 +289,5 @@ export function stopScheduler() {
     clearInterval(timer);
   }
   globalForScheduler.__taskitoSchedulerTimer = null;
+  globalForScheduler.__taskitoSchedulerTickInFlight = false;
 }

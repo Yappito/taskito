@@ -212,6 +212,36 @@ describe("ai-provider-validation", () => {
       await expect(assertAiProviderBaseUrlFetchAllowed("http://localhost:11434")).resolves.toBe("http://localhost:11434");
     });
 
+    it("strips brackets before the DNS lookup for a loopback IPv6 literal (L11)", async () => {
+      process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = "true";
+      mockResolvedAddresses([{ address: "::1", family: 6 }]);
+
+      await expect(assertAiProviderBaseUrlFetchAllowed("http://[::1]:11434")).resolves.toBe("http://[::1]:11434");
+      // The resolver must receive the bare address, not the bracketed form.
+      expect(lookupMock).toHaveBeenCalledWith("::1", { all: true, verbatim: true });
+    });
+
+    it("resolves a public IPv6 literal without the brackets (L11)", async () => {
+      const publicIpv6 = "2606:2800:220:1:248:1893:25c8:1946";
+      mockResolvedAddresses([{ address: publicIpv6, family: 6 }]);
+
+      await expect(assertAiProviderBaseUrlFetchAllowed(`http://[${publicIpv6}]/v1`)).resolves.toBe(
+        `http://[${publicIpv6}]/v1`,
+      );
+      expect(lookupMock).toHaveBeenCalledWith(publicIpv6, { all: true, verbatim: true });
+    });
+
+    it("rejects a bracketed private IPv6 literal without overrides (hostname guard)", async () => {
+      mockResolvedAddresses([{ address: "fe80::1", family: 6 }]);
+
+      // The literal itself is private, so normalizeBaseUrl rejects before any
+      // DNS lookup happens.
+      await expect(assertAiProviderBaseUrlFetchAllowed("http://[fe80::1]:11434")).rejects.toThrow(
+        /points at a private, loopback, or link-local/,
+      );
+      expect(lookupMock).not.toHaveBeenCalled();
+    });
+
     it("no longer authorizes a private host via a bare allowlist entry", async () => {
       process.env.AI_PROVIDER_HOST_ALLOWLIST = "localhost";
       mockResolvedAddresses([{ address: "127.0.0.1", family: 4 }]);

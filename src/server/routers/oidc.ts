@@ -3,6 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import { encryptOidcClientSecret, getEnvOidcProviderConfigs, getReservedEnvOidcProviderIds, normalizeAdminEmails, normalizeOidcProviderId, normalizeOidcRole, oidcProviderWriteData, serializeOidcProvider, validateOidcIssuer } from "@/server/services/oidc-provider-settings";
+import { withSecretRotationLock } from "@/server/services/ai/secret-reencryption";
 import { adminProcedure, createTRPCRouter } from "@/server/trpc";
 
 const providerIdPattern = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -87,9 +88,12 @@ export const oidcRouter = createTRPCRouter({
       assertNotReservedProviderId(providerId);
 
       try {
-        const provider = await ctx.prisma.oidcProviderConnection.create({
-          data: oidcProviderWriteData({ ...input, providerId }),
-        });
+        // M6: serialize with secret rotation (writes encryptedClientSecret).
+        const provider = await withSecretRotationLock(ctx.prisma, (tx) =>
+          tx.oidcProviderConnection.create({
+            data: oidcProviderWriteData({ ...input, providerId }),
+          }),
+        );
         return serializeOidcProvider(provider);
       } catch (error) {
         mapPrismaError(error);
@@ -109,24 +113,27 @@ export const oidcRouter = createTRPCRouter({
       }
 
       try {
-        const provider = await ctx.prisma.oidcProviderConnection.update({
-          where: { id: input.id },
-          data: {
-            ...(input.providerId !== undefined ? { providerId } : {}),
-            ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-            ...(input.issuer !== undefined ? { issuer: validateOidcIssuer(input.issuer.trim()) } : {}),
-            ...(input.clientId !== undefined ? { clientId: input.clientId.trim() } : {}),
-            ...(input.clientSecret?.trim() ? { encryptedClientSecret: encryptOidcClientSecret(input.clientSecret) } : {}),
-            ...(input.scope !== undefined ? { scope: input.scope.trim() || "openid email profile" } : {}),
-            ...(input.groupsClaim !== undefined ? { groupsClaim: input.groupsClaim.trim() || "groups" } : {}),
-            ...(input.defaultRole !== undefined ? { defaultRole: normalizeOidcRole(input.defaultRole) } : {}),
-            ...(input.allowSignup !== undefined ? { allowSignup: input.allowSignup } : {}),
-            ...(input.allowEmailAccountLinking !== undefined ? { allowEmailAccountLinking: input.allowEmailAccountLinking } : {}),
-            ...(input.requireEmailVerified !== undefined ? { requireEmailVerified: input.requireEmailVerified } : {}),
-            ...(input.adminEmails !== undefined ? { adminEmails: normalizeAdminEmails(input.adminEmails) as Prisma.InputJsonValue } : {}),
-            ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
-          },
-        });
+        // M6: serialize with secret rotation (writes encryptedClientSecret).
+        const provider = await withSecretRotationLock(ctx.prisma, (tx) =>
+          tx.oidcProviderConnection.update({
+            where: { id: input.id },
+            data: {
+              ...(input.providerId !== undefined ? { providerId } : {}),
+              ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+              ...(input.issuer !== undefined ? { issuer: validateOidcIssuer(input.issuer.trim()) } : {}),
+              ...(input.clientId !== undefined ? { clientId: input.clientId.trim() } : {}),
+              ...(input.clientSecret?.trim() ? { encryptedClientSecret: encryptOidcClientSecret(input.clientSecret) } : {}),
+              ...(input.scope !== undefined ? { scope: input.scope.trim() || "openid email profile" } : {}),
+              ...(input.groupsClaim !== undefined ? { groupsClaim: input.groupsClaim.trim() || "groups" } : {}),
+              ...(input.defaultRole !== undefined ? { defaultRole: normalizeOidcRole(input.defaultRole) } : {}),
+              ...(input.allowSignup !== undefined ? { allowSignup: input.allowSignup } : {}),
+              ...(input.allowEmailAccountLinking !== undefined ? { allowEmailAccountLinking: input.allowEmailAccountLinking } : {}),
+              ...(input.requireEmailVerified !== undefined ? { requireEmailVerified: input.requireEmailVerified } : {}),
+              ...(input.adminEmails !== undefined ? { adminEmails: normalizeAdminEmails(input.adminEmails) as Prisma.InputJsonValue } : {}),
+              ...(input.isEnabled !== undefined ? { isEnabled: input.isEnabled } : {}),
+            },
+          }),
+        );
         return serializeOidcProvider(provider);
       } catch (error) {
         mapPrismaError(error);

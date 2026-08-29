@@ -22,6 +22,21 @@ vi.mock("@/server/services/recurrence-processor", () => ({
   processDueRecurrences,
 }));
 
+// withSchedulerLock takes the advisory lock on the global prisma client, so
+// the lock transaction has to be mockable independently of ctx.prisma.
+const { prismaGlobalMock } = vi.hoisted(() => ({
+  prismaGlobalMock: {
+    $transaction: vi.fn(
+      async (callback: (tx: unknown) => unknown) =>
+        callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) }),
+    ),
+  },
+}));
+
+vi.mock("@/lib/prisma", () => ({
+  prisma: prismaGlobalMock,
+}));
+
 import { createCallerFactory } from "@/server/trpc";
 import { recurrenceRouter } from "@/server/routers/recurrence";
 
@@ -39,6 +54,12 @@ function createPrismaMock() {
       upsert: vi.fn().mockResolvedValue({ id: RULE_ID, taskId: TASK_ID }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
+    $transaction: vi.fn(
+      async (callback: (tx: unknown) => unknown) =>
+        callback({
+          $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]),
+        }),
+    ),
   };
 }
 
@@ -59,6 +80,10 @@ describe("recurrence router", () => {
     getCurrentActor.mockResolvedValue({ id: USER_ID, role: "owner" });
     requireProjectAccess.mockResolvedValue({ actor: { id: USER_ID, role: "owner" }, membershipRole: "owner" });
     processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
+    prismaGlobalMock.$transaction.mockImplementation(
+      async (callback: (tx: unknown) => unknown) =>
+        callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) }),
+    );
   });
 
   afterEach(() => {
@@ -163,11 +188,12 @@ describe("recurrence router", () => {
   });
 
   describe("processDue", () => {
-    it("requires automation_manage access and delegates to the recurrence processor", async () => {
+    it("requires automation_manage access and delegates to the recurrence processor under the scheduler lock (M8)", async () => {
       const prisma = createPrismaMock();
       const caller = createCallerWith(prisma);
+      processDueRecurrences.mockResolvedValue({ processed: 3, createdTaskIds: ["cmab8yxxp000bi7p4k8n2v3qd"] });
 
-      await caller.processDue({ projectId: PROJECT_ID, limit: 10 });
+      const result = await caller.processDue({ projectId: PROJECT_ID, limit: 10 });
 
       expect(requireProjectAccess).toHaveBeenCalledWith(prisma, USER_ID, PROJECT_ID, { permission: "automation_manage" });
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
@@ -175,6 +201,23 @@ describe("recurrence router", () => {
         projectId: PROJECT_ID,
         limit: 10,
       });
+      expect(result).toEqual({ processed: 3, createdTaskIds: ["cmab8yxxp000bi7p4k8n2v3qd"] });
+      // The processor ran inside the scheduler lock transaction.
+      expect(prismaGlobalMock.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns a skipped result instead of racing a tick that holds the scheduler lock (M8)", async () => {
+      const prisma = createPrismaMock();
+      const caller = createCallerWith(prisma);
+      prismaGlobalMock.$transaction.mockImplementation(
+        async (callback: (tx: { $queryRaw: unknown }) => unknown) =>
+          callback({ $queryRaw: vi.fn().mockResolvedValue([{ locked: false }]) }),
+      );
+
+      const result = await caller.processDue({ projectId: PROJECT_ID });
+
+      expect(result).toEqual({ processed: 0, createdTaskIds: [], skipped: true });
+      expect(processDueRecurrences).not.toHaveBeenCalled();
     });
   });
 });

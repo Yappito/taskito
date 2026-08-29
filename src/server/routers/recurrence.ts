@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { requireProjectAccess, requireTaskAccess } from "@/server/authz";
 import { processDueRecurrences } from "@/server/services/recurrence-processor";
+import { withSchedulerLock } from "@/server/services/scheduler";
 import { createTRPCRouter, protectedProcedure } from "@/server/trpc";
 
 function dateKey(date: Date) {
@@ -71,6 +72,13 @@ export const recurrenceRouter = createTRPCRouter({
     .input(z.object({ projectId: z.string().cuid(), limit: z.number().int().min(1).max(100).optional() }))
     .mutation(async ({ ctx, input }) => {
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, input.projectId, { permission: "automation_manage" });
-      return processDueRecurrences(ctx.prisma, { projectId: input.projectId, limit: input.limit });
+      // M8: take the same scheduler advisory lock as the built-in tick, so a
+      // manual run never races a concurrent tick and double-creates the next
+      // occurrence of a recurring task. `null` means the lock was held (a tick
+      // is in flight) — surface that as a skipped result.
+      const result = await withSchedulerLock(() =>
+        processDueRecurrences(ctx.prisma, { projectId: input.projectId, limit: input.limit }),
+      );
+      return result ?? { processed: 0, createdTaskIds: [], skipped: true as const };
     }),
 });
