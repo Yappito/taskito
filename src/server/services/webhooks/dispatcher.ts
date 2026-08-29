@@ -16,6 +16,7 @@ import {
   webhookDeliveryLeaseMs,
   webhookDeliveryPreflightDeadlineMs,
   webhookDeliveryQueueMaxDepth,
+  webhookRequestTimeoutMs,
 } from "@/lib/webhook-limits";
 
 // Kept as part of the dispatcher's public surface (moved into webhook-limits
@@ -88,7 +89,11 @@ type PrismaClient = typeof import("@/lib/prisma").prisma;
  *  - redirects are never followed (the transport treats a 3xx as a failure):
  *    each hop would need re-validation and could steer a signed request to a
  *    different target;
- *  - each request is capped by `WEBHOOK_TIMEOUT_MS` and response bodies are
+ *  - each request is capped by the SAME configured timeout the claim-lease
+ *    floor is derived from (`webhookRequestTimeoutMs()`, i.e. the clamped
+ *    `WEBHOOK_TIMEOUT_MS` env value — never a separate constant: a
+ *    divergence would let the real POST outlive the lease and cause a
+ *    duplicate delivery) and response bodies are
  *    stream-discarded after `WEBHOOK_MAX_RESPONSE_BYTES` — the delivery only
  *    needs the status code. The in-process inline queue is depth-capped;
  *    overflow falls back to the durable `pending` rows + scheduler sweep.
@@ -295,7 +300,15 @@ export async function deliverWebhook(
   // worker can no longer match its own token and cannot clobber the new
   // claim. The lease bounds the damage of a crashed worker (recovered by the
   // scheduler sweep, which mints a fresh token on the next claim).
+  //
+  // The lease window starts when THIS row is claimed (wave-8 finding 1b), NOT
+  // at the caller's `now`: the scheduler hands ONE sweep timestamp to every
+  // sequential delivery, so a lease derived from it would already be minutes
+  // old (near-expired) by the time later rows reach their read → authz →
+  // preflight → POST sequence. `claimedAt` is captured at the moment of the
+  // claim UPDATE itself so the window always covers what follows.
   const claimToken = crypto.randomUUID();
+  const claimedAt = new Date();
   const claim = (await prisma.webhookDelivery.updateMany({
     where: {
       id: delivery.id,
@@ -306,7 +319,7 @@ export async function deliverWebhook(
       status: "processing",
       attempts: { increment: 1 },
       claimToken,
-      leaseExpiresAt: new Date(now.getTime() + webhookDeliveryLeaseMs()),
+      leaseExpiresAt: new Date(claimedAt.getTime() + webhookDeliveryLeaseMs()),
     },
   })) as WebhookUpdateManyResult;
   if (claim.count === 0) {
@@ -673,7 +686,13 @@ export async function postWebhookRequest(url: string, init: WebhookPostInit): Pr
       url,
       headers,
       body: init.body,
-      timeoutMs: init.timeoutMs ?? WEBHOOK_TIMEOUT_MS,
+      // Single source of truth (wave-8 finding 1a): the default here MUST be
+      // the same clamped env value the claim-lease floor is derived from
+      // (`webhookRequestTimeoutMs()`), not the frozen `WEBHOOK_TIMEOUT_MS`
+      // constant — otherwise small WEBHOOK_TIMEOUT_MS environments rent a
+      // lease floored off the env value while the real POST runs up to the
+      // 10s constant, i.e. the lease expires while the POST is still live.
+      timeoutMs: init.timeoutMs ?? webhookRequestTimeoutMs(),
       lookup: init.lookup,
     });
 

@@ -15,21 +15,25 @@ import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatch
  *  - due-date automation rules (`dueDatePassed` trigger)
  *  - the daily due-soon digest email (from SCHEDULER_DIGEST_HOUR_UTC onwards)
  *
- * Multi-replica safety: every run takes a SESSION-scoped Postgres advisory
- * lock (`pg_try_advisory_lock` — NOT the transaction-scoped `_xact_` variant)
- * on a DEDICATED connection created just for the lock
+ * Multi-replica safety: every run takes a TRANSACTION-scoped Postgres advisory
+ * lock (`pg_try_advisory_xact_lock`) inside ONE interactive transaction held
+ * open for the whole run on a DEDICATED connection created just for the lock
  * ({@link createSchedulerLockConnection}, its own single-connection
- * PrismaClient). Session locks cannot be dropped out from under us by
- * transaction churn: they stay held until `pg_advisory_unlock` runs on the
- * acquiring connection or that connection/process dies, which makes the lock
- * exclusive across replicas for as long as the work runs (the previous
- * transaction-scoped variant was released too whenever Prisma expired the
- * transaction — other replicas could then double-run live jobs). The lock is
- * released in a `finally` exactly when the run settles. The dedicated
- * connection never comes from the shared query pool the jobs use, so no job
- * ever waits on a connection the lock is occupying (a long interactive
- * transaction on the shared pool would tie it up for the whole tick, and a
- * 1-connection pool would self-deadlock).
+ * PrismaClient). The scheduler callback is awaited INSIDE that transaction
+ * callback, so the lock and the live work share one backend with no gap: the
+ * lock cannot be dropped by pool idle-retirement (the connection is never
+ * idle while the run is live) and the design is valid under a
+ * transaction-pooler DATABASE_URL (the backend stays assigned for the whole
+ * transaction). Only the transaction ending — commit after the run settles,
+ * rollback on failure, session death on crash — releases it, which makes the
+ * lock exclusive across replicas for as long as the work runs (the previous
+ * session-lock variant returned its connection to the pool between lock and
+ * unlock, where idle-retirement could reap the session and silently drop the
+ * lock mid-run, and transaction-poolers made the acquire/unlock pair
+ * meaningless). The dedicated connection never comes from the shared query
+ * pool the jobs use, so no job ever waits on a connection the lock is
+ * occupying (a long interactive transaction on the shared pool would tie it
+ * up for the whole tick, and a 1-connection pool would self-deadlock).
  *
  * The same exclusion is available to the external entry points
  * (`POST /api/cron/process-recurring` and `recurrence.processDue`) via
@@ -42,12 +46,14 @@ import { processDueWebhookDeliveries } from "@/server/services/webhooks/dispatch
  * SCHEDULER_TICK_TIMEOUT_MS)`). The deadline is INDEPENDENT of the lock:
  * jobs run on the GLOBAL prisma client + fetch (DB operations, SMTP, webhook
  * HTTP calls) and are only cancelled BETWEEN units of work by the signal.
- * The dedicated lock connection performs nothing but the lock/unlock queries,
- * so the lock is held for the whole run and released exactly when the run
- * settles; if the process dies mid-run the session drops and Postgres
- * releases the lock — durable idempotency (recurrence CAS, digest claims,
- * automation firings, webhook delivery leases) remains the second safety
- * boundary.
+ * The dedicated lock connection performs nothing but the pinned lock
+ * transaction (`pg_try_advisory_xact_lock` inside it, plus the awaited run),
+ * and the transaction's timeout (`SCHEDULER_LOCK_TX_TIMEOUT_MS`, default
+ * 24h) is far above the tick budget so Prisma never aborts it mid-run. If
+ * the process dies mid-run the backend session drops, Postgres aborts the
+ * open transaction and releases the lock — durable idempotency (recurrence
+ * CAS, digest claims, automation firings, webhook delivery leases) remains
+ * the second safety boundary.
  *
  * Failures are logged with a `[scheduler]` prefix (never secrets) and never
  * abort the remaining jobs.
@@ -195,62 +201,53 @@ async function runWebhookDeliveryJob(signal: AbortSignal) {
  * replica/tick/session is mid-run) or the lock machinery failed — callers are
  * expected to treat `null` as "skip".
  *
- * The tick deadline is created here (after the lock is won) and handed to
- * `fn`, so every caller — built-in tick, cron endpoint, manual run — drives
- * its jobs against the same cancellable deadline.
+ * The tick deadline is created lazily — after the lock is won, inside the
+ * lazy callback — and handed to `fn`, so every caller — built-in tick, cron
+ * endpoint, manual run — drives its jobs against the same cancellable
+ * deadline.
  *
- * Lock lifetime (codex_sol wave-6 findings 7 & 8): the lock is SESSION-scoped
- * and lives on a DEDICATED connection from
- * {@link createSchedulerLockConnection} — never inside an interactive
- * transaction and never on the shared query pool the jobs use. A session
- * lock survives any transaction churn inside the run (Prisma expiring a tx
- * cannot release it) and is exclusive ACROSS processes, so another replica
- * cannot steal the lock while our jobs are live. The connection is opened
- * here, the lock is taken before `fn` starts, and both the unlock
- * (`pg_advisory_unlock` on the same connection) and the connection close
- * happen in a `finally` — i.e. strictly after the run settles. If the process
- * dies mid-run the session drops and Postgres releases the lock; durable
- * idempotency keys inside each job remain the second boundary.
+ * Lock lifetime (codex_sol wave-6 findings 7 & 8, wave-8 finding 2): the
+ * lock is TRANSACTION-scoped and lives inside ONE interactive transaction on
+ * the DEDICATED lock client from {@link createSchedulerLockConnection} —
+ * never on the shared query pool the jobs use. `runExclusive` takes
+ * `pg_try_advisory_xact_lock` inside that transaction and awaits `fn` while
+ * it is open, so the acquiring backend is pinned (open transaction, actively
+ * not idle) until `fn` settles: pool idle-retirement cannot reap the session
+ * mid-run, and under a transaction-pooler DATABASE_URL the advisory lock and
+ * the work share one backend for the whole transaction. The lock is released
+ * exactly when the transaction ends — commit after the run settles, rollback
+ * if `fn` throws, session death if the process dies — and the connection
+ * close (`end`/`$disconnect`) happens in a `finally` on ALL paths
+ * (acquired / not acquired / throw / return), strictly after the run
+ * settles. If the process dies mid-run Postgres aborts the transaction and
+ * releases the lock; durable idempotency keys inside each job remain the
+ * second boundary.
  */
 export async function withSchedulerLock<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
   // Dedicated connection whose lifetime THIS function controls: it never
   // comes from the shared query pool the global prisma client uses, so the
-  // jobs can never wait on the connection that holds the lock, and the lock
-  // can never be released by something else expiring a transaction.
+  // jobs can never wait on the connection that holds the lock.
   let lock: SchedulerLockConnection | undefined;
-  let acquired = false;
   try {
     lock = createSchedulerLockConnection();
-    // Session-scoped try-lock: false means another live session (another
-    // replica or tick) already holds the lock -> skip this run.
-    acquired = await lock.tryAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY);
-    if (!acquired) {
-      return null;
-    }
-    // The deadline starts once the lock is ours; the work itself runs on the
-    // global client (the deadline neither holds nor releases the lock).
-    const deadline = AbortSignal.timeout(getTickTimeoutMs());
-    return await fn(deadline);
+    // One pinned transaction: the xact try-lock runs inside it, and the lazy
+    // callback (which creates the tick deadline only AFTER the lock is won)
+    // is awaited before the transaction — and the lock — may end. `null`
+    // means another live session already holds the lock -> skip this run.
+    return await lock.runExclusive(SCHEDULER_ADVISORY_LOCK_KEY, () => fn(AbortSignal.timeout(getTickTimeoutMs())));
   } catch (error) {
-    // Fail safe: if the lock connection or the lock query blows up, skip
-    // instead of crashing the timer loop or the caller. `fn`'s failure lands
-    // here too — the lock is still released/closed below in the finally.
+    // Fail safe: if the lock connection or the lock transaction blows up
+    // (including its COMMIT), skip instead of crashing the timer loop or the
+    // caller. `fn`'s failure lands here too — the transaction rollback and
+    // the connection close below still release/close everything.
     console.error(`${SCHEDULER_LOG_PREFIX} lock acquisition aborted, skipping: ${describeError(error)}`);
     return null;
   } finally {
-    // Release only now — after the run has settled — and strictly in this
-    // order: unlock on the acquiring session, then close the connection.
-    // Until unlock runs, no other replica can acquire the lock, so live work
-    // is fully protected (finding 7). If the unlock throws (connection died),
-    // the session is already gone and the lock with it; end() is best-effort.
+    // Close the dedicated session on every path (acquired, not acquired,
+    // thrown, returned) — the xact lock is already gone with the transaction
+    // that carried it; `$disconnect` guarantees no idle lock connection
+    // lingers between ticks.
     if (lock) {
-      if (acquired) {
-        try {
-          await lock.releaseAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY);
-        } catch (error) {
-          console.error(`${SCHEDULER_LOG_PREFIX} advisory unlock failed: ${describeError(error)}`);
-        }
-      }
       try {
         await lock.end();
       } catch (error) {
@@ -264,12 +261,13 @@ export async function withSchedulerLock<T>(fn: (signal: AbortSignal) => Promise<
  * One scheduler tick: guard against in-process overlap, take the scheduler
  * advisory lock via {@link withSchedulerLock}, and run all jobs under a
  * cancellable deadline while the lock is held. Each job is isolated so a
- * failure cannot abort the others; the session lock is released only when
- * every job has settled — a job that outlives SCHEDULER_TICK_TIMEOUT_MS keeps
- * the lock (and the in-process guard) until it actually finishes, so neither
- * a later tick nor another replica can run concurrently with live work (M9,
- * finding 7). The in-flight guard is cleared in `finally`, i.e. strictly
- * after the lock run completed and the lock was released.
+ * failure cannot abort the others; the pinned lock transaction (and with it
+ * the advisory lock) is released only when every job has settled — a job
+ * that outlives SCHEDULER_TICK_TIMEOUT_MS keeps the lock (and the in-process
+ * guard) until it actually finishes, so neither a later tick nor another
+ * replica can run concurrently with live work (M9, finding 7). The in-flight
+ * guard is cleared in `finally`, i.e. strictly after the lock run completed
+ * and the lock was released.
  */
 export async function runScheduledJobs() {
   if (globalForScheduler.__taskitoSchedulerTickInFlight) {

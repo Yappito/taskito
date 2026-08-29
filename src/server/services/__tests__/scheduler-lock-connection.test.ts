@@ -1,15 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** Shape of the prisma client stub handed out by the mocked PrismaClient class. */
+/**
+ * Minimal stub of the PrismaClient surface the lock module uses: `$transaction`
+ * (interactive form) + `$disconnect`. The interactive callback receives a `tx`
+ * client whose `$queryRaw` is a separate mock — production runs the xact
+ * try-lock on the TRANSACTION client, never on the outer client.
+ */
 interface ClientStub {
-  $queryRaw: ReturnType<typeof vi.fn>;
+  $transaction: ReturnType<typeof vi.fn>;
   $disconnect: ReturnType<typeof vi.fn>;
+}
+
+interface TxStub {
+  $queryRaw: ReturnType<typeof vi.fn>;
 }
 
 const { PrismaClientMock } = vi.hoisted(() => ({
   // Implementation is replaced per test with a constructible function (new PrismaClient()).
   PrismaClientMock: vi.fn(function clientCtor() {
-    return { $queryRaw: vi.fn(), $disconnect: vi.fn() } as ClientStub;
+    return { $transaction: vi.fn(), $disconnect: vi.fn() } as ClientStub;
   }),
 }));
 
@@ -20,8 +29,12 @@ vi.mock("@prisma/client", async (importOriginal) => {
   return { ...actual, PrismaClient: PrismaClientMock };
 });
 
-import { SCHEDULER_ADVISORY_LOCK_KEY } from "@/server/services/scheduler";
-import { buildSingleSessionDatabaseUrl, createSchedulerLockConnection } from "@/server/services/scheduler-lock-connection";
+import {
+  buildSingleSessionDatabaseUrl,
+  createSchedulerLockConnection,
+  DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS,
+  schedulerLockTransactionTimeoutMs,
+} from "@/server/services/scheduler-lock-connection";
 
 function lastClient(): ClientStub {
   const result = PrismaClientMock.mock.results.at(-1);
@@ -47,13 +60,48 @@ function renderedQuery(arg: unknown) {
   return { sql: strings.join("?"), values };
 }
 
+/**
+ * Wires the client stub so `$transaction` emulates Prisma's interactive form:
+ * the callback is invoked with a `tx` client (its own `$queryRaw` mock), the
+ * returned promise resolves with whatever the callback resolves, and
+ * `commitFailure` simulates a COMMIT that fails AFTER the callback settled.
+ */
+function stubTransaction(options: { locked?: boolean; commitFailure?: Error } = {}) {
+  const events: string[] = [];
+  const txStub: TxStub = {
+    $queryRaw: vi.fn().mockResolvedValue([{ locked: options.locked ?? true }]),
+  };
+  PrismaClientMock.mockImplementation(function clientFactory(): ClientStub {
+    const client: ClientStub = {
+      $transaction: vi.fn(async (callback: (tx: TxStub) => Promise<unknown>) => {
+        events.push("tx-begin");
+        try {
+          const result = await callback(txStub);
+          events.push("tx-callback-resolved");
+          if (options.commitFailure) {
+            throw options.commitFailure;
+          }
+          return result;
+        } catch (error) {
+          events.push("tx-aborted");
+          throw error;
+        }
+      }),
+      $disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    return client;
+  });
+  return { events, txStub };
+}
+
 describe("scheduler lock connection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
     process.env.DATABASE_URL = "postgresql://scheduler:s3cret@db.local:5432/taskito?schema=public&pool_timeout=17";
     PrismaClientMock.mockImplementation(function clientFactory(): ClientStub {
       return {
-        $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]),
+        $transaction: vi.fn(),
         $disconnect: vi.fn().mockResolvedValue(undefined),
       };
     });
@@ -61,6 +109,7 @@ describe("scheduler lock connection", () => {
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
   });
 
   it("opens its own PrismaClient pinned to a single connection (never the shared pool)", () => {
@@ -69,9 +118,10 @@ describe("scheduler lock connection", () => {
     expect(PrismaClientMock).toHaveBeenCalledTimes(1);
     const { datasourceUrl } = lastConstructorArg();
     // The dedicated lock client is a SEPARATE PrismaClient with its own pool,
-    // pinned to EXACTLY one connection so the lock query and the unlock always
-    // run on the same physical Postgres session — and so the lock never
-    // occupies a connection from the shared global pool the jobs use (finding 8).
+    // pinned to EXACTLY one connection. Its pool serves nothing but the ONE
+    // pinned lock transaction, so the lock never occupies a connection from
+    // the shared global pool the jobs use (finding 8), and no other client
+    // activity can land on the pinned backend.
     const url = new URL(datasourceUrl);
     expect(`${url.protocol}//${url.username}:${url.password}@${url.host}${url.pathname}`).toBe(
       "postgresql://scheduler:s3cret@db.local:5432/taskito",
@@ -101,58 +151,152 @@ describe("scheduler lock connection", () => {
     expect(PrismaClientMock).not.toHaveBeenCalled();
   });
 
-  it("acquires with a SESSION-scoped pg_try_advisory_lock (never the _xact_ variant)", async () => {
-    const connection = createSchedulerLockConnection();
-
-    await expect(connection.tryAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY)).resolves.toBe(true);
-
-    const client = lastClient();
-    expect(client.$queryRaw).toHaveBeenCalledTimes(1);
-    const { sql, values } = renderedQuery(client.$queryRaw.mock.calls[0][0]);
-    // Session-scoped on purpose: it must survive transaction churn inside the
-    // run and stay exclusive across processes until unlocked on this session.
-    expect(sql).toContain("pg_try_advisory_lock(");
-    expect(sql).not.toContain("pg_try_advisory_xact_lock");
-    expect(values).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+  it("defaults the lock-transaction timeout to 24h (far above any tick)", () => {
+    delete process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS;
+    expect(schedulerLockTransactionTimeoutMs()).toBe(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS);
+    expect(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS).toBe(24 * 60 * 60 * 1000);
   });
 
-  it("reports 'not acquired' when another session holds the lock", async () => {
+  it("reads SCHEDULER_LOCK_TX_TIMEOUT_MS and falls back to the default on invalid values", () => {
+    process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "7200000";
+    expect(schedulerLockTransactionTimeoutMs()).toBe(7_200_000);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "banana";
+    expect(schedulerLockTransactionTimeoutMs()).toBe(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS);
+    process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "59999"; // below the 60s minimum
+    expect(schedulerLockTransactionTimeoutMs()).toBe(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler-lock] invalid SCHEDULER_LOCK_TX_TIMEOUT_MS"));
+    warnSpy.mockRestore();
+  });
+
+  it("pins ONE interactive $transaction per run: try-lock inside it, callback awaited inside it", async () => {
+    const { events, txStub } = stubTransaction({ locked: true });
+    const connection = createSchedulerLockConnection();
+    const KEY = 684_513_207;
+
+    const result = await connection.runExclusive(KEY, async () => {
+      events.push("work");
+      return "ran";
+    });
+
+    // The callback's result is returned while the "transaction" wraps it.
+    expect(result).toBe("ran");
+    expect(events).toEqual(["tx-begin", "work", "tx-callback-resolved"]);
+
+    // The whole run lives in exactly ONE $transaction on the dedicated
+    // client — acquire and release are NOT two separate pooled queries.
+    expect(lastClient().$transaction).toHaveBeenCalledTimes(1);
+    // The lock query runs on the TRANSACTION client.
+    expect(txStub.$queryRaw).toHaveBeenCalledTimes(1);
+    const { sql, values } = renderedQuery(txStub.$queryRaw.mock.calls[0][0]);
+    expect(sql).toContain("pg_try_advisory_xact_lock(");
+    expect(sql).not.toContain("pg_try_advisory_lock(");
+    expect(sql).not.toContain("pg_advisory_unlock");
+    expect(values).toEqual([KEY]);
+    // The pinned transaction's timeout is the high, configurable one so
+    // Prisma can never expire it (and the lock) mid-run.
+    const txOptions = (lastClient().$transaction.mock.calls[0][1] ?? {}) as { timeout?: number };
+    expect(txOptions.timeout).toBe(DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS);
+  });
+
+  it("runs the callback literally INSIDE the $transaction callback (pinned while it settles)", async () => {
+    const { events } = stubTransaction({ locked: true });
+    const connection = createSchedulerLockConnection();
+    let insideTx = false;
+
+    const run = connection.runExclusive(1, async () => {
+      // Observed while the transaction callback is still on the stack.
+      insideTx = events.includes("tx-begin") && !events.includes("tx-callback-resolved");
+      return "done";
+    });
+
+    await expect(run).resolves.toBe("done");
+    expect(insideTx).toBe(true);
+  });
+
+  it("returns null and ends the transaction immediately when the xact lock is held elsewhere", async () => {
+    const { events, txStub } = stubTransaction({ locked: false });
+    const connection = createSchedulerLockConnection();
+
+    const result = await connection.runExclusive(684_513_207, async () => {
+      throw new Error("must not run while another session holds the lock");
+    });
+
+    expect(result).toBeNull();
+    expect(txStub.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["tx-begin", "tx-callback-resolved"]);
+    // The empty transaction ended on its own (resolved, not aborted); the
+    // callback never ran — it would have thrown, and the result is null.
+  });
+
+  it("uses SCHEDULER_LOCK_TX_TIMEOUT_MS for the pinned transaction's timeout", async () => {
+    process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS = "3600000";
+    const { events } = stubTransaction({ locked: true });
+    const connection = createSchedulerLockConnection();
+
+    await connection.runExclusive(1, async () => {
+      events.push("work");
+    });
+
+    const txOptions = (lastClient().$transaction.mock.calls[0][1] ?? {}) as { timeout?: number };
+    expect(txOptions.timeout).toBe(3_600_000);
+    expect(events).toContain("tx-callback-resolved");
+  });
+
+  it("propagates a callback failure (the transaction rolls back, releasing the xact lock)", async () => {
+    const { events, txStub } = stubTransaction({ locked: true });
+    const connection = createSchedulerLockConnection();
+
+    await expect(
+      connection.runExclusive(1, async () => {
+        throw new Error("job exploded");
+      }),
+    ).rejects.toThrow("job exploded");
+
+    // The wrap-up still happened inside the transaction: exactly one tx, the
+    // try-lock ran once, and the transaction aborted (rollback releases the
+    // xact lock server-side).
+    expect(lastClient().$transaction).toHaveBeenCalledTimes(1);
+    expect(txStub.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["tx-begin", "tx-aborted"]);
+  });
+
+  it("keeps a settled run's result when the transaction ends badly (logged, like the old unlock-failure path)", async () => {
+    const { events } = stubTransaction({ locked: true, commitFailure: new Error("commit failed: connection dropped") });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const connection = createSchedulerLockConnection();
+
+    await expect(connection.runExclusive(1, async () => "ran")).resolves.toBe("ran");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[scheduler-lock] ending the lock transaction after a settled run failed"),
+    );
+    errorSpy.mockRestore();
+    expect(events).toContain("tx-callback-resolved");
+  });
+
+  it("propagates lock-transaction failures that happen BEFORE the callback (scheduler turns them into a skip)", async () => {
+    const txStub: TxStub = { $queryRaw: vi.fn().mockRejectedValue(new Error("connection refused")) };
     PrismaClientMock.mockImplementation(function clientFactory(): ClientStub {
       return {
-        $queryRaw: vi.fn().mockResolvedValue([{ locked: false }]),
+        $transaction: vi.fn(async (callback: (tx: TxStub) => Promise<unknown>) => callback(txStub)),
         $disconnect: vi.fn().mockResolvedValue(undefined),
       };
     });
-
     const connection = createSchedulerLockConnection();
 
-    await expect(connection.tryAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY)).resolves.toBe(false);
+    await expect(connection.runExclusive(1, async () => "never")).rejects.toThrow("connection refused");
   });
 
-  it("unlocks with pg_advisory_unlock on the SAME dedicated client and closes it on end()", async () => {
+  it("closes the dedicated client via end() after every run path", async () => {
+    const { events } = stubTransaction({ locked: true });
     const connection = createSchedulerLockConnection();
 
-    await connection.tryAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY);
-    await connection.releaseAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY);
+    await connection.runExclusive(1, async () => "ran");
     await connection.end();
 
-    const client = lastClient();
-    expect(client.$queryRaw).toHaveBeenCalledTimes(2); // try + unlock, one client instance
-    const { sql, values } = renderedQuery(client.$queryRaw.mock.calls[1][0]);
-    expect(sql).toContain("pg_advisory_unlock(");
-    expect(values).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-    expect(client.$disconnect).toHaveBeenCalledTimes(1);
-  });
-
-  it("propagates query failures (the scheduler turns them into a skip with a best-effort close)", async () => {
-    PrismaClientMock.mockImplementation(function clientFactory(): ClientStub {
-      return {
-        $queryRaw: vi.fn().mockRejectedValue(new Error("connection refused")),
-        $disconnect: vi.fn().mockResolvedValue(undefined),
-      };
-    });
-    const connection = createSchedulerLockConnection();
-
-    await expect(connection.tryAdvisoryLock(SCHEDULER_ADVISORY_LOCK_KEY)).rejects.toThrow("connection refused");
+    expect(lastClient().$disconnect).toHaveBeenCalledTimes(1);
+    expect(events).toContain("tx-callback-resolved");
   });
 });

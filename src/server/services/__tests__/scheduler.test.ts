@@ -13,25 +13,30 @@ const {
   type FakeLockConnection = {
     id: number;
     live: boolean;
-    tryLockKeys: number[];
-    unlockKeys: number[];
-    tryAdvisoryLock: (key: number) => Promise<boolean>;
-    releaseAdvisoryLock: (key: number) => Promise<void>;
+    /** How many interactive `$transaction` calls this session opened. */
+    txCalls: number;
+    /** Advisory keys whose xact lock were attempted, in order. */
+    tryKeys: number[];
+    runExclusive: <T>(key: number, fn: () => Promise<T>) => Promise<T | null>;
     end: () => Promise<void>;
   };
 
-  // A tiny fake of Postgres session advisory locks. Every dedicated lock
-  // connection handed out below is an independent SESSION (exactly like a
-  // second replica would open its own), yet all sessions share one advisory
-  // lock space — so a lock taken on session A is invisible to session B
-  // until A releases it (or A's session dies).
+  // A tiny fake of Postgres advisory locks bound to OPEN TRANSACTIONS. Every
+  // dedicated lock connection handed out below is an independent SESSION
+  // (exactly like a second replica would open its own), yet all sessions
+  // share one advisory lock space. A transaction-scoped lock is held exactly
+  // as long as the transaction that took it: the fake models that with
+  // `openTx` (sessions with a transaction still running) — the lock exists
+  // only while it is held WITH an open transaction, and both vanish together
+  // when the transaction ends (commit/rollback) or the session dies.
   const server = {
-    held: new Map<number, number>(), // advisory key -> owning session id
+    held: new Map<number, number>(), // advisory key -> owning session id (only while its tx is open)
+    openTx: new Map<number, number>(), // session id -> advisory key of its open transaction
     connections: [] as FakeLockConnection[],
     events: [] as string[],
     nextSessionId: 0,
     tryLockError: undefined as Error | undefined,
-    unlockError: undefined as Error | undefined,
+    commitError: undefined as Error | undefined,
     factoryError: undefined as Error | undefined,
   };
 
@@ -39,37 +44,73 @@ const {
     const connection: FakeLockConnection = {
       id: server.nextSessionId++,
       live: true,
-      tryLockKeys: [],
-      unlockKeys: [],
-      async tryAdvisoryLock(key: number) {
+      txCalls: 0,
+      tryKeys: [],
+      async runExclusive<T>(key: number, fn: () => Promise<T>): Promise<T | null> {
         if (!connection.live) throw new Error("lock connection is closed");
-        if (server.tryLockError) throw server.tryLockError;
-        server.events.push(`try:${connection.id}`);
-        connection.tryLockKeys.push(key);
-        if (server.held.has(key)) {
-          return false;
-        }
-        server.held.set(key, connection.id);
-        return true;
-      },
-      async releaseAdvisoryLock(key: number) {
-        if (!connection.live) throw new Error("lock connection is closed");
-        if (server.unlockError) throw server.unlockError;
-        server.events.push(`unlock:${connection.id}`);
-        connection.unlockKeys.push(key);
-        if (server.held.get(key) === connection.id) {
-          server.held.delete(key);
+        connection.txCalls += 1;
+        // ONE interactive transaction opens; the xact try-lock, the awaited
+        // callback, and the implicit commit/rollback all live inside it.
+        server.events.push(`tx:${connection.id}`);
+        server.openTx.set(connection.id, key);
+        const endTx = () => {
+          // The xact lock dies with the transaction — and the transaction is
+          // no longer open — in EVERY outcome (commit, rollback, crash).
+          if (server.held.get(key) === connection.id) {
+            server.held.delete(key);
+          }
+          server.openTx.delete(connection.id);
+        };
+        try {
+          if (server.tryLockError) {
+            server.events.push(`rollback:${connection.id}`);
+            throw server.tryLockError;
+          }
+          server.events.push(`try:${connection.id}`);
+          connection.tryKeys.push(key);
+          if (server.held.has(key)) {
+            // Another live session's open transaction owns the lock: nothing
+            // happens, the (empty) transaction ends immediately.
+            endTx();
+            return null;
+          }
+          server.held.set(key, connection.id);
+          let result: T;
+          try {
+            result = await fn();
+          } catch (caught) {
+            // Rollback: the callback failed, the transaction aborts, the xact
+            // lock releases with it — and the failure surfaces to the caller.
+            server.events.push(`rollback:${connection.id}`);
+            endTx();
+            throw caught;
+          }
+          if (server.commitError) {
+            // COMMIT failed after the run settled: the transaction aborts,
+            // releasing the xact lock; the work already ran on the global
+            // client. The real lock module logs this and still returns the
+            // settled result — mirror that here.
+            server.events.push(`commit-failed:${connection.id}`);
+            endTx();
+            return result;
+          }
+          server.events.push(`commit:${connection.id}`);
+          endTx();
+          return result;
+        } finally {
+          endTx();
         }
       },
       async end() {
         server.events.push(`end:${connection.id}`);
         connection.live = false;
-        // A dropped session releases every advisory lock it holds.
+        // A dropped session aborts its open transaction, releasing the lock.
         for (const [key, owner] of [...server.held]) {
           if (owner === connection.id) {
             server.held.delete(key);
           }
         }
+        server.openTx.delete(connection.id);
       },
     };
     server.connections.push(connection);
@@ -82,15 +123,20 @@ const {
     open,
     reset() {
       server.held.clear();
+      server.openTx.clear();
       server.connections = [];
       server.events = [];
       server.nextSessionId = 0;
       server.tryLockError = undefined;
-      server.unlockError = undefined;
+      server.commitError = undefined;
       server.factoryError = undefined;
     },
     isHeld(key: number) {
       return server.held.has(key);
+    },
+    /** True while the session's transaction (and therefore its xact lock) is open. */
+    txOpenOn(sessionId: number) {
+      return server.openTx.has(sessionId);
     },
   };
 
@@ -213,7 +259,7 @@ describe("scheduler", () => {
   });
 
   describe("runScheduledJobs", () => {
-    it("takes the session advisory lock on a dedicated connection and runs all jobs once", async () => {
+    it("takes the advisory lock in a pinned transaction on a dedicated connection and runs all jobs once", async () => {
       const result = await runScheduledJobs();
 
       expect(result).toEqual({ ran: true });
@@ -225,12 +271,15 @@ describe("scheduler", () => {
       expect(prismaMock.$executeRaw).not.toHaveBeenCalled();
 
       const connection = connections()[0];
-      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      // Released exactly once, with the same key, on the same session, and
-      // only after the run settled — then the dedicated connection is closed.
-      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      // The lock lived inside exactly ONE pinned transaction on that
+      // dedicated session, and it was released (commit) only after the run
+      // settled — then the connection was closed.
+      expect(connection.txCalls).toBe(1);
+      expect(eventIndex("commit:0")).toBeGreaterThan(eventIndex("job:webhooks"));
+      expect(fakePg.server.openTx.size).toBe(0);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
       expect(connection.live).toBe(false);
-      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("job:webhooks"));
 
       // M9/M8 unchanged: every job receives the tick's cancellable deadline
       // signal and runs on the global prisma client.
@@ -274,20 +323,22 @@ describe("scheduler", () => {
       });
       await expect(secondRun).resolves.toBeNull();
       expect(fakePg.server.connections).toHaveLength(2);
-      expect(fakePg.server.connections[1].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(fakePg.server.connections[1].unlockKeys).toEqual([]);
+      expect(fakePg.server.connections[1].tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(fakePg.server.connections[1].txCalls).toBe(1);
       expect(fakePg.server.connections[1].live).toBe(false);
       // The refused run must NOT have executed its work, and the lock must
-      // still be held by the first session.
+      // still be held by the first session (inside its pinned transaction).
       expect(fakePg.server.events).not.toContain("second-work");
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
+      expect(fakePg.txOpenOn(0)).toBe(true);
 
-      // Only when the first run's work settles is the lock released —
-      // strictly after the work finished (unlock:0 follows first-work-done).
+      // Only when the first run's work settles is the transaction committed —
+      // strictly after the work finished (commit:0 follows first-work-done),
+      // and the commit is what releases the lock.
       releaseFirstWork();
       await expect(firstRun).resolves.toBe("first");
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
-      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("first-work-done"));
+      expect(eventIndex("commit:0")).toBeGreaterThan(eventIndex("first-work-done"));
       expect(fakePg.server.events).toContain("end:0");
 
       // With the lock free again, a later acquisition succeeds.
@@ -295,7 +346,7 @@ describe("scheduler", () => {
       expect(fakePg.server.connections).toHaveLength(3);
     });
 
-    it("keeps the session lock held while a job outlives the tick deadline; the next tick runs only after the run settles", async () => {
+    it("keeps the pinned lock transaction open while a job outlives the tick deadline; the next tick runs only after the run settles", async () => {
       const tickTimeoutMs = 1_000;
       process.env.SCHEDULER_TICK_TIMEOUT_MS = String(tickTimeoutMs);
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -327,36 +378,41 @@ describe("scheduler", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(firstSettled).toBe(false);
       expect(pendingJobs).toBe(1);
-      // The dedicated session still holds the advisory lock while the job is
-      // live, so another replica could not run jobs either.
+      // The dedicated session's pinned transaction still holds the advisory
+      // lock while the job is live, so another replica could not run jobs
+      // either.
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
+      expect(fakePg.txOpenOn(0)).toBe(true);
 
       // A second tick cannot start while the first run is live.
       expect(await runScheduledJobs()).toEqual({ ran: false });
       expect(pendingJobs).toBe(1);
-      // FINDING 8: while the long job runs, the dedicated lock connection has
-      // issued nothing beyond the initial try-lock (unlock strictly waits for
-      // the run to settle), no other lock connection was opened, and the
-      // global shared pool was never touched by the lock machinery — jobs
-      // keep every shared-pool connection for themselves.
+      // FINDING 8 + WAVE-8 PIN: while the long job runs, the dedicated lock
+      // connection has opened exactly ONE transaction (the one carrying the
+      // xact lock; its COMMIT strictly waits for the run to settle), no other
+      // lock connection was opened, and the global shared pool was never
+      // touched by the lock machinery — jobs keep every shared-pool
+      // connection for themselves.
       expect(connections()).toHaveLength(1);
-      expect(connections()[0].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(connections()[0].tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].txCalls).toBe(1);
+      expect(eventIndex("commit:0")).toBe(-1);
       expect(prismaMock.$queryRaw).not.toHaveBeenCalled();
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
 
-      // Once the long-running job finishes, the first tick settles, the lock
-      // is released and closed, and a later tick runs again. Note: fake timers
-      // do not fire AbortSignal.timeout, so the first tick's remaining jobs
-      // simply complete normally after the release (they are never observed
-      // by another replica because the session lock was held throughout).
+      // Once the long-running job finishes, the first tick settles, the
+      // transaction commits (releasing the lock), and the connection closes.
+      // Note: fake timers do not fire AbortSignal.timeout, so the first
+      // tick's remaining jobs simply complete normally after the release
+      // (they are never observed by another replica because the pinned
+      // transaction held the lock throughout).
       releaseFirstJob();
       await firstTick;
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
       const firstConnection = connections()[0];
-      expect(firstConnection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(eventIndex("commit:0")).toBeGreaterThan(eventIndex("job:recurrence"));
       expect(firstConnection.live).toBe(false);
-      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("job:recurrence"));
+      expect(fakePg.txOpenOn(0)).toBe(false);
 
       const thirdResult = await runScheduledJobs();
       expect(thirdResult).toEqual({ ran: true });
@@ -365,7 +421,8 @@ describe("scheduler", () => {
     });
 
     it("skips the tick when another session/replica holds the lock", async () => {
-      // Simulate a lock taken by a DIFFERENT process (session id 999).
+      // Simulate a lock taken by a DIFFERENT process (session id 999) inside
+      // its own open transaction.
       fakePg.server.held.set(SCHEDULER_ADVISORY_LOCK_KEY, 999);
 
       const result = await runScheduledJobs();
@@ -373,10 +430,12 @@ describe("scheduler", () => {
       expect(result).toEqual({ ran: false });
       expect(connections()).toHaveLength(1);
       const connection = connections()[0];
-      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      // Not acquired: nothing is unlocked, but the dedicated connection is
-      // still closed (no leaked sessions between ticks).
-      expect(connection.unlockKeys).toEqual([]);
+      expect(connection.tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      // Not acquired: the empty transaction ended without a commit of ours,
+      // and the dedicated connection is still closed (no leaked sessions
+      // between ticks).
+      expect(connection.txCalls).toBe(1);
+      expect(fakePg.server.events).not.toContain("commit:0");
       expect(connection.live).toBe(false);
       expect(processDueRecurrences).not.toHaveBeenCalled();
       expect(processDueDateAutomationRules).not.toHaveBeenCalled();
@@ -397,7 +456,7 @@ describe("scheduler", () => {
       errorSpy.mockRestore();
     });
 
-    it("skips the tick when the lock query fails and still closes the dedicated connection", async () => {
+    it("skips the tick when the lock transaction fails and still closes the dedicated connection", async () => {
       fakePg.server.tryLockError = new Error("database unavailable");
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -408,7 +467,7 @@ describe("scheduler", () => {
       expect(processDueDateAutomationRules).not.toHaveBeenCalled();
       expect(runDailyDigestJob).not.toHaveBeenCalled();
       expect(connections()).toHaveLength(1);
-      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(fakePg.server.events).not.toContain("commit:0");
       expect(connections()[0].live).toBe(false);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
@@ -485,10 +544,13 @@ describe("scheduler", () => {
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
       expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
       expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
-      // The lock is still released and the connection closed after a failing run.
-      const connection = connections()[0];
-      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(connection.live).toBe(false);
+      // The lock transaction still ends normally and the connection closes
+      // after a failing job — the tick isolates job failures, so the run
+      // settles (commit releases the xact lock) rather than throwing.
+      expect(eventIndex("commit:0")).toBeGreaterThan(-1);
+      expect(connections()[0].txCalls).toBe(1);
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      expect(connections()[0].live).toBe(false);
     });
 
     it("still runs recurrences and the digest when due-date automation throws", async () => {
@@ -553,13 +615,13 @@ describe("scheduler", () => {
   });
 
   describe("withSchedulerLock (external entry points)", () => {
-    it("runs the callback and returns its result while holding the session lock", async () => {
+    it("runs the callback and returns its result while holding the pinned lock transaction", async () => {
       const result = await withSchedulerLock(async () => "ran");
 
       expect(result).toBe("ran");
       expect(connections()).toHaveLength(1);
-      expect(connections()[0].tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(connections()[0].unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connections()[0].txCalls).toBe(1);
       expect(connections()[0].live).toBe(false);
     });
 
@@ -572,10 +634,11 @@ describe("scheduler", () => {
 
       expect(result).toBeNull();
       const connection = connections()[0];
-      expect(connection.tryLockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(connection.unlockKeys).toEqual([]);
+      expect(connection.tryKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
+      expect(connection.txCalls).toBe(1);
       expect(connection.live).toBe(false);
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(true);
+      expect(fakePg.server.events).not.toContain("commit:0");
     });
 
     it("returns null (skip) when the lock connection cannot be created", async () => {
@@ -589,20 +652,20 @@ describe("scheduler", () => {
       errorSpy.mockRestore();
     });
 
-    it("returns null (skip) when the try-lock query fails", async () => {
+    it("returns null (skip) when the lock transaction fails", async () => {
       fakePg.server.tryLockError = new Error("database unavailable");
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await withSchedulerLock(async () => "never");
 
       expect(result).toBeNull();
-      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(connections()[0].txCalls).toBe(1);
       expect(connections()[0].live).toBe(false);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
     });
 
-    it("treats a callback failure as a skip, but still releases the lock and closes the connection", async () => {
+    it("treats a callback failure as a skip, but still rolls the transaction back and closes the connection", async () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await withSchedulerLock(async () => {
@@ -613,41 +676,77 @@ describe("scheduler", () => {
       // interval loop and the cron endpoint stay alive.
       expect(result).toBeNull();
       const connection = connections()[0];
-      expect(connection.unlockKeys).toEqual([SCHEDULER_ADVISORY_LOCK_KEY]);
-      expect(connection.live).toBe(false);
+      // The xact lock died with the rolled-back transaction.
+      expect(fakePg.server.events).toContain("rollback:0");
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
-      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("open:0"));
+      expect(connection.live).toBe(false);
+      expect(eventIndex("rollback:0")).toBeGreaterThan(eventIndex("open:0"));
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
     });
 
-    it("keeps the lock through an unlock failure (logged) and still closes the session", async () => {
-      fakePg.server.unlockError = new Error("unlock failed");
+    it("keeps the run's result when the transaction COMMIT fails after the callback settled and still closes the session", async () => {
+      fakePg.server.commitError = new Error("commit failed: connection dropped");
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const result = await withSchedulerLock(async () => "ran");
 
-      // The run itself succeeded; the unlock failure is logged, and closing
-      // the dedicated session drops the lock server-side regardless.
+      // The run itself succeeded, so the lock connection returns the result
+      // even though ending the transaction failed: the work already ran on
+      // the global client, the transaction abort released the xact lock
+      // server-side, and closing the dedicated session drops it regardless.
       expect(result).toBe("ran");
-      expect(connections()[0].unlockKeys).toEqual([]);
+      expect(fakePg.server.events).toContain("commit-failed:0");
       expect(connections()[0].live).toBe(false);
       expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] advisory unlock failed"));
+      // No skip was logged: the run settled fine.
+      expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("[scheduler] lock acquisition aborted"));
       errorSpy.mockRestore();
     });
 
-    it("orders: lock acquired -> work -> unlock -> close, strictly", async () => {
+    it("pins ONE transaction for the whole callback: lock acquired inside it, callback settled inside it, released only after it settles", async () => {
+      let pinStateDuringWork: { txCalls: number; txOpen: boolean; lockHeld: boolean } | null = null;
+
+      const workRan = withSchedulerLock(async () => {
+        fakePg.server.events.push("work");
+        // While the callback runs, the lock transaction on our dedicated
+        // session is still OPEN and it is the one holding the advisory lock:
+        // there is no gap between acquire and work where the connection sits
+        // idle in a pool (wave-8 finding 2's pin requirement).
+        pinStateDuringWork = {
+          txCalls: connections()[0].txCalls,
+          txOpen: fakePg.txOpenOn(0),
+          lockHeld: fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY) && !fakePg.isHeld(999),
+        };
+        return "ok";
+      });
+
+      await expect(workRan).resolves.toBe("ok");
+      expect(pinStateDuringWork).toEqual({ txCalls: 1, txOpen: true, lockHeld: true });
+      // Exactly ONE transaction carried the whole run — acquire and release
+      // were never two separate pooled queries (mutating back to such a
+      // design fails txOpen/txCalls assertions above).
+      expect(connections()[0].txCalls).toBe(1);
+      // Released (commit) strictly after the work, then the session closed.
+      expect(eventIndex("work")).toBeGreaterThan(eventIndex("tx:0"));
+      expect(eventIndex("commit:0")).toBeGreaterThan(eventIndex("work"));
+      expect(eventIndex("end:0")).toBeGreaterThan(eventIndex("commit:0"));
+      expect(fakePg.isHeld(SCHEDULER_ADVISORY_LOCK_KEY)).toBe(false);
+      expect(fakePg.txOpenOn(0)).toBe(false);
+    });
+
+    it("orders: connection opened -> transaction -> try-lock -> work -> commit -> close, strictly", async () => {
       const workRan = withSchedulerLock(async () => {
         fakePg.server.events.push("work");
         return "ok";
       });
 
       await expect(workRan).resolves.toBe("ok");
-      expect(eventIndex("try:0")).toBeGreaterThan(eventIndex("open:0"));
+      expect(eventIndex("try:0")).toBeGreaterThan(eventIndex("tx:0"));
+      expect(eventIndex("tx:0")).toBeGreaterThan(eventIndex("open:0"));
       expect(eventIndex("work")).toBeGreaterThan(eventIndex("try:0"));
-      expect(eventIndex("unlock:0")).toBeGreaterThan(eventIndex("work"));
-      expect(eventIndex("end:0")).toBeGreaterThan(eventIndex("unlock:0"));
+      expect(eventIndex("commit:0")).toBeGreaterThan(eventIndex("work"));
+      expect(eventIndex("end:0")).toBeGreaterThan(eventIndex("commit:0"));
     });
   });
 

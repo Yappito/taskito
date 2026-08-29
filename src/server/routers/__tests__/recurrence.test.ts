@@ -12,8 +12,7 @@ const {
   getCurrentActor: vi.fn(),
   processDueRecurrences: vi.fn(),
   lockConnectionMock: {
-    tryAdvisoryLock: vi.fn(),
-    releaseAdvisoryLock: vi.fn(),
+    runExclusive: vi.fn(),
     end: vi.fn(),
   },
 }));
@@ -36,6 +35,7 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {},
 }));
 
+import { SCHEDULER_ADVISORY_LOCK_KEY } from "@/server/services/scheduler";
 import { createCallerFactory } from "@/server/trpc";
 import { recurrenceRouter } from "@/server/routers/recurrence";
 
@@ -75,8 +75,7 @@ describe("recurrence router", () => {
     getCurrentActor.mockResolvedValue({ id: USER_ID, role: "owner" });
     requireProjectAccess.mockResolvedValue({ actor: { id: USER_ID, role: "owner" }, membershipRole: "owner" });
     processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
-    lockConnectionMock.tryAdvisoryLock.mockResolvedValue(true);
-    lockConnectionMock.releaseAdvisoryLock.mockResolvedValue(undefined);
+    lockConnectionMock.runExclusive.mockImplementation(async (_key: number, fn: () => Promise<unknown>) => fn());
     lockConnectionMock.end.mockResolvedValue(undefined);
   });
 
@@ -198,26 +197,25 @@ describe("recurrence router", () => {
         signal: expect.any(AbortSignal),
       });
       expect(result).toEqual({ processed: 3, createdTaskIds: ["cmab8yxxp000bi7p4k8n2v3qd"] });
-      // The run held the scheduler lock on the dedicated lock connection —
-      // NOT on the shared prisma client (finding 8) — and released it and
-      // closed the connection after the work settled.
-      expect(lockConnectionMock.tryAdvisoryLock).toHaveBeenCalledTimes(1);
-      expect(lockConnectionMock.releaseAdvisoryLock).toHaveBeenCalledTimes(1);
+      // The run held the scheduler lock inside ONE pinned transaction on the
+      // dedicated lock connection — NOT on the shared prisma client (finding
+      // 8) — and the connection was closed after the work settled.
+      expect(lockConnectionMock.runExclusive).toHaveBeenCalledTimes(1);
+      expect(lockConnectionMock.runExclusive.mock.calls[0][0]).toBe(SCHEDULER_ADVISORY_LOCK_KEY);
       expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
     });
 
     it("returns a skipped result instead of racing a tick that holds the scheduler lock (M8)", async () => {
       const prisma = createPrismaMock();
       const caller = createCallerWith(prisma);
-      // Another session/replica holds the lock.
-      lockConnectionMock.tryAdvisoryLock.mockResolvedValue(false);
+      // Another session/replica holds the lock: the xact try-lock returns false.
+      lockConnectionMock.runExclusive.mockResolvedValue(null);
 
       const result = await caller.processDue({ projectId: PROJECT_ID });
 
       expect(result).toEqual({ processed: 0, createdTaskIds: [], skipped: true });
       expect(processDueRecurrences).not.toHaveBeenCalled();
       // The dedicated lock connection is still closed (no session leak).
-      expect(lockConnectionMock.releaseAdvisoryLock).not.toHaveBeenCalled();
       expect(lockConnectionMock.end).toHaveBeenCalledTimes(1);
     });
   });

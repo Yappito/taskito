@@ -1,74 +1,107 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 
 /**
- * Dedicated Postgres connection for the scheduler's session-scoped advisory
- * lock (codex_sol wave-6 findings 7 & 8).
+ * Dedicated Postgres connection + session pin for the scheduler's advisory
+ * lock (codex_sol wave-6 findings 7 & 8, wave-8 finding 2).
  *
  * The scheduler must hold its cross-replica exclusion for the whole duration
- * of a run, but it must not do so through the machinery the previous design
- * used:
+ * of a run, and that exclusion must survive the Prisma connection pool's
+ * idle-retirement (an idle pooled connection's backend session can be reaped
+ * — Prisma pools retire idle connections after their `idle_timeout`, 300s by
+ * default, which is far below a 600s tick) and a transaction-pooler
+ * DATABASE_URL (pgbouncer's transaction mode only guarantees a backend
+ * BETWEEN `BEGIN` and `COMMIT`/`ROLLBACK` of one transaction).
  *
- *  - a transaction-scoped lock (`pg_try_advisory_xact_lock` inside an
- *    interactive `$transaction`) dies with its transaction. Whenever Prisma
- *    expires/aborts that transaction, Postgres releases the advisory lock
- *    immediately, and because every replica has its own process-global
+ * Why the two earlier designs fall short:
+ *
+ *  - A transaction-scoped lock (`pg_try_advisory_xact_lock`) taken and the
+ *    transaction closed, with the work running afterwards, is worthless: the
+ *    lock dies with its transaction. Prisma/Postgres release the advisory
+ *    lock immediately, and because every replica has its own process-global
  *    in-flight flag, ANOTHER replica can then acquire the freed DB lock and
  *    run the same jobs while the original work is still live (finding 7).
  *
- *  - holding any interactive transaction for the entire run parks one pooled
- *    connection on the SHARED pool while all jobs issue their queries through
- *    that same global pool — a 1-connection pool self-deadlocks (the tx waits
- *    for the jobs, the jobs wait for the connection the tx holds) and under
- *    load it removes one scarce connection for the whole tick (finding 8).
+ *  - An independent `pg_try_advisory_lock` / `pg_advisory_unlock` pair (two
+ *    separate pooled queries on a `connection_limit=1` client) pins the lock
+ *    to a SESSION — but between the two calls the connection sits IDLE in the
+ *    Prisma pool. Context: the pool may retire that idle physical
+ *    connection (ending the session, silently dropping the advisory lock
+ *    while jobs are live), and under pgbouncer the two queries can land on
+ *    DIFFERENT backends, so the unlock runs on a session that never held the
+ *    lock and the acquiring session's lock only dies with its reaped
+ *    connection (wave-8 finding 2).
  *
- * The fix is a SESSION-scoped advisory lock (`pg_try_advisory_lock`, no
- * `_xact_` suffix) taken on a connection this module creates explicitly and
- * whose lifetime the scheduler controls:
+ *  - Holding any interactive transaction for the entire run on the SHARED
+ *    pool parks one pooled connection while all jobs issue their queries
+ *    through that same pool — a 1-connection pool self-deadlocks (the tx
+ *    waits for the jobs, the jobs wait for the connection the tx holds) and
+ *    under load it removes one scarce connection for the whole tick
+ *    (finding 8).
+ *
+ * The fix pins ONE physical session for the WHOLE run by making the lock and
+ * the work-await live inside a SINGLE transaction on a single backend:
  *
  *  - The lock client is a private {@link PrismaClient} with a single-connection
  *    pool (`connection_limit=1`). It is NOT the global client, so no job can
  *    ever wait on the connection that holds the lock, and the lock can never
  *    be pinned onto a connection the jobs need (finding 8).
- *  - The session lock survives any transaction churn: only
- *    {@link SchedulerLockConnection.releaseAdvisoryLock} on the SAME
- *    connection, or the death of the connection/process, ends it (finding 7).
+ *
+ *  - `{@linkcode SchedulerLockConnection.runExclusive}` opens ONE interactive
+ *    `$transaction` on that client and takes the TRANSACTION-scoped advisory
+ *    lock (`pg_try_advisory_xact_lock`) inside it. The scheduler callback is
+ *    awaited INSIDE that same transaction callback — i.e. between
+ *    `pg_try_advisory_xact_lock` and the lock's release there is no gap, no
+ *    second query round-trip, and no moment where the connection returns to
+ *    the pool. The backend is continuously pinned (open transaction) while
+ *    jobs run, so pool idle-retirement cannot reap it, and pgbouncer keeps
+ *    the SAME backend for the whole transaction. The lock releases exactly
+ *    when the transaction ends (commit after the callback settles, rollback
+ *    if the callback throws, or connection/session death mid-run — Postgres
+ *    aborts the transaction and drops xact locks in every case).
+ *
+ *  - The dedicated client's transaction timeout is configured far above a
+ *    normal run (`SCHEDULER_LOCK_TX_TIMEOUT_MS`, default 24h) so the
+ *    transaction cannot expire mid-run. The tick deadline handed to jobs
+ *    stays separate and unchanged. Jobs run on the GLOBAL prisma client —
+ *    never on the lock transaction — which keeps the wave-6 finding 8
+ *    guarantee (the dedicated pool's single connection serves nothing but
+ *    the lock transaction itself).
  *
  * `pg` (node-postgres) is not part of this app's dependency tree, so the
- * dedicated connection is a per-acquisition PrismaClient instance configured
- * with `connection_limit=1` whose lifetime is owned here (a fresh instance
- * per lock run, `$disconnect`ed in the release path — no idle connections
- * linger between ticks).
+ * dedicated connection is a per-acquisition PrismaClient instance whose
+ * lifetime is owned here (a fresh instance per lock run, `$disconnect`ed in
+ * the release path — no idle connections linger between ticks).
  */
+
+/** Default lifetime for the pinned lock transaction (24h). */
+export const DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Contract the lock connection must fulfil. `tryAdvisoryLock` MUST run
- * `pg_try_advisory_lock` (session-scoped) on a connection that is
- * exclusively ours, and `releaseAdvisoryLock` MUST go to that SAME
- * connection — Postgres session locks are unlocked per session.
+ * Timeout for the pinned lock transaction (`SCHEDULER_LOCK_TX_TIMEOUT_MS`,
+ * default 86400000 = 24h, minimum 60s). It must comfortably exceed the
+ * longest possible scheduler run (`SCHEDULER_TICK_TIMEOUT_MS` + job overrun)
+ * because the scheduler callback is awaited inside the transaction; Prisma
+ * would otherwise abort the transaction — and the lock with it — mid-run.
  */
-export interface SchedulerLockConnection {
-  /**
-   * Attempts to take the session-scoped advisory lock. Resolves `true` when
-   * this session now holds it, `false` when another live session (another
-   * replica, another tick) already holds it.
-   */
-  tryAdvisoryLock(key: number): Promise<boolean>;
-
-  /** Releases the session lock. Must run on the acquiring connection. */
-  releaseAdvisoryLock(key: number): Promise<void>;
-
-  /**
-   * Closes the dedicated connection. Closing the session also drops the lock
-   * server-side (process death is a safe fallback for the same reason).
-   */
-  end(): Promise<void>;
+export function schedulerLockTransactionTimeoutMs(): number {
+  const parsed = Number(process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS);
+  if (Number.isFinite(parsed) && parsed >= 60_000) {
+    return Math.floor(parsed);
+  }
+  if (process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS) {
+    console.warn(
+      `[scheduler-lock] invalid SCHEDULER_LOCK_TX_TIMEOUT_MS "${process.env.SCHEDULER_LOCK_TX_TIMEOUT_MS}", using ${DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS}ms`,
+    );
+  }
+  return DEFAULT_SCHEDULER_LOCK_TX_TIMEOUT_MS;
 }
 
 /**
  * Builds the datasource URL for the dedicated lock client: the app's
- * DATABASE_URL pinned to a single pooled connection so the lock query and the
- * unlock always run on the same physical Postgres session, and so the lock
- * never competes for (or occupies) a connection from the shared global pool.
+ * DATABASE_URL pinned to a single pooled connection. The client's pool serves
+ * nothing but the ONE lock transaction, so pinning a single connection both
+ * prevents the lock from ever occupying a shared-pool connection the jobs
+ * need, and keeps other client activity from landing on the pinned backend.
  */
 export function buildSingleSessionDatabaseUrl(databaseUrl: string): string {
   let url: URL;
@@ -84,10 +117,42 @@ export function buildSingleSessionDatabaseUrl(databaseUrl: string): string {
 }
 
 /**
+ * Contract the lock connection must fulfil: {@linkcode runExclusive} holds
+ * the advisory lock inside ONE interactive transaction on this dedicated
+ * client for the WHOLE callback — the try-lock query runs inside the
+ * transaction, the callback is awaited while the transaction (and backend)
+ * stay open, and the lock is released only when that transaction ends.
+ */
+export interface SchedulerLockConnection {
+  /**
+   * Attempts to take the transaction-scoped advisory lock (`key`) inside one
+   * long-lived interactive transaction and, when acquired, awaits `fn` while
+   * that transaction is open — the lock is therefore pinned to this one
+   * physical session until `fn` settles and the transaction commits.
+   *
+   * Resolves `fn`'s result, or `null` when another live session (another
+   * replica, another tick) already holds the lock — in that case `fn` never
+   * runs and the (empty) transaction ends immediately. The lock is released
+   * in EVERY case: callback settled → commit, callback threw → rollback,
+   * connection/process death → server-side transaction abort. A commit
+   * failure AFTER `fn` settled is logged and the result is still returned
+   * (the work ran, and the transaction abort released the lock server-side).
+   */
+  runExclusive<T>(key: number, fn: () => Promise<T>): Promise<T | null>;
+
+  /**
+   * Closes the dedicated client. Closing kills the physical session; Postgres
+   * releases any transaction still open on it (process death is a safe
+   * fallback for the same reason).
+   */
+  end(): Promise<void>;
+}
+
+/**
  * Creates one dedicated lock connection. The returned object owns exactly ONE
  * Postgres session (its own PrismaClient pool with connection_limit=1) which
- * is used for nothing except the advisory lock/unlock pair — jobs keep
- * running on the global prisma client and can never wait on this connection.
+ * is used for nothing except the pinned lock transaction — jobs keep running
+ * on the global prisma client and can never wait on this connection.
  */
 export function createSchedulerLockConnection(): SchedulerLockConnection {
   const databaseUrl = process.env.DATABASE_URL;
@@ -97,20 +162,67 @@ export function createSchedulerLockConnection(): SchedulerLockConnection {
   const client = new PrismaClient({ datasourceUrl: buildSingleSessionDatabaseUrl(databaseUrl) });
 
   return {
-    async tryAdvisoryLock(key: number): Promise<boolean> {
-      // SESSION-scoped on purpose: survives any transactional churn inside
-      // the run and is only dropped by pg_advisory_unlock on this connection
-      // or by the session closing.
-      const rows = ((await client.$queryRaw(
-        Prisma.sql`SELECT pg_try_advisory_lock(${key}) AS locked`,
-      )) ?? []) as Array<{ locked?: unknown }>;
-      return rows[0]?.locked === true;
-    },
+    async runExclusive<T>(key: number, fn: () => Promise<T>): Promise<T | null> {
+      const txTimeoutMs = schedulerLockTransactionTimeoutMs();
+      // The callback's settled state and result, tracked so a failure raised
+      // while ENDING the transaction (Prisma rejects the $transaction promise
+      // when the COMMIT itself fails) still returns the work's result instead
+      // of discarding it.
+      let callbackResult: T | undefined;
+      let callbackSucceeded = false;
 
-    async releaseAdvisoryLock(key: number): Promise<void> {
-      // Same dedicated client => same single-pool session that acquired the
-      // lock; pg_advisory_unlock is a no-op if the session no longer holds it.
-      await client.$queryRaw(Prisma.sql`SELECT pg_advisory_unlock(${key})`);
+      try {
+        return await client.$transaction(
+          async (tx) => {
+            // Transaction-scoped advisory lock: it is bound to THIS
+            // transaction/backend and releases exactly when the transaction
+            // ends — commit (after `fn` settles), rollback, or connection
+            // death. Because `fn` is awaited inside the SAME transaction
+            // callback, the acquiring backend is pinned (open transaction)
+            // for the whole run: the pool cannot retire it as idle, and a
+            // transaction-pooler keeps the same backend until COMMIT.
+            const rows = ((await tx.$queryRaw(
+              Prisma.sql`SELECT pg_try_advisory_xact_lock(${key}) AS locked`,
+            )) ?? []) as Array<{ locked?: unknown }>;
+            if (rows[0]?.locked !== true) {
+              // Another live session holds the lock. Return immediately: the
+              // (empty) transaction ends — and the shared lock was never
+              // touched by us.
+              return null;
+            }
+
+            // The scheduler callback runs ON THE GLOBAL CLIENT, not on `tx` —
+            // its queries never touch (or wait on) this transaction's
+            // connection. Awaiting it here is exactly what keeps the
+            // transaction (and the xact lock) open until the run settles.
+            const result = await fn();
+            callbackSucceeded = true;
+            callbackResult = result;
+            return result;
+          },
+          {
+            // Far above any sane run length so Prisma never expires the
+            // pinned transaction (and the lock) mid-run.
+            timeout: txTimeoutMs,
+          },
+        );
+      } catch (error) {
+        if (callbackSucceeded) {
+          // `fn` settled fine; the failure came from ENDING the transaction
+          // (e.g. the connection was dropped between the last statement and
+          // COMMIT). The run's work is unaffected (it ran on the global
+          // client), the transaction abort released the lock server-side, and
+          // the caller should still see its result — mirror the old
+          // "unlock failure is logged" contract.
+          console.error(
+            `[scheduler-lock] ending the lock transaction after a settled run failed (lock released by the transaction abort): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return callbackResult as T;
+        }
+        throw error;
+      }
     },
 
     async end(): Promise<void> {
