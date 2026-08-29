@@ -635,6 +635,13 @@ model WebhookDelivery {
   // pending -> processing; expired leases are deliberately recovered back to
   // pending by the scheduler sweep so a crashed worker cannot strand a row.
   leaseExpiresAt DateTime?
+  // Owner token for the exclusive claim: a random value minted on every
+  // pending -> processing transition. Every success/failure/requeue update
+  // must present the SAME token (`where id AND status = processing AND
+  // claimToken = ours`), so a worker whose lease expired and was recovered by
+  // a second worker can never finalize or reschedule the second worker's
+  // claim. Cleared whenever the row leaves `processing`.
+  claimToken     String?
   createdAt      DateTime              @default(now())
   updatedAt      DateTime              @updatedAt
 

@@ -46,6 +46,8 @@ function webhookRowFor(secret: string, overrides: Record<string, unknown> = {}) 
     url: PUBLIC_URL,
     encryptedSecret: encryptSecret(secret),
     isEnabled: true,
+    projectId: "p1",
+    createdByUserId: "creator-1",
     ...overrides,
   };
 }
@@ -57,6 +59,36 @@ interface MockDeliveryRow {
   payload: unknown;
   event: string;
   webhook: Record<string, unknown>;
+}
+
+/**
+ * Stubs `prisma.user.findUnique` for the dispatcher's send-time creator
+ * re-check (`getEffectiveProjectAccess`). Defaults to an enabled manager —
+ * i.e. the creator holds `automation_manage` + `task_read` and deliveries may
+ * go out. Pass overrides to simulate a disabled/demoted creator.
+ */
+function stubCreatorAccess(
+  prisma: ReturnType<typeof createPrismaMock>,
+  user: {
+    disabledAt?: Date | null;
+    role?: string;
+    projectMemberships?: Array<{ role: string }>;
+    grants?: Array<{ permission: string; allowed: boolean }>;
+  } = {},
+) {
+  prisma.user.findUnique.mockImplementation(async (args?: { where?: { id?: string }; select?: Record<string, unknown> }) => {
+    if (args?.select && "projectMemberships" in args.select) {
+      return {
+        id: "creator-1",
+        role: user.role ?? "manager",
+        disabledAt: user.disabledAt ?? null,
+        projectMemberships: user.projectMemberships ?? [{ role: "manager" }],
+        projectPermissionGrants: user.grants ?? [],
+        groupMemberships: [],
+      };
+    }
+    return { id: args?.where?.id ?? "creator-1", name: "Actor One" };
+  });
 }
 
 function pendingDeliveryRow(webhook: Record<string, unknown>, overrides: Partial<MockDeliveryRow> = {}): MockDeliveryRow {
@@ -405,67 +437,140 @@ describe("webhook dispatcher", () => {
     });
   });
 
-  describe("deliverWebhook — exclusive claim (processing state)", () => {
+  describe("deliverWebhook — exclusive, owned claim (processing state)", () => {
     /**
-     * Models the real SQL behind the claim: the transition is
-     * `UPDATE ... SET status='processing' WHERE id=? AND status='pending' AND
-     * next_attempt_at <= now` — exactly one concurrent UPDATE matches, so
-     * exactly one worker proceeds and finalizes.
+     * Models the real SQL behind the claim lifecycle: the claim is
+     * `UPDATE ... SET status='processing', attempts=attempts+1, claim_token=?
+     * WHERE id=? AND status='pending' AND next_attempt_at <= now` and every
+     * finalize/requeue is guarded by the OWNED claim token (`WHERE id AND
+     * status='processing' AND claim_token=?`). Claim predicates are applied
+     * against the live row state — exactly one concurrent UPDATE matches, so
+     * exactly one worker proceeds, and only the token owner finalizes.
      */
     function exclusiveDeliveryStore() {
-      const row = { status: "pending" as string, attempts: 0 };
+      const row = {
+        id: "delivery-1",
+        status: "pending" as string,
+        attempts: 0,
+        claimToken: null as string | null,
+        leaseExpiresAt: null as Date | null,
+        nextAttemptAt: new Date(0),
+        responseCode: null as number | null,
+        lastError: null as string | null,
+      };
       const updateMany = vi.fn(
         async (args: {
-          where: { id?: string; status?: string };
-          data: { status?: string; attempts?: { increment?: number } | number };
+          where: {
+            id?: string;
+            status?: string;
+            claimToken?: string;
+            nextAttemptAt?: { lte?: Date };
+            leaseExpiresAt?: { lte?: Date };
+            OR?: Array<Record<string, unknown>>;
+          };
+          data: {
+            status?: string;
+            attempts?: { increment?: number } | { set?: number };
+            claimToken?: string | null;
+            leaseExpiresAt?: Date | null;
+            nextAttemptAt?: Date;
+            responseCode?: number | null;
+            lastError?: string | null;
+          };
         }) => {
-          const claimedFrom = args.where.status;
-          const transitionTo = typeof args.data.status === "string" ? args.data.status : undefined;
+          const where = args.where ?? {};
+          const data = args.data ?? {};
 
-          if (claimedFrom === "pending" && transitionTo === "processing") {
-            if (row.status !== "pending") {
+          if (where.id && where.id !== row.id) {
+            return { count: 0 };
+          }
+          if (where.status !== undefined && where.status !== row.status) {
+            return { count: 0 };
+          }
+          if (where.claimToken !== undefined && where.claimToken !== row.claimToken) {
+            return { count: 0 };
+          }
+          if (where.nextAttemptAt?.lte && !(row.nextAttemptAt <= where.nextAttemptAt.lte)) {
+            return { count: 0 };
+          }
+          if (where.leaseExpiresAt?.lte && !(row.leaseExpiresAt && row.leaseExpiresAt <= where.leaseExpiresAt.lte)) {
+            return { count: 0 };
+          }
+          if (where.OR) {
+            const matches = where.OR.some((branch) => {
+              const b = branch as { status?: unknown; leaseExpiresAt?: unknown; OR?: Array<{ leaseExpiresAt?: unknown }> };
+              if (typeof b.status === "string" && b.status !== row.status) {
+                return false;
+              }
+              if (b.OR?.length) {
+                return b.OR.some((sub) => {
+                  if ("leaseExpiresAt" in sub && sub.leaseExpiresAt === null) {
+                    return row.leaseExpiresAt === null;
+                  }
+                  if (sub.leaseExpiresAt && typeof sub.leaseExpiresAt === "object" && "lte" in sub.leaseExpiresAt) {
+                    return row.leaseExpiresAt !== null && row.leaseExpiresAt <= (sub.leaseExpiresAt as { lte: Date }).lte;
+                  }
+                  return false;
+                });
+              }
+              return true;
+            });
+            if (!matches) {
               return { count: 0 };
             }
-            row.status = "processing";
-            const increment = typeof args.data.attempts === "object" && args.data.attempts !== null
-              ? (args.data.attempts.increment ?? 0)
-              : 0;
-            row.attempts += increment;
-            return { count: 1 };
           }
 
-          if (claimedFrom === "pending" && transitionTo === undefined) {
-            // Pre-fix behavior (the mutation we prove against): the claim only
-            // bumps attempts and LEAVES status pending, so a second concurrent
-            // updateMany with the same {id, status:"pending"} predicate matches
-            // too — both workers believe they own the row and both POST.
-            row.attempts += 1;
-            return { count: 1 };
+          if (typeof data.status === "string") {
+            row.status = data.status;
           }
-
-          if (claimedFrom === "processing") {
-            if (row.status !== "processing") {
-              return { count: 0 };
+          if (data.attempts && typeof data.attempts === "object") {
+            if ("increment" in data.attempts && data.attempts.increment) {
+              row.attempts += data.attempts.increment;
             }
-            if (transitionTo) {
-              row.status = transitionTo;
+            if ("set" in data.attempts && data.attempts.set !== undefined) {
+              row.attempts = data.attempts.set;
             }
-            return { count: 1 };
           }
-
-          return { count: 0 };
+          if ("claimToken" in data) {
+            row.claimToken = data.claimToken ?? null;
+          }
+          if ("leaseExpiresAt" in data) {
+            row.leaseExpiresAt = data.leaseExpiresAt ?? null;
+          }
+          if (data.nextAttemptAt) {
+            row.nextAttemptAt = data.nextAttemptAt;
+          }
+          if ("responseCode" in data) {
+            row.responseCode = data.responseCode ?? null;
+          }
+          if ("lastError" in data) {
+            row.lastError = data.lastError ?? null;
+          }
+          return { count: 1 };
         },
       );
       return { row, updateMany };
     }
 
+    function wireStatefulDelivery(
+      prisma: ReturnType<typeof createPrismaMock>,
+      store: ReturnType<typeof exclusiveDeliveryStore>,
+      secret = "whsec_test_secret",
+    ) {
+      prisma.webhookDelivery.updateMany.mockImplementation(store.updateMany as never);
+      prisma.webhookDelivery.findUnique.mockImplementation(async () => ({
+        ...store.row,
+        event: "task.created",
+        payload: {},
+        webhook: webhookRowFor(secret),
+      }));
+    }
+
     it("two concurrent claims: exactly one wins and POSTs, the loser skips without fetching", async () => {
       const prisma = createPrismaMock();
       const store = exclusiveDeliveryStore();
-      prisma.webhookDelivery.updateMany.mockImplementation(store.updateMany as never);
-      prisma.webhookDelivery.findUnique.mockImplementation(async () =>
-        pendingDeliveryRow(webhookRowFor("whsec_test_secret"), { attempts: 0 }),
-      );
+      wireStatefulDelivery(prisma, store);
+      stubCreatorAccess(prisma);
 
       const { transport, requests } = recordingTransport();
 
@@ -482,15 +587,19 @@ describe("webhook dispatcher", () => {
 
       // Exactly one POST happened — no double-delivery.
       expect(requests).toHaveLength(1);
-      // The claim consumed exactly one attempt and the row finalized as success.
-      expect(store.row).toEqual({ status: "success", attempts: 1 });
+      // The claim consumed exactly one attempt, minted an owner token, and the
+      // row finalized as success.
+      expect(store.row.status).toBe("success");
+      expect(store.row.attempts).toBe(1);
+      expect(store.row.claimToken).toBeTypeOf("string");
     });
 
-    it("claims with the atomic processing predicate (pending + due) and a lease, not just attempts++", async () => {
+    it("claims with the atomic processing predicate (pending + due), a lease, and a fresh claim token", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
       prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+      stubCreatorAccess(prisma);
       const { transport } = recordingTransport();
 
       await deliverWebhook(prisma as never, "delivery-1", { now, transport });
@@ -503,13 +612,20 @@ describe("webhook dispatcher", () => {
       expect(claimCall.data.status).toBe("processing");
       expect(claimCall.data.attempts).toEqual({ increment: 1 });
       expect(claimCall.data.leaseExpiresAt).toEqual(new Date(now.getTime() + 300_000));
+      // The claim stamps the OWNER token used by every later update.
+      expect(claimCall.data.claimToken).toEqual(expect.any(String));
 
-      // Success finalization guards on the processing state, not on pending.
+      // Success finalization guards on the processing state AND the claim's
+      // own token, not just on pending.
       const finalizeCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
         where: Record<string, unknown>;
         data: Record<string, unknown>;
       };
-      expect(finalizeCall.where).toEqual({ id: "delivery-1", status: "processing" });
+      expect(finalizeCall.where).toEqual({
+        id: "delivery-1",
+        status: "processing",
+        claimToken: claimCall.data.claimToken,
+      });
       expect(finalizeCall.data.leaseExpiresAt).toBeNull();
     });
   });
@@ -521,6 +637,7 @@ describe("webhook dispatcher", () => {
       const payload = { event: "task.created", occurredAt: now.toISOString(), task: { id: "t1" } };
 
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(webhookRowFor(secret), { payload }),
@@ -554,6 +671,7 @@ describe("webhook dispatcher", () => {
     it("refuses a delivery whose URL now resolves to a private address, without sending (mutation-provable)", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(webhookRowFor("whsec_x", { url: "http://127.0.0.1:9000/hook" })),
@@ -569,14 +687,24 @@ describe("webhook dispatcher", () => {
       expect(result.error).toMatch(/private, loopback, or link-local/);
 
       const failureCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
+        where: Record<string, unknown>;
         data: Record<string, unknown>;
       };
       expect(failureCall.data.nextAttemptAt).toEqual(new Date(now.getTime() + WEBHOOK_RETRY_DELAYS_MS[0]));
+      // A non-exhausted failure hands the OWNED claim back to pending so the
+      // sweep re-delivers (the row must never stay processing).
+      expect(failureCall.data.status).toBe("pending");
+      expect(failureCall.where).toEqual({
+        id: "delivery-1",
+        status: "processing",
+        claimToken: expect.any(String),
+      });
     });
 
     it("refuses a hostname whose resolved answers include ANY private record (all A/AAAA validated)", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(webhookRowFor("whsec_x", { url: "http://mixed.attacker.example:8080/hook" })),
@@ -604,6 +732,7 @@ describe("webhook dispatcher", () => {
       const PUBLIC_IP = "93.184.216.34";
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(webhookRowFor("whsec_x", { url: `http://${REBIND_HOST}:8080/hook` })),
@@ -651,6 +780,7 @@ describe("webhook dispatcher", () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const secret = "whsec_test_secret";
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(webhookRowFor(secret, { url: "http://127.0.0.1:9000/hook" })),
@@ -668,6 +798,7 @@ describe("webhook dispatcher", () => {
     it("marks a 3xx redirect response as a failure (redirects are never followed)", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(pendingDeliveryRow(webhookRowFor("whsec_x")));
 
@@ -684,6 +815,7 @@ describe("webhook dispatcher", () => {
     it("finalizes as failed when the secret can no longer be decrypted (post-rotation, capped)", async () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockResolvedValue(
         pendingDeliveryRow(
@@ -711,7 +843,7 @@ describe("webhook dispatcher", () => {
         where: Record<string, unknown>;
         data: Record<string, unknown>;
       };
-      expect(failureCall.where).toEqual({ id: "delivery-1", status: "processing" });
+      expect(failureCall.where).toEqual({ id: "delivery-1", status: "processing", claimToken: expect.any(String) });
       expect(failureCall.data.status).toBe("failed");
       expect(failureCall.data.attempts).toEqual({ set: WEBHOOK_MAX_ATTEMPTS });
       // No further retry is scheduled: the row stops churning at the cap.
@@ -724,6 +856,7 @@ describe("webhook dispatcher", () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const secret = "whsec_test_secret";
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
 
       const { transport, requests } = recordingTransport(() => ({ status: 500, error: null }));
@@ -735,6 +868,7 @@ describe("webhook dispatcher", () => {
 
         const result = await deliverWebhook(prisma as never, "delivery-1", { now, transport });
         const failureCall = prisma.webhookDelivery.updateMany.mock.calls.at(-1)?.[0] as {
+          where: Record<string, unknown>;
           data: Record<string, unknown>;
         };
         const attempts = attemptIndex + 1;
@@ -745,7 +879,14 @@ describe("webhook dispatcher", () => {
           expect(failureCall.data.nextAttemptAt).toEqual(now);
         } else {
           expect(result.status).toBe("pending");
-          expect(failureCall.data.status).toBeUndefined();
+          // Non-exhausted failures RE-QUEUE the owned claim as pending so the
+          // sweep picks it up (never stuck in processing).
+          expect(failureCall.data.status).toBe("pending");
+          expect(failureCall.where).toEqual({
+            id: "delivery-1",
+            status: "processing",
+            claimToken: expect.any(String),
+          });
           const expectedDelay = WEBHOOK_RETRY_DELAYS_MS[attempts - 1];
           expect(failureCall.data.nextAttemptAt).toEqual(new Date(now.getTime() + expectedDelay));
         }
@@ -763,6 +904,7 @@ describe("webhook dispatcher", () => {
       const now = new Date("2026-01-01T00:00:00.000Z");
       const secret = "whsec_test_secret";
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.findMany.mockResolvedValue([{ id: "d1" }, { id: "d2" }]);
       prisma.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
       prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) =>
@@ -779,7 +921,7 @@ describe("webhook dispatcher", () => {
         data: Record<string, unknown>;
       };
       expect(recoveryCall.where).toEqual({ status: "processing", leaseExpiresAt: { lte: now } });
-      expect(recoveryCall.data).toEqual({ status: "pending", nextAttemptAt: now, leaseExpiresAt: null });
+      expect(recoveryCall.data).toEqual({ status: "pending", nextAttemptAt: now, leaseExpiresAt: null, claimToken: null });
 
       expect(prisma.webhookDelivery.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -797,6 +939,7 @@ describe("webhook dispatcher", () => {
 
     it("keeps sweeping even when deliverWebhook throws for one row", async () => {
       const prisma = createPrismaMock();
+      stubCreatorAccess(prisma);
       prisma.webhookDelivery.findMany.mockResolvedValue([{ id: "d1" }, { id: "d2" }]);
       prisma.webhookDelivery.findUnique.mockImplementation(async (args: { where: { id: string } }) => {
         if (args.where.id === "d1") {

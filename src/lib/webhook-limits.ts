@@ -9,11 +9,32 @@ export const DEFAULT_WEBHOOK_MAX_WEBHOOKS_PER_PROJECT = 20;
 /** Cap on concurrent outbound webhook POSTs across the process (worker/queue width). */
 export const DEFAULT_WEBHOOK_DELIVERY_CONCURRENCY = 5;
 
-/**
- * How long a delivery row may stay `processing` (the exclusive claim lease)
- * before a deliberately scheduled recovery pass hands it back to `pending`.
- */
+/** How long a delivery row may stay `processing` by default (the exclusive claim lease). */
 export const DEFAULT_WEBHOOK_DELIVERY_LEASE_MS = 300_000;
+
+/**
+ * Outbound POST timeout: one bounded request attempt
+ * (`WEBHOOK_TIMEOUT_MS`, clamped to 1s-120s). Lives here (not in the
+ * dispatcher) so the claim-lease floor can be derived from it without a
+ * circular import.
+ */
+export const DEFAULT_WEBHOOK_TIMEOUT_MS = 10_000;
+
+/**
+ * Wall-time budget for send-time URL revalidation + DNS pinning (the
+ * "preflight" before the POST). DNS answers can hang; the deadline keeps
+ * preflight strictly bounded so it can never outlive the claim lease.
+ */
+export const DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS = 15_000;
+
+/**
+ * Depth cap for the in-process outbound delivery queue. When the queue is
+ * full, new deliveries are NOT enqueued inline — their durable `pending`
+ * rows are still picked up by the scheduler sweep, so nothing is lost; only
+ * the immediate in-process attempt is dropped (explicit backpressure instead
+ * of unbounded memory growth).
+ */
+export const DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH = 200;
 
 /**
  * Largest upstream response body the dispatcher is willing to drain. Webhook
@@ -45,7 +66,51 @@ export function webhookDeliveryConcurrency(): number {
   return envInt("WEBHOOK_DELIVERY_CONCURRENCY", DEFAULT_WEBHOOK_DELIVERY_CONCURRENCY, 1, 50);
 }
 
-/** Claim-lease window for `processing` deliveries (`WEBHOOK_DELIVERY_LEASE_MS`, clamped to 1s-1h). */
+/** Outbound POST timeout (`WEBHOOK_TIMEOUT_MS`, clamped to 1s-120s). */
+export function webhookRequestTimeoutMs(): number {
+  return envInt("WEBHOOK_TIMEOUT_MS", DEFAULT_WEBHOOK_TIMEOUT_MS, 1_000, 120_000);
+}
+
+/** DNS/URL-validation budget for one send-time preflight (`WEBHOOK_PREFLIGHT_BUDGET_MS`, clamped to 1s-60s). */
+export function webhookPreflightBudgetMs(): number {
+  return envInt("WEBHOOK_PREFLIGHT_BUDGET_MS", DEFAULT_WEBHOOK_PREFLIGHT_BUDGET_MS, 1_000, 60_000);
+}
+
+/** Depth cap for the in-process outbound delivery queue (`WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH`, clamped to 1-100000). */
+export function webhookDeliveryQueueMaxDepth(): number {
+  return envInt("WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH", DEFAULT_WEBHOOK_DELIVERY_QUEUE_MAX_DEPTH, 1, 100_000);
+}
+
+/** Outbound timeout constant moved next to the derived lease floor (see dispatcher re-export). */
+export const WEBHOOK_TIMEOUT_MS = DEFAULT_WEBHOOK_TIMEOUT_MS;
+
+/**
+ * Hard floor for the claim lease: it must outlive the worst case of one send
+ * cycle — send-time URL validation + DNS (preflight budget) plus one full
+ * bounded POST (`WEBHOOK_TIMEOUT_MS`). A lease below this could expire while
+ * the claiming worker is still mid-request, letting another worker re-claim
+ * a delivery that is still in flight.
+ */
+export function webhookDeliveryLeaseFloorMs(): number {
+  return webhookPreflightBudgetMs() + webhookRequestTimeoutMs();
+}
+
+/**
+ * Claim-lease window for `processing` deliveries (`WEBHOOK_DELIVERY_LEASE_MS`,
+ * clamped to 1s-1h) — never below the preflight + request-time floor above,
+ * regardless of (too small) configuration.
+ */
 export function webhookDeliveryLeaseMs(): number {
-  return envInt("WEBHOOK_DELIVERY_LEASE_MS", DEFAULT_WEBHOOK_DELIVERY_LEASE_MS, 1_000, 3_600_000);
+  const configured = envInt("WEBHOOK_DELIVERY_LEASE_MS", DEFAULT_WEBHOOK_DELIVERY_LEASE_MS, 1_000, 3_600_000);
+  return Math.max(configured, webhookDeliveryLeaseFloorMs());
+}
+
+/**
+ * Wall-time budget for the send-time preflight (URL validation + DNS pinning)
+ * inside a single delivery attempt. It is capped so that one attempt's DNS
+ * work can never outlive the claim lease: preflight budget + POST timeout
+ * <= claimed lease. (`WEBHOOK_PREFLIGHT_BUDGET_MS`.)
+ */
+export function webhookDeliveryPreflightDeadlineMs(): number {
+  return Math.max(1_000, Math.min(webhookPreflightBudgetMs(), webhookDeliveryLeaseMs() - webhookRequestTimeoutMs()));
 }
