@@ -48,11 +48,18 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   // citadel-d77.17: description preview toggle (Textarea <-> Markdown).
   const [previewingBody, setPreviewingBody] = useState(false);
+  // CITADEL-d77.32 (smart quick-add): "Describe it…" AI parsing mode.
+  const [aiMode, setAiMode] = useState(false);
+  const [aiText, setAiText] = useState("");
+  const [aiUnresolved, setAiUnresolved] = useState<string[]>([]);
   const titleRef = useRef<HTMLInputElement>(null);
   const utils = trpc.useUtils();
   const { data: people } = trpc.project.people.useQuery({ projectId });
   const { data: templates } = trpc.project.templates.useQuery({ projectId });
   const { data: customFields } = trpc.customField.list.useQuery({ projectId });
+  // CITADEL-d77.32: hide the AI entry point when the project has no usable provider.
+  const { data: aiAvailability } = trpc.ai.hasUsableProvider.useQuery({ projectId });
+  const aiAvailable = aiAvailability?.hasUsableProvider === true;
 
   const today = new Date().toISOString().split("T")[0];
 
@@ -70,6 +77,10 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     setSaveAsTemplate(false);
     setTemplateName("");
     setSubmitError(null);
+    // CITADEL-d77.32: reset the AI describe-it mode with the rest of the form.
+    setAiMode(false);
+    setAiText("");
+    setAiUnresolved([]);
   }, [statuses, today]);
 
   const createTask = trpc.task.create.useMutation({
@@ -91,6 +102,13 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     },
     onError: (error) => {
       setSubmitError(error.message || "Unable to save template.");
+    },
+  });
+
+  // CITADEL-d77.32: smart quick-add parse mutation (draft only — no writes).
+  const parseTask = trpc.ai.parseTask.useMutation({
+    onError: (error) => {
+      setSubmitError(error.message || "AI drafting failed.");
     },
   });
 
@@ -167,6 +185,32 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     );
   }
 
+  // CITADEL-d77.32: run the AI parse and prefill the normal form for review.
+  // Nothing is created automatically — the user still presses Create Task.
+  function handleAiDraft() {
+    const text = aiText.trim();
+    if (!text) return;
+    parseTask.mutate(
+      { projectId, text },
+      {
+        onSuccess: (result) => {
+          const draft = result.draft;
+          setTitle(draft.title);
+          setBody(draft.body ?? "");
+          setDueDate(draft.dueDate ? draft.dueDate.slice(0, 10) : today);
+          setPriority(draft.priority ?? "none");
+          setSelectedAssigneeId(draft.assigneeId ?? "");
+          setSelectedTagIds(draft.tagIds ?? []);
+          setSelectedStatusId(draft.statusId ?? statuses[0]?.id ?? "");
+          setAiUnresolved(result.unresolved);
+          setAiMode(false);
+          setAiText("");
+          setTimeout(() => titleRef.current?.focus(), 50);
+        },
+      }
+    );
+  }
+
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const trimmedTitle = title.trim();
@@ -238,16 +282,75 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
           </Alert>
         )}
         <form onSubmit={handleSubmit} className="space-y-4">
-          <Input
-            ref={titleRef}
-            name="title"
-            placeholder="Task title..."
-            required
-            maxLength={200}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-          />
+          {/* CITADEL-d77.32: AI toggle next to the title + describe-it textarea */}
+          <div className="flex items-center gap-2">
+            <Input
+              ref={titleRef}
+              name="title"
+              placeholder="Task title..."
+              required
+              maxLength={200}
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              className="min-w-0 flex-1"
+            />
+            {aiAvailable && (
+              <Button
+                type="button"
+                variant={aiMode ? "secondary" : "outline"}
+                aria-pressed={aiMode}
+                title="Describe the task in plain language and let AI draft it"
+                onClick={() => {
+                  setSubmitError(null);
+                  setAiMode((current) => !current);
+                }}
+              >
+                ✦ AI
+              </Button>
+            )}
+          </div>
 
+          {aiMode && (
+            <div className="space-y-2">
+              <Textarea
+                rows={3}
+                aria-label="Describe the task for AI"
+                placeholder="Describe it… e.g. Fix login bug by Friday, high, @ada #backend"
+                value={aiText}
+                onChange={(event) => setAiText(event.target.value)}
+                autoFocus
+              />
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setAiMode(false);
+                    setAiText("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={parseTask.isPending || !aiText.trim()}
+                  onClick={handleAiDraft}
+                >
+                  {parseTask.isPending ? "Drafting..." : "Draft with AI"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* CITADEL-d77.32: unresolved AI hints shown while reviewing the draft */}
+          {!aiMode && aiUnresolved.length > 0 && (
+            <Alert variant="info">
+              AI skipped details it could not match in this project: {aiUnresolved.join(" · ")}. Adjust the fields below if needed.
+            </Alert>
+          )}
+
+          {!aiMode && (
+            <>
           {(templates as ProjectTaskTemplate[] | undefined)?.length ? (
             <div>
               <label className="mb-1 block text-xs font-medium" style={{ color: "var(--color-text-secondary)" }}>
@@ -460,6 +563,8 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
               />
             )}
           </div>
+              </>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <Button

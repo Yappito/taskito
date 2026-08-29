@@ -424,6 +424,8 @@ model Task {
   alertAcknowledged Boolean @default(false)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
+  // CITADEL-d77.32: cached AI task summary — { generatedAt, forUpdatedAt, forLatestCommentAt, result }
+  aiSummary   Json?
 
   project          Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
   creator          User?              @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: SetNull)
