@@ -30,7 +30,21 @@ export interface DigestEmailInput {
   dueToday: DigestTask[];
   dueSoon: DigestTask[];
   blockedOn: DigestTask[];
+  /** Tasks deliberately omitted while constructing an already-capped bucket. */
+  overdueMore?: number;
+  dueTodayMore?: number;
+  dueSoonMore?: number;
+  blockedOnMore?: number;
 }
+
+/**
+ * Digest hardening (bounded output): every section lists at most this many
+ * tasks and then a "+N more" line; the fully rendered text/html bodies are
+ * additionally truncated to DIGEST_MAX_BODY_CHARS so a pathological mailbox
+ * can never produce an unbounded email.
+ */
+export const DIGEST_MAX_TASKS_PER_SECTION = 50;
+export const DIGEST_MAX_BODY_CHARS = 64_000;
 
 /** Public base URL of the app (AUTH_URL), without a trailing slash. */
 export function appBaseUrl(baseUrl?: string | null): string {
@@ -120,15 +134,57 @@ function digestHtmlRow(task: DigestTask, baseUrl: string | null | undefined): st
     `<span style="color:#667085">- ${escapeHtml(task.projectName)}, due ${escapeHtml(task.dueDate)}</span></li>`;
 }
 
+function digestHtmlMoreRow(title: string, hidden: number): string {
+  return `<li style="margin:0 0 6px;color:#667085">… and ${hidden} more ${escapeHtml(title.toLowerCase())} task${hidden === 1 ? "" : "s"} (see Taskito)</li>`;
+}
+
+const TRUNCATION_SUFFIX_TEXT = "\n… (digest truncated)";
+const TRUNCATION_SUFFIX_HTML = "<!-- digest truncated --></div>";
+
+function truncateText(value: string): string {
+  if (value.length <= DIGEST_MAX_BODY_CHARS) return value;
+  const cut = safeCut(value, DIGEST_MAX_BODY_CHARS - TRUNCATION_SUFFIX_TEXT.length);
+  return cut + TRUNCATION_SUFFIX_TEXT;
+}
+
+function truncateHtml(value: string): string {
+  if (value.length <= DIGEST_MAX_BODY_CHARS) return value;
+  const cut = safeCut(value, DIGEST_MAX_BODY_CHARS - TRUNCATION_SUFFIX_HTML.length);
+  // A hard cut can break mid-tag; the comment + close keeps it bounded and
+  // marks the truncation point explicitly.
+  return cut + TRUNCATION_SUFFIX_HTML;
+}
+
+function safeCut(value: string, max: number): string {
+  const cut = value.slice(0, Math.max(0, max));
+  // Never split a UTF-16 surrogate pair at the boundary.
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    return cut.slice(0, -1);
+  }
+  return cut;
+}
+
 /** Render the daily due-soon digest email (subject, text, html). */
 export function renderDigestEmail(input: DigestEmailInput, baseUrl?: string | null): RenderedEmail {
-  const sections: Array<{ title: string; tasks: DigestTask[] }> = [
-    { title: "Overdue", tasks: input.overdue },
-    { title: "Due today", tasks: input.dueToday },
-    { title: "Due soon", tasks: input.dueSoon },
-    { title: "Blocked on you", tasks: input.blockedOn },
+  const sections: Array<{ title: string; tasks: DigestTask[]; more: number }> = [
+    { title: "Overdue", tasks: input.overdue, more: input.overdueMore ?? 0 },
+    { title: "Due today", tasks: input.dueToday, more: input.dueTodayMore ?? 0 },
+    { title: "Due soon", tasks: input.dueSoon, more: input.dueSoonMore ?? 0 },
+    { title: "Blocked on you", tasks: input.blockedOn, more: input.blockedOnMore ?? 0 },
   ];
-  const active = sections.filter((section) => section.tasks.length > 0);
+  const active = sections
+    .map((section) => {
+      const shown = section.tasks.slice(0, DIGEST_MAX_TASKS_PER_SECTION);
+      return {
+        title: section.title,
+        tasks: shown,
+        hidden: Math.max(0, section.more) + section.tasks.length - shown.length,
+      };
+    })
+    .filter((section) => section.tasks.length > 0 || section.hidden > 0);
+  // The subject counts exactly what the body lists (+ the "+N more" caps are
+  // mentioned inline), keeping the header consistent and bounded.
   const total = active.reduce((sum, section) => sum + section.tasks.length, 0);
   const subjectDate = new Date().toISOString().slice(0, 10);
 
@@ -143,11 +199,16 @@ export function renderDigestEmail(input: DigestEmailInput, baseUrl?: string | nu
     for (const task of section.tasks) {
       textParts.push(`  - ${digestTextRow(task, baseUrl)}`);
     }
+    const hidden = section.hidden;
+    if (hidden > 0) {
+      textParts.push(`  - … and ${hidden} more ${section.title.toLowerCase()} task${hidden === 1 ? "" : "s"} (see Taskito)`);
+    }
     textParts.push("");
     htmlParts.push(
       `<p style="margin:12px 0 4px"><strong>${escapeHtml(section.title)}</strong></p>`,
       `<ul style="margin:0;padding-left:18px">`,
       ...section.tasks.map((task) => digestHtmlRow(task, baseUrl)),
+      ...(hidden > 0 ? [digestHtmlMoreRow(section.title, hidden)] : []),
       `</ul>`
     );
   }
@@ -155,7 +216,7 @@ export function renderDigestEmail(input: DigestEmailInput, baseUrl?: string | nu
 
   return {
     subject: `[Taskito] You have ${total} task${total === 1 ? "" : "s"} due or blocked (digest for ${subjectDate})`,
-    text: textParts.join("\n"),
-    html: htmlParts.join("\n"),
+    text: truncateText(textParts.join("\n")),
+    html: truncateHtml(htmlParts.join("\n")),
   };
 }

@@ -36,6 +36,8 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_TLS_REJECT_UNAUTHORIZED=${SMTP_TLS_REJECT_UNAUTHORIZED:-true}
       - SMTP_ALLOW_INSECURE_AUTH=${SMTP_ALLOW_INSECURE_AUTH:-false}
+      - SMTP_CONNECT_TIMEOUT_MS=${SMTP_CONNECT_TIMEOUT_MS:-10000}
+      - SMTP_MESSAGE_TIMEOUT_MS=${SMTP_MESSAGE_TIMEOUT_MS:-60000}
     depends_on:
       postgres:
         condition: service_healthy

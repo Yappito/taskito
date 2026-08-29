@@ -1,8 +1,9 @@
 import { Prisma, type NotificationType } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { canAccessTask } from "@/server/authz";
 import { DEFAULT_EMAIL_CHANNEL } from "@/lib/notification-preferences";
-import { isEmailConfigured, queueEmail } from "@/server/services/email/smtp-client";
+import { isEmailConfigured, InvalidEmailAddressError, queueEmail } from "@/server/services/email/smtp-client";
 import { appBaseUrl, renderNotificationEmail } from "@/server/services/email/templates";
 
 interface CreateNotificationInput {
@@ -64,11 +65,15 @@ async function deliverNotificationEmail(input: CreateNotificationInput): Promise
     return;
   }
 
-  const user = await prisma.user.findUnique({
-    where: { id: input.recipientId },
-    select: { id: true, name: true, email: true, settings: true },
+  // Re-read the recipient at delivery time and require it to still be
+  // enabled. A notification/watch row can outlive an account disablement.
+  const user = await prisma.user.findFirst({
+    where: { id: input.recipientId, disabledAt: null },
+    select: { id: true, name: true, email: true, settings: true, disabledAt: true },
   });
-  if (!user?.email) {
+  // M7: disabled users never receive task content by email, even when they
+  // are still watchers.
+  if (!user?.email || user.disabledAt) {
     return;
   }
 
@@ -78,10 +83,6 @@ async function deliverNotificationEmail(input: CreateNotificationInput): Promise
     return;
   }
 
-  const actor = input.actorId
-    ? await prisma.user.findUnique({ where: { id: input.actorId }, select: { name: true } })
-    : null;
-
   const task = input.taskId
     ? await prisma.task.findUnique({
         where: { id: input.taskId },
@@ -89,9 +90,36 @@ async function deliverNotificationEmail(input: CreateNotificationInput): Promise
           id: true,
           title: true,
           taskNumber: true,
+          projectId: true,
           project: { select: { name: true, slug: true, key: true } },
         },
       })
+    : null;
+  if (input.taskId && !task) {
+    return;
+  }
+
+  // M7: re-verify CURRENT read access immediately before rendering/queueing —
+  // a recipient removed from the project (but still a watcher) learns task
+  // titles from emails otherwise. Failures skip silently (debug log only).
+  if (task) {
+    try {
+      if (!(await canAccessTask(prisma, input.recipientId, task.id))) {
+        console.debug(
+          `[email] notification email skipped for user ${user.id}: recipient no longer has access to the task`
+        );
+        return;
+      }
+    } catch {
+      // Delivery is best-effort. A failed access re-check must not turn into
+      // an email whose authorization we could not establish.
+      console.debug(`[email] notification email skipped for user ${user.id}: task access could not be re-checked`);
+      return;
+    }
+  }
+
+  const actor = input.actorId
+    ? await prisma.user.findUnique({ where: { id: input.actorId }, select: { name: true } })
     : null;
 
   const email = renderNotificationEmail({
@@ -104,15 +132,23 @@ async function deliverNotificationEmail(input: CreateNotificationInput): Promise
     taskId: task?.id,
   }, appBaseUrl(process.env.AUTH_URL));
 
-  const outcome = queueEmail({
-    to: user.email,
-    toName: user.name,
-    subject: email.subject,
-    text: email.text,
-    html: email.html,
-  });
-  if (outcome === "dropped") {
-    console.warn(`[email] notification email for user ${user.id} dropped (queue full)`);
+  try {
+    const outcome = queueEmail({
+      to: user.email,
+      toName: user.name,
+      subject: email.subject,
+      text: email.text,
+      html: email.html,
+    });
+    if (outcome === "dropped") {
+      console.warn(`[email] notification email for user ${user.id} dropped (queue full)`);
+    }
+  } catch (error) {
+    // Invalid/injection-shaped recipient addresses are typed rejections from
+    // the smtp client; skip quietly (the in-app notification already exists).
+    if (!(error instanceof InvalidEmailAddressError)) {
+      throw error;
+    }
   }
 }
 

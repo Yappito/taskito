@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   appBaseUrl,
+  DIGEST_MAX_BODY_CHARS,
+  DIGEST_MAX_TASKS_PER_SECTION,
   escapeHtml,
   renderDigestEmail,
   renderNotificationEmail,
@@ -110,5 +112,29 @@ describe("digest template", () => {
     }, "https://x.test");
     expect(email.html).toContain("&lt;b&gt;t&lt;/b&gt;");
     expect(email.html).not.toContain("<b>t</b>");
+  });
+
+  it("caps sections with a +N-more line and bounds pathological rendered bodies", () => {
+    const email = renderDigestEmail({
+      overdue: Array.from({ length: DIGEST_MAX_TASKS_PER_SECTION + 5 }, (_, index) => task(index + 1)),
+      dueToday: [],
+      dueSoon: [],
+      blockedOn: [],
+    }, "https://x.test");
+
+    expect(email.text).toContain("PROJ-50 Task 50");
+    expect(email.text).not.toContain("PROJ-51 Task 51");
+    expect(email.text).toContain("… and 5 more overdue tasks");
+
+    const enormous = "x".repeat(DIGEST_MAX_BODY_CHARS);
+    const bounded = renderDigestEmail({
+      overdue: Array.from({ length: DIGEST_MAX_TASKS_PER_SECTION }, (_, index) => ({ ...task(index + 1), title: enormous })),
+      dueToday: [],
+      dueSoon: [],
+      blockedOn: [],
+    });
+    expect(bounded.text.length).toBeLessThanOrEqual(DIGEST_MAX_BODY_CHARS);
+    expect(bounded.html.length).toBeLessThanOrEqual(DIGEST_MAX_BODY_CHARS);
+    expect(bounded.text).toContain("digest truncated");
   });
 });

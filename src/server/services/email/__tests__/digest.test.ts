@@ -37,6 +37,7 @@ import {
   runDailyDigestJob,
   sendDueSoonDigests,
 } from "../digest";
+import { DIGEST_MAX_TASKS_PER_SECTION } from "../templates";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-08-29T10:30:00.000Z");
@@ -135,6 +136,23 @@ describe("buildDueSoonDigest", () => {
 
     const digest = await buildDueSoonDigest(prisma as never, "u1", NOW);
     expect(digest?.dueSoon.map((task) => task.taskId)).toEqual(["t6"]);
+  });
+
+  it("caps each collected digest bucket and retains a +N-more count for rendering", async () => {
+    const overdueRows = Array.from({ length: DIGEST_MAX_TASKS_PER_SECTION + 25 }, (_, index) =>
+      taskRow({ id: `overdue-${index}`, taskNumber: index + 1, dueDate: isoDay(-1) })
+    );
+    const prisma = makePrisma({
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [overdueRows, []],
+    });
+
+    const digest = await buildDueSoonDigest(prisma as never, "u1", NOW);
+
+    expect(digest?.overdue).toHaveLength(DIGEST_MAX_TASKS_PER_SECTION);
+    expect(digest?.overdueMore).toBe(25);
+    expect(digest?.dueToday).toHaveLength(0);
   });
 
   it("returns null when the user has nothing to report", async () => {
@@ -362,5 +380,18 @@ describe("runDailyDigestJob", () => {
     const result = await runDailyDigestJob(NOW);
     expect(result).toEqual({ sent: 0, skipped: 0 });
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not mark the UTC day complete when a run throws, so its next tick retries", async () => {
+    const failedPrisma = makePrisma({});
+    failedPrisma.user.findMany.mockRejectedValueOnce(new Error("database interrupted"));
+    prismaRef.current = failedPrisma as never;
+
+    await expect(runDailyDigestJob(NOW)).rejects.toThrow("database interrupted");
+
+    // A successful retry on the same calendar day must not be skipped by the
+    // process-level guard; the DB-backed per-user guard remains in place.
+    prismaRef.current = makePrisma({ users: [] }) as never;
+    await expect(runDailyDigestJob(NOW)).resolves.toEqual({ sent: 0, skipped: 0 });
   });
 });
