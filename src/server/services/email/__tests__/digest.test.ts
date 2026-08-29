@@ -77,6 +77,7 @@ function makePrisma(options: {
         return options.user ?? null;
       }),
       findMany: vi.fn(async () => options.users ?? []),
+      update: vi.fn(async () => ({})),
     },
     project: { findMany: vi.fn(async () => options.projects ?? []) },
     workflowStatus: {
@@ -200,6 +201,104 @@ describe("sendDueSoonDigests", () => {
     );
   });
 
+  it("skips users whose lastDigestSentAt already falls within the current UTC day", async () => {
+    const prisma = makePrisma({
+      users: [
+        {
+          id: "u1",
+          name: "Ada",
+          email: "ada@example.com",
+          settings: { emailChannel: { digest: true, lastDigestSentAt: NOW.toISOString() } },
+        },
+      ],
+      // Full data set: without the DB-backed guard the user would be sent a
+      // second digest for the same day.
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1), title: "Overdue thing" })], []],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 0, skipped: 1 });
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("sends again when lastDigestSentAt is from an earlier UTC day", async () => {
+    const prisma = makePrisma({
+      users: [
+        {
+          id: "u1",
+          name: "Ada",
+          email: "ada@example.com",
+          settings: { emailChannel: { digest: true, lastDigestSentAt: isoDay(-1).toISOString() } },
+        },
+      ],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1), title: "Overdue thing" })], []],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("records emailChannel.lastDigestSentAt in User.settings after sending", async () => {
+    const prisma = makePrisma({
+      users: [
+        {
+          id: "u1",
+          name: "Ada",
+          email: "ada@example.com",
+          settings: {
+            notificationPreferences: { assignments: true },
+            emailChannel: { digest: true },
+          },
+        },
+      ],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1), title: "Overdue thing" })], []],
+    });
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: "u1" },
+      data: {
+        settings: expect.objectContaining({
+          // Unrelated settings keys survive the write.
+          notificationPreferences: { assignments: true },
+          emailChannel: { digest: true, lastDigestSentAt: NOW.toISOString() },
+        }),
+      },
+    });
+  });
+
+  it("still counts the send when the lastDigestSentAt bookkeeping fails", async () => {
+    const prisma = makePrisma({
+      users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
+      user: { id: "u1", name: "Ada", email: "ada@example.com", settings: {} },
+      projects: [projectP1],
+      taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1) })], []],
+    });
+    prisma.user.update.mockRejectedValueOnce(new Error("db down"));
+    getAccessibleProjectIds.mockResolvedValue(["p1"]);
+
+    const result = await sendDueSoonDigests(NOW, prisma as never);
+
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
   it("is a no-op when SMTP is unconfigured", async () => {
     isEmailConfigured.mockReturnValue(false);
     const prisma = makePrisma({});
@@ -219,15 +318,24 @@ describe("runDailyDigestJob", () => {
   });
 
   it("runs once per UTC day; a second call the same day is skipped", async () => {
-    prismaRef.current = makePrisma({
+    const prisma = makePrisma({
       users: [{ id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } }],
       user: { id: "u1", name: "Ada", email: "ada@example.com", settings: { emailChannel: { digest: true } } },
       projects: [projectP1],
       taskCalls: [[taskRow({ id: "t1", dueDate: isoDay(-1), title: "Overdue thing" })], []],
-    }) as never;
+    });
+    prismaRef.current = prisma as never;
 
     const first = await runDailyDigestJob(NOW);
     expect(first).toEqual({ sent: 1, skipped: 0 });
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: "u1" },
+      data: {
+        settings: expect.objectContaining({
+          emailChannel: expect.objectContaining({ lastDigestSentAt: NOW.toISOString() }),
+        }),
+      },
+    });
 
     const second = await runDailyDigestJob(new Date(NOW.getTime() + 3600_000));
     expect(second).toEqual({ skipped: true });

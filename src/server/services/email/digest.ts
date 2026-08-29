@@ -39,6 +39,26 @@ function startOfUtcDay(date: Date): number {
   return Math.floor(date.getTime() / DAY_MS) * DAY_MS;
 }
 
+/**
+ * True when the user's settings.emailChannel.lastDigestSentAt (ISO string,
+ * written after a successful digest send) falls within the current UTC day.
+ * Database-backed once-per-day guard so a restart, failover, or second replica
+ * never double-sends a digest for the same user on the same UTC day.
+ */
+function wasDigestSentToday(settings: unknown, now: Date): boolean {
+  const emailChannel = ((settings ?? {}) as { emailChannel?: { lastDigestSentAt?: unknown } }).emailChannel;
+  const raw = emailChannel?.lastDigestSentAt;
+  if (typeof raw !== "string") {
+    return false;
+  }
+  const lastSent = Date.parse(raw);
+  if (!Number.isFinite(lastSent)) {
+    return false;
+  }
+  const dayStart = startOfUtcDay(now);
+  return lastSent >= dayStart && lastSent < dayStart + DAY_MS;
+}
+
 function toDigestTask(task: DigestTaskRow): DigestTask {
   return {
     taskId: task.id,
@@ -193,7 +213,14 @@ export async function buildDueSoonDigest(
   };
 }
 
-/** Send the digest to every user with the "digest" email preference enabled. */
+/**
+ * Send the digest to every user with the "digest" email preference enabled.
+ * Per-user double-send protection: users whose settings.emailChannel.
+ * lastDigestSentAt already falls within the current UTC day are skipped, so a
+ * restart or a second replica (the scheduler advisory lock only deduplicates
+ * within one tick) can never resend a digest for the same day. After a
+ * successful send, lastDigestSentAt is written back to User.settings.
+ */
 export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaClient): Promise<DigestJobResult> {
   const users = (await client.user.findMany({
     where: { disabledAt: null },
@@ -209,6 +236,12 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
   let skipped = 0;
 
   for (const user of recipients) {
+    // DB-backed guard: this user already received a digest today.
+    if (wasDigestSentToday(user.settings, now)) {
+      skipped += 1;
+      continue;
+    }
+
     const digest = await buildDueSoonDigest(client, user.id, now);
     if (!digest) {
       skipped += 1;
@@ -231,6 +264,27 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
         html: email.html,
       });
       sent += 1;
+      // Best-effort bookkeeping: record the send so no other replica or a
+      // restarted process resends the digest for this UTC day. Merges into the
+      // existing settings/emailChannel to preserve unrelated keys.
+      try {
+        const settings = (user.settings ?? {}) as Record<string, unknown>;
+        const emailChannel = (settings.emailChannel ?? {}) as Record<string, unknown>;
+        await client.user.update({
+          where: { id: user.id },
+          data: {
+            settings: {
+              ...settings,
+              emailChannel: {
+                ...emailChannel,
+                lastDigestSentAt: now.toISOString(),
+              },
+            } as Prisma.InputJsonValue,
+          },
+        });
+      } catch (error) {
+        logEmailError(`due-soon digest bookkeeping for user ${user.id} failed`, error);
+      }
     } catch (error) {
       logEmailError(`due-soon digest to user ${user.id} failed`, error);
     }
@@ -244,10 +298,11 @@ export async function sendDueSoonDigests(now: Date, client: PrismaLike = prismaC
 let lastDigestRunDay: string | null = null;
 
 /**
- * Job entry point for a scheduler (no scheduler ships in this change):
- * sends the daily due-soon digest for every opted-in user. Guarded so it runs
- * at most once per UTC day per process. Intended caller:
- * src/server/services/scheduler.ts (does not exist yet; see marker notes).
+ * Job entry point for the built-in scheduler (src/server/services/scheduler.ts):
+ * sends the daily due-soon digest for every opted-in user. Two guards keep it
+ * at most once per UTC day: this process-level fast path (cheap, per-process)
+ * and the DB-backed settings.emailChannel.lastDigestSentAt skip in
+ * sendDueSoonDigests (survives restarts and multi-replica deployments).
  */
 export async function runDailyDigestJob(now: Date = new Date()): Promise<DigestJobResult | { skipped: true }> {
   const day = String(startOfUtcDay(now));

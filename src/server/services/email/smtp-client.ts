@@ -26,6 +26,8 @@ export interface SmtpConfig {
   from: string;
   fromName?: string;
   tlsRejectUnauthorized: boolean;
+  /** Explicit opt-in to sending credentials over a non-TLS connection. */
+  allowInsecureAuth: boolean;
 }
 
 export interface SmtpSocketLike extends EventEmitter {
@@ -88,6 +90,7 @@ export function readSmtpConfig(env: Record<string, string | undefined> = process
     from: parsedFrom.address,
     fromName: parsedFrom.name,
     tlsRejectUnauthorized: !isFalseish(env.SMTP_TLS_REJECT_UNAUTHORIZED),
+    allowInsecureAuth: env.SMTP_ALLOW_INSECURE_AUTH === "true",
   };
 }
 
@@ -301,9 +304,14 @@ async function runSmtpConversation(
   const ehloDomain = parsedFrom.address.split("@")[1] ?? config.host;
   let capabilities = stripStatusPrefixes((await expect(`EHLO ${ehloDomain}`, [250])).lines);
 
+  // Whether the command stream is encrypted: either implicit TLS from the
+  // start (config.secure) or a completed STARTTLS upgrade.
+  let tlsActive = config.secure;
+
   if (!config.secure && capabilities.some((line) => line.toUpperCase().startsWith("STARTTLS"))) {
     await expect("STARTTLS", [220]);
     const secureSocket = await connection.upgrade();
+    tlsActive = true;
     // Re-bind command/response plumbing to the TLS layer so raw TLS records
     // are not parsed as SMTP reply lines, then re-run EHLO for fresh caps.
     waiter.dispose();
@@ -312,6 +320,13 @@ async function runSmtpConversation(
   }
 
   if (config.user && config.password) {
+    // Security: never send credentials as plaintext over an unencrypted link.
+    // The only escape hatch is an explicit operator opt-in.
+    if (!tlsActive && !config.allowInsecureAuth) {
+      throw new Error(
+        "[smtp] refusing to send credentials without TLS; set SMTP_SECURE=true, use a STARTTLS-capable server, or set SMTP_ALLOW_INSECURE_AUTH=true"
+      );
+    }
     if (capabilities.some((line) => line.toUpperCase().includes("AUTH") && line.toUpperCase().includes("PLAIN"))) {
       const initialResponse = Buffer.from(`\u0000${config.user}\u0000${config.password}`, "utf8").toString("base64");
       await expect(`AUTH PLAIN ${initialResponse}`, [235]);

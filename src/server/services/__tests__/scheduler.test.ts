@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   processDueRecurrences,
   processDueDateAutomationRules,
+  runDailyDigestJob,
   prismaMock,
 } = vi.hoisted(() => ({
   processDueRecurrences: vi.fn(),
   processDueDateAutomationRules: vi.fn(),
+  runDailyDigestJob: vi.fn(),
   prismaMock: {
     $transaction: vi.fn(),
     automationRule: {
@@ -26,12 +28,17 @@ vi.mock("@/server/services/automation-evaluator", () => ({
   processDueDateAutomationRules,
 }));
 
+vi.mock("@/server/services/email/digest", () => ({
+  runDailyDigestJob,
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: prismaMock,
 }));
 
 import {
   SCHEDULER_ADVISORY_LOCK_KEY,
+  getSchedulerDigestHourUtc,
   getSchedulerIntervalMs,
   isSchedulerEnabled,
   resolveProjectActorId,
@@ -76,6 +83,7 @@ describe("scheduler", () => {
     process.env.SCHEDULER_ENABLED = "true";
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
 
     txMock = { $queryRaw: vi.fn().mockResolvedValue([{ locked: true }]) };
     prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof txMock) => unknown) => callback(txMock));
@@ -83,6 +91,7 @@ describe("scheduler", () => {
     prismaMock.projectMember.findFirst.mockResolvedValue({ userId: OWNER_ID });
     processDueRecurrences.mockResolvedValue({ processed: 0, createdTaskIds: [] });
     processDueDateAutomationRules.mockResolvedValue({ processed: 0 });
+    runDailyDigestJob.mockResolvedValue({ sent: 0, skipped: 0 });
   });
 
   afterEach(() => {
@@ -90,11 +99,12 @@ describe("scheduler", () => {
     delete process.env.SCHEDULER_ENABLED;
     delete process.env.SCHEDULER_INTERVAL_MS;
     delete process.env.SCHEDULER_TICK_TIMEOUT_MS;
+    delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
     vi.useRealTimers();
   });
 
   describe("runScheduledJobs", () => {
-    it("takes the transaction-scoped advisory lock and runs both processors once", async () => {
+    it("takes the transaction-scoped advisory lock and runs all three jobs once", async () => {
       const result = await runScheduledJobs();
 
       expect(result).toEqual({ ran: true });
@@ -109,6 +119,9 @@ describe("scheduler", () => {
       expect(processDueRecurrences).toHaveBeenCalledWith(prismaMock, { limit: 100 });
       expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
       expect(processDueDateAutomationRules).toHaveBeenCalledWith(prismaMock, { projectId: PROJECT_A, actorId: OWNER_ID });
+      // Digest ticks at 09:00 UTC are past the default SCHEDULER_DIGEST_HOUR_UTC of 7.
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob).toHaveBeenCalledWith(NOW);
     });
 
     it("passes the transaction options with the tick timeout", async () => {
@@ -150,7 +163,31 @@ describe("scheduler", () => {
       expect(processDueDateAutomationRules).not.toHaveBeenCalled();
     });
 
-    it("still runs due-date automation when the recurrence processor throws", async () => {
+    it("skips the tick when another instance holds the lock", async () => {
+      txMock.$queryRaw.mockResolvedValue([{ locked: false }]);
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(lockCalls()).toHaveLength(1);
+      expect(processDueRecurrences).not.toHaveBeenCalled();
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+      expect(runDailyDigestJob).not.toHaveBeenCalled();
+      expect(prismaMock.automationRule.findMany).not.toHaveBeenCalled();
+    });
+
+    it("skips the tick when the lock query fails", async () => {
+      txMock.$queryRaw.mockRejectedValue(new Error("database unavailable"));
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: false });
+      expect(processDueRecurrences).not.toHaveBeenCalled();
+      expect(processDueDateAutomationRules).not.toHaveBeenCalled();
+      expect(runDailyDigestJob).not.toHaveBeenCalled();
+    });
+
+    it("still runs due-date automation and the digest when the recurrence processor throws", async () => {
       processDueRecurrences.mockRejectedValue(new Error("recurrence exploded"));
 
       const result = await runScheduledJobs();
@@ -158,9 +195,10 @@ describe("scheduler", () => {
       expect(result).toEqual({ ran: true });
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
       expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
     });
 
-    it("still runs recurrences when due-date automation throws", async () => {
+    it("still runs recurrences and the digest when due-date automation throws", async () => {
       processDueDateAutomationRules.mockRejectedValue(new Error("automation exploded"));
 
       const result = await runScheduledJobs();
@@ -168,6 +206,21 @@ describe("scheduler", () => {
       expect(result).toEqual({ ran: true });
       expect(processDueRecurrences).toHaveBeenCalledTimes(1);
       expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+    });
+
+    it("still runs recurrences and due-date automation when the digest job throws", async () => {
+      runDailyDigestJob.mockRejectedValue(new Error("digest exploded"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] scheduled job failed: digest exploded"));
+      errorSpy.mockRestore();
     });
 
     it("runs due-date automation per project and isolates per-project failures", async () => {
@@ -184,6 +237,41 @@ describe("scheduler", () => {
         prismaMock,
         { projectId: PROJECT_B, actorId: OWNER_ID },
       );
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs the digest once the current UTC hour reaches SCHEDULER_DIGEST_HOUR_UTC", async () => {
+      // NOW is 09:00 UTC; the default digest hour is 7, so earlier tests run it.
+      process.env.SCHEDULER_DIGEST_HOUR_UTC = "9";
+
+      await runScheduledJobs();
+
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+      expect(runDailyDigestJob).toHaveBeenCalledWith(NOW);
+    });
+
+    it("does not run the digest before SCHEDULER_DIGEST_HOUR_UTC, but still runs the other jobs", async () => {
+      process.env.SCHEDULER_DIGEST_HOUR_UTC = "10";
+
+      const result = await runScheduledJobs();
+
+      expect(result).toEqual({ ran: true });
+      expect(runDailyDigestJob).not.toHaveBeenCalled();
+      expect(processDueRecurrences).toHaveBeenCalledTimes(1);
+      expect(processDueDateAutomationRules).toHaveBeenCalledTimes(1);
+    });
+
+    it("supports hour 0 (digest runs all day) and hour 23 (digest runs late)", async () => {
+      process.env.SCHEDULER_DIGEST_HOUR_UTC = "0";
+      await runScheduledJobs();
+      expect(runDailyDigestJob).toHaveBeenCalledTimes(1);
+
+      vi.clearAllMocks();
+      txMock.$queryRaw.mockResolvedValue([{ locked: true }]);
+      runDailyDigestJob.mockResolvedValue({ sent: 0, skipped: 0 });
+      process.env.SCHEDULER_DIGEST_HOUR_UTC = "23";
+      await runScheduledJobs();
+      expect(runDailyDigestJob).not.toHaveBeenCalled();
     });
   });
 
@@ -281,6 +369,26 @@ describe("scheduler", () => {
   it("clamps implausibly small intervals to 1000ms", () => {
     process.env.SCHEDULER_INTERVAL_MS = "5";
     expect(getSchedulerIntervalMs()).toBe(1000);
+  });
+
+  it("defaults the digest hour to 7 UTC and ignores invalid values", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    delete process.env.SCHEDULER_DIGEST_HOUR_UTC;
+    expect(getSchedulerDigestHourUtc()).toBe(7);
+
+    process.env.SCHEDULER_DIGEST_HOUR_UTC = "14";
+    expect(getSchedulerDigestHourUtc()).toBe(14);
+
+    process.env.SCHEDULER_DIGEST_HOUR_UTC = "0";
+    expect(getSchedulerDigestHourUtc()).toBe(0);
+
+    process.env.SCHEDULER_DIGEST_HOUR_UTC = "24";
+    expect(getSchedulerDigestHourUtc()).toBe(7);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[scheduler] invalid SCHEDULER_DIGEST_HOUR_UTC"));
+
+    process.env.SCHEDULER_DIGEST_HOUR_UTC = "banana";
+    expect(getSchedulerDigestHourUtc()).toBe(7);
+    warnSpy.mockRestore();
   });
 
   it("picks up stopScheduler to clear the running timer", async () => {
