@@ -89,7 +89,11 @@ export async function withSecretRotationLock<T>(
   run: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
   return client.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${REENCRYPT_ADVISORY_LOCK_KEY})`;
+    // `pg_advisory_xact_lock()` returns Postgres `void`, which Prisma's
+    // `$queryRaw` cannot deserialize ("Failed to deserialize column of type
+    // 'void'"). Compare the (non-null) void result so the statement yields a
+    // plain boolean column instead.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${REENCRYPT_ADVISORY_LOCK_KEY}) IS NULL AS locked`;
     return run(tx);
   });
 }
@@ -377,8 +381,9 @@ export async function reencryptAiSecrets(
     async (tx) => {
       // Serializes concurrent rotation runs. Normal app writes are unaffected;
       // pair this with a maintenance window (documented in the README) for a
-      // fully exclusive rotation.
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(${REENCRYPT_ADVISORY_LOCK_KEY})`;
+      // fully exclusive rotation. `IS NULL AS locked` converts the function's
+      // void result into a deserializable boolean (see withSecretRotationLock).
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(${REENCRYPT_ADVISORY_LOCK_KEY}) IS NULL AS locked`;
 
       const plans: TablePlan[] = [
         {
