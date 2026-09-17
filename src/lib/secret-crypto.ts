@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 
 const KEY_ENV_NAME = "AI_SECRET_MASTER_KEY";
 const FALLBACK_ENV_NAME = "AUTH_SECRET";
-const FALLBACK_ALLOWED_ENV_NAME = "AI_ALLOW_AUTH_SECRET_FALLBACK";
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
@@ -38,41 +37,52 @@ function requireKeySource(): SecretKeySource {
     return "master-key";
   }
 
-  const isProduction = process.env.NODE_ENV === "production";
-  const fallbackAllowed = process.env[FALLBACK_ALLOWED_ENV_NAME] === "true";
-
-  if (isProduction && !fallbackAllowed) {
-    throw new Error(
-      `${KEY_ENV_NAME} must be set in production to encrypt/decrypt stored secrets. ` +
-        `Set it to a base64-encoded 32-byte key, or explicitly set ${FALLBACK_ALLOWED_ENV_NAME}=true ` +
-        `to keep deriving it from ${FALLBACK_ENV_NAME} (not recommended: rotating ${FALLBACK_ENV_NAME} ` +
-        `then invalidates stored secrets).`,
-    );
-  }
-
+  // No master key configured: derive the key from AUTH_SECRET so deployments
+  // work out of the box. The derivation is deterministic, so ciphertext stays
+  // readable as long as AUTH_SECRET does not change; rotate properly via
+  // `npm run db:reencrypt-ai-secrets` when moving to a dedicated master key.
   if (!warnedAboutAuthSecretFallback) {
     warnedAboutAuthSecretFallback = true;
-    const reason =
-      isProduction && fallbackAllowed
-        ? `${FALLBACK_ALLOWED_ENV_NAME}=true is set`
-        : "no master key is configured";
+    const isProduction = process.env.NODE_ENV === "production";
     console.warn(
-      `[secret-crypto] ${KEY_ENV_NAME} is not set; deriving the secret encryption key from ` +
-        `${FALLBACK_ENV_NAME} because ${reason}. Set ${KEY_ENV_NAME} to a base64-encoded 32-byte key, ` +
-        `then rotate existing ciphertext with \`npm run db:reencrypt-ai-secrets\`.`,
+      `[secret-crypto] ${KEY_ENV_NAME} is not set${isProduction ? " in production" : ""}; deriving the ` +
+        `secret encryption key from ${FALLBACK_ENV_NAME}. This is deterministic (stored secrets remain ` +
+        `readable), but rotating ${FALLBACK_ENV_NAME} invalidates stored secrets — set ${KEY_ENV_NAME} ` +
+        `(any string; it is converted to a 32-byte key automatically) and run ` +
+        `\`npm run db:reencrypt-ai-secrets\` to migrate.`,
     );
   }
 
   return "auth-secret-fallback";
 }
 
-export function keyFromBase64Material(rawKey: string, envName = KEY_ENV_NAME) {
-  const key = Buffer.from(rawKey.trim(), "base64");
-  if (key.length !== 32) {
-    throw new Error(`${envName} must be a base64-encoded 32-byte key`);
+let warnedAboutNonBase64KeyMaterial = false;
+
+/**
+ * Resolves 32-byte key material from a configured value.
+ *
+ * A value that already is a base64-encoded 32-byte key is used as-is (stable
+ * across deployments, and the format documented for key rotation). Any other
+ * value is converted automatically: it is hashed into a deterministic 32-byte
+ * key, so operators can paste a plain token or passphrase without
+ * pre-encoding it. The same input always yields the same key.
+ */
+export function keyFromMaterial(rawKey: string, envName = KEY_ENV_NAME) {
+  const base64Key = Buffer.from(rawKey.trim(), "base64");
+  if (base64Key.length === 32) {
+    return base64Key;
   }
 
-  return key;
+  if (!warnedAboutNonBase64KeyMaterial) {
+    warnedAboutNonBase64KeyMaterial = true;
+    console.warn(
+      `[secret-crypto] ${envName} is not a base64-encoded 32-byte key; converting it ` +
+        `automatically (sha256) into 32-byte key material. The same value always ` +
+        `yields the same key.`,
+    );
+  }
+
+  return crypto.createHash("sha256").update(rawKey.trim(), "utf8").digest();
 }
 
 export function keyFromSecretMaterial(secret: string) {
@@ -82,7 +92,7 @@ export function keyFromSecretMaterial(secret: string) {
 function getCurrentKey() {
   const source = requireKeySource();
   if (source === "master-key") {
-    return keyFromBase64Material(process.env[KEY_ENV_NAME] as string);
+    return keyFromMaterial(process.env[KEY_ENV_NAME] as string);
   }
 
   const fallback = process.env[FALLBACK_ENV_NAME];

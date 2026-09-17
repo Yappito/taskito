@@ -129,7 +129,7 @@ Optional values:
 
 `DATABASE_URL` and `AUTH_TRUST_HOST` are injected by the compose file.
 
-If you plan to use AI providers, set `AI_SECRET_MASTER_KEY` explicitly to a base64-encoded 32-byte value instead of relying on any implicit fallback behavior.
+If you plan to use AI providers, set `AI_SECRET_MASTER_KEY` explicitly (any string works — it is converted into 32-byte key material automatically; a base64-encoded 32-byte value is used as-is) instead of relying on the implicit `AUTH_SECRET` fallback.
 
 ### 3. Start the stack
 
@@ -438,8 +438,7 @@ Useful commands from the repository root:
 | `DEMO_ADMIN_PASSWORD` | No | Optional password for the seeded demo admin account |
 | `AUTO_TAGGER_URL` | No | Optional OpenAI-compatible tagging endpoint |
 | `AUTO_TAGGER_API_KEY` | No | Optional API key for the auto-tagger |
-| `AI_SECRET_MASTER_KEY` | Recommended for AI | Base64-encoded 32-byte key used to encrypt AI provider secrets and S3/OIDC secrets at rest. Strongly recommended in production; when unset in production the app refuses to encrypt/decrypt stored secrets unless `AI_ALLOW_AUTH_SECRET_FALLBACK=true` |
-| `AI_ALLOW_AUTH_SECRET_FALLBACK` | No | Set `true` to explicitly allow deriving the secret encryption key from `AUTH_SECRET` when `AI_SECRET_MASTER_KEY` is unset (production only; not recommended — see rotation notes below) |
+| `AI_SECRET_MASTER_KEY` | Recommended for AI | Key material used to encrypt AI provider secrets and S3/OIDC secrets at rest. Accepts a base64-encoded 32-byte key (used as-is) or any other string (hashed into 32-byte key material automatically). When unset, the key is derived deterministically from `AUTH_SECRET` (a warning is logged; see rotation notes below) |
 | `AI_PROVIDER_HOST_ALLOWLIST` | No | Optional comma-separated allowlist for AI provider endpoints. Entries are `host` or `host:port` (IPv6 literals bracketed). Public hosts may use a bare `host` entry (any port); private/loopback hosts require an exact `host:port` entry (e.g. `localhost:11434`) or the global `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=true` override, so an entry can never open every TCP port on a host |
 | `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | No | Set `true` only to allow AI provider base URLs that point at loopback/private/link-local addresses (self-hosted Ollama, LM Studio, etc.); defaults to `false`, which rejects any provider host that is or resolves to a private address |
 | `AI_PROVIDER_REQUEST_TIMEOUT_MS` | No | Optional upstream AI provider request timeout in milliseconds; defaults to `90000` |

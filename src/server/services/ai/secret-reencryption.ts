@@ -34,7 +34,7 @@ import {
   decryptWithKey,
   encryptWithKey,
   isVersionedSecret,
-  keyFromBase64Material,
+  keyFromMaterial,
   keyFromSecretMaterial,
 } from "@/lib/secret-crypto";
 
@@ -128,7 +128,7 @@ function resolveKeyFromBase64(envName: string): ResolvedKey | undefined {
     return undefined;
   }
 
-  return { key: keyFromBase64Material(raw, envName), source: envName as KeyMaterialSource };
+  return { key: keyFromMaterial(raw, envName), source: envName as KeyMaterialSource };
 }
 
 export function resolveOldKey(): ResolvedKey {
@@ -140,7 +140,8 @@ export function resolveOldKey(): ResolvedKey {
   const authSecret = process.env.AUTH_SECRET;
   if (!authSecret || !authSecret.trim()) {
     throw new Error(
-      "Old key material is required: set AI_SECRET_MASTER_KEY_OLD (base64-encoded 32-byte key) " +
+      "Old key material is required: set AI_SECRET_MASTER_KEY_OLD (base64-encoded 32-byte key or any " +
+        "string, which is hashed into key material automatically) " +
         "or AUTH_SECRET so the legacy fallback key can be derived.",
     );
   }
@@ -159,7 +160,8 @@ export function resolveNewKey(): ResolvedKey {
   const authSecret = process.env.AUTH_SECRET;
   if (!authSecret || !authSecret.trim()) {
     throw new Error(
-      "New key material is required: set AI_SECRET_MASTER_KEY (base64-encoded 32-byte key) " +
+      "New key material is required: set AI_SECRET_MASTER_KEY (base64-encoded 32-byte key or any " +
+        "string, which is hashed into key material automatically) " +
         "or AUTH_SECRET to re-encrypt under the fallback key.",
     );
   }

@@ -14,7 +14,6 @@ async function loadSecretCrypto(): Promise<SecretCryptoModule> {
 describe("secret-crypto", () => {
   beforeEach(() => {
     vi.stubEnv("AI_SECRET_MASTER_KEY", MASTER_KEY);
-    vi.stubEnv("AI_ALLOW_AUTH_SECRET_FALLBACK", "");
     vi.stubEnv("AUTH_SECRET", AUTH_SECRET);
     vi.stubEnv("NODE_ENV", "test");
   });
@@ -123,39 +122,47 @@ describe("secret-crypto", () => {
     expect(() => decryptSecret(encrypted)).toThrow();
   });
 
-  it("rejects master keys that are not 32 bytes", async () => {
-    vi.stubEnv("AI_SECRET_MASTER_KEY", Buffer.alloc(16, 3).toString("base64"));
-
-    const { encryptSecret } = await loadSecretCrypto();
-    expect(() => encryptSecret("super-secret-token")).toThrow(
-      /AI_SECRET_MASTER_KEY must be a base64-encoded 32-byte key/,
-    );
-  });
-
-  it("throws in production when the master key is missing and fallback is not allowed", async () => {
-    vi.stubEnv("AI_SECRET_MASTER_KEY", "");
-    vi.stubEnv("NODE_ENV", "production");
-
-    const { encryptSecret, decryptSecret } = await loadSecretCrypto();
-    expect(() => encryptSecret("super-secret-token")).toThrow(
-      /AI_SECRET_MASTER_KEY must be set in production/,
-    );
-    expect(() => decryptSecret("v1:AAAAAAAAAAAAAAAAAAAAAA==")).toThrow(
-      /AI_SECRET_MASTER_KEY must be set in production/,
-    );
-  });
-
-  it("allows the auth-secret fallback in production when AI_ALLOW_AUTH_SECRET_FALLBACK=true", async () => {
-    vi.stubEnv("AI_SECRET_MASTER_KEY", "");
-    vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("AI_ALLOW_AUTH_SECRET_FALLBACK", "true");
+  it("converts non-base64 master key material into a 32-byte key automatically", async () => {
+    vi.stubEnv("AI_SECRET_MASTER_KEY", "plain-token-not-base64");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const { encryptSecret, decryptSecret } = await loadSecretCrypto();
     const encrypted = encryptSecret("super-secret-token");
     expect(encrypted.startsWith("v1:")).toBe(true);
     expect(decryptSecret(encrypted)).toBe("super-secret-token");
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("converting it automatically"),
+    );
+
+    // The conversion is deterministic: re-encrypting under the same raw value
+    // stays readable, and a different value yields a different key.
+    const reloaded = await loadSecretCrypto();
+    expect(reloaded.decryptSecret(encrypted)).toBe("super-secret-token");
+
+    vi.stubEnv("AI_SECRET_MASTER_KEY", "a-different-token");
+    const other = await loadSecretCrypto();
+    expect(() => other.decryptSecret(encrypted)).toThrow();
+  });
+
+  it("uses valid base64-encoded 32-byte keys as-is without warning", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { encryptSecret, decryptSecret } = await loadSecretCrypto();
+    const encrypted = encryptSecret("super-secret-token");
+    expect(decryptSecret(encrypted)).toBe("super-secret-token");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to AUTH_SECRET automatically in production and warns", async () => {
+    vi.stubEnv("AI_SECRET_MASTER_KEY", "");
+    vi.stubEnv("NODE_ENV", "production");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { encryptSecret, decryptSecret } = await loadSecretCrypto();
+    const encrypted = encryptSecret("super-secret-token");
+    expect(encrypted.startsWith("v1:")).toBe(true);
+    expect(decryptSecret(encrypted)).toBe("super-secret-token");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("AI_SECRET_MASTER_KEY is not set in production"));
   });
 
   it("falls back to AUTH_SECRET outside production and warns only once per process", async () => {
