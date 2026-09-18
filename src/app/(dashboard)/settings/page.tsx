@@ -1,5 +1,6 @@
 "use client";
 
+import { JiraSettings } from "@/components/settings/jira-settings";
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { trpc } from "@/lib/trpc-client";
@@ -29,9 +30,9 @@ const AuthProviderSettings = dynamic(
   { ssr: false, loading: () => <TabLoading /> }
 );
 
-const allTabs = ["profile", "appearance", "ai", "storage", "projects", "users", "groups", "auth"] as const;
+const allTabs = ["profile", "appearance", "ai", "jira", "storage", "projects", "users", "groups", "auth"] as const;
 type SettingsTab = (typeof allTabs)[number];
-const memberTabs: SettingsTab[] = ["profile", "appearance", "ai"];
+const memberTabs: SettingsTab[] = ["profile", "appearance", "ai", "jira"];
 
 function TabLoading() {
   return (
@@ -103,7 +104,7 @@ export default function SettingsPage() {
                 : { color: "var(--color-text-secondary)" }
             }
           >
-            {t === "profile" ? "Profile" : t}
+            {t === "profile" ? "Profile" : t === "jira" ? "Jira" : t}
           </button>
         ))}
       </div>
@@ -112,6 +113,7 @@ export default function SettingsPage() {
         {effectiveTab === "profile" && <ProfileSettings key={currentUser.id} currentUser={currentUser} />}
         {effectiveTab === "appearance" && <AppearanceSettingsSection />}
         {effectiveTab === "ai" && <PersonalAiSettings currentUserRole={currentUser.role} />}
+        {effectiveTab === "jira" && <JiraSettings />}
         {effectiveTab === "storage" && isAdmin && <StorageSettings />}
         {effectiveTab === "projects" && isAdmin && <ProjectManagement />}
         {effectiveTab === "users" && isAdmin && <UserManagement currentUserId={currentUser.id} />}

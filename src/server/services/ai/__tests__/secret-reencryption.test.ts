@@ -80,6 +80,7 @@ describe("secret re-encryption core", () => {
     prisma.storageSettings.findMany.mockResolvedValue([]);
     prisma.storageSettings.count.mockResolvedValue(0);
     prisma.webhook.findMany.mockResolvedValue([]);
+    prisma.jiraConnection.findMany.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -332,6 +333,15 @@ describe("secret re-encryption core", () => {
         /Failed to decrypt 1 row\(s\)/,
       );
       expect(prisma.aiProviderConnection.update).not.toHaveBeenCalled();
+    });
+
+    it("rotates Jira API tokens with the shared secret key", async () => {
+      const store = useStore("jiraConnection", "encryptedApiToken", [{ id: "jira-1", encrypted: encryptWithKey("jira-token", MASTER_KEY) }]);
+      const oldResolved: ResolvedKey = { key: MASTER_KEY, source: "AI_SECRET_MASTER_KEY_OLD" };
+      const newResolved: ResolvedKey = { key: Buffer.alloc(32, 13), source: "AI_SECRET_MASTER_KEY" };
+      const result = await reencryptAiSecrets(prisma, { oldResolved, newResolved, dryRun: false });
+      expect(toTableStats(result, "JiraConnection.encryptedApiToken")).toMatchObject({ scanned: 1, reencrypted: 1 });
+      expect(decryptWithKey(store.get("jira-1")!, newResolved.key)).toBe("jira-token");
     });
 
     it("rewrites Webhook.encryptedSecret ciphertext under the same rotation (finding 10)", async () => {

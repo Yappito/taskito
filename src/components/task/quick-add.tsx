@@ -32,6 +32,14 @@ interface QuickAddProps {
 
 /** Quick-add task form — FAB button opens dialog, Ctrl+N keyboard shortcut */
 export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
+  const [syncToJira, setSyncToJira] = useState(false);
+  const [jiraProject, setJiraProject] = useState("");
+  const [jiraIssueType, setJiraIssueType] = useState("");
+  const jiraConnection = trpc.jira.connection.useQuery();
+  const jiraProjects = trpc.jira.projects.useQuery(undefined, { enabled: syncToJira && Boolean(jiraConnection.data?.enabled) });
+  const isServiceDesk = jiraProjects.data?.find(p => p.key === jiraProject)?.projectTypeKey === "service_desk";
+  const jiraRequestTypes = trpc.jira.requestTypes.useQuery({ projectKey: jiraProject }, { enabled: syncToJira && Boolean(isServiceDesk) });
+  const jiraTypes = trpc.jira.issueTypes.useQuery({ projectKey: jiraProject }, { enabled: syncToJira && Boolean(jiraProject) && !isServiceDesk });
   const [open, setOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [title, setTitle] = useState("");
@@ -64,6 +72,9 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
   const today = new Date().toISOString().split("T")[0];
 
   const resetForm = useCallback(() => {
+    setSyncToJira(false);
+    setJiraProject("");
+    setJiraIssueType("");
     setSelectedTemplateId("");
     setTitle("");
     setBody("");
@@ -234,6 +245,7 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
     }
 
     createTask.mutate({
+      ...(syncToJira ? { jira: { projectKey: jiraProject, issueTypeId: isServiceDesk ? (jiraRequestTypes.data?.types.find(t => t.id === jiraIssueType)?.issueTypeId ?? "") : jiraIssueType, ...(isServiceDesk ? { serviceDeskId: jiraRequestTypes.data?.serviceDeskId, requestTypeId: jiraIssueType } : {}) } } : {}),
       projectId,
       title: trimmedTitle,
       body: trimmedBody || null,
@@ -566,6 +578,15 @@ export function QuickAdd({ projectId, statuses, tags }: QuickAddProps) {
               </>
           )}
 
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={syncToJira} onChange={e => setSyncToJira(e.target.checked)} disabled={!jiraConnection.data?.enabled || jiraConnection.data.projectId !== projectId} />Sync to Jira</label>
+            {(!jiraConnection.data?.enabled || jiraConnection.data.projectId !== projectId) && <p className="text-xs">Configure Jira for this Taskito project in Settings → Jira to enable sync.</p>}
+            {syncToJira && <>
+              <label className="block text-sm">Jira project<Select required value={jiraProject} onChange={e => { setJiraProject(e.target.value); setJiraIssueType(""); }}><option value="">Select Jira project</option>{jiraProjects.data?.map(p => <option key={p.id} value={p.key}>{p.key} — {p.name}</option>)}</Select></label>
+              <label className="block text-sm">{isServiceDesk ? "Jira request type" : "Jira issue type"}<Select required value={jiraIssueType} onChange={e => setJiraIssueType(e.target.value)}><option value="">Select issue type</option>{(isServiceDesk ? jiraRequestTypes.data?.types : jiraTypes.data)?.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</Select></label>
+              {(jiraProjects.error || jiraTypes.error || jiraRequestTypes.error) && <Alert variant="danger">{jiraProjects.error?.message || jiraTypes.error?.message || jiraRequestTypes.error?.message}</Alert>}
+            </>}
+          </div>
           <div className="flex justify-end gap-2 pt-2">
             <Button
               type="button"

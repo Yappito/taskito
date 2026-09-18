@@ -95,9 +95,14 @@ type TaskDetailData = {
     nextDueDate: Date | string;
     endDate?: Date | string | null;
   } | null;
+  jiraIssue?: { issueKey: string | null; siteUrl: string; jiraProjectKey: string | null; jiraProjectName: string | null; serviceDeskId: string | null; syncState: string; lastError: string | null; history: unknown } | null;
   comments: Array<{
     id: string;
     authorId: string;
+    visibility?: string;
+    externalAuthor?: string | null;
+    jiraSyncState?: string | null;
+    jiraSyncError?: string | null;
     content: string;
     createdAt: Date | string;
     author: { id: string; name: string | null; image?: string | null };
@@ -249,6 +254,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
   const [linkTargetId, setLinkTargetId] = useState("");
   const [customFieldValues, setCustomFieldValues] = useState<TaskCustomFieldValueMap>({});
   const [formError, setFormError] = useState<string | null>(null);
+  const [commentVisibility, setCommentVisibility] = useState<"internal" | "public">("internal");
   const [commentContent, setCommentContent] = useState("");
   const [commentFiles, setCommentFiles] = useState<File[]>([]);
   const [commentError, setCommentError] = useState<string | null>(null);
@@ -273,6 +279,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
     element: HTMLButtonElement;
   } | null>(null);
   const utils = trpc.useUtils();
+  const retryJiraComment = trpc.jira.retryComment.useMutation({ onSuccess: () => utils.task.byId.invalidate({ id: taskId }), onError: e => setCommentError(e.message) });
+  const resolveJiraIssue = trpc.jira.resolveIssue.useMutation({ onSuccess: () => utils.task.byId.invalidate({ id: taskId }), onError: e => setCommentError(e.message) });
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const linkFormId = `task-detail-link-form-${useId()}`;
@@ -739,6 +747,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
 
     const formData = new FormData();
     formData.set("content", commentContent);
+    formData.set("visibility", commentVisibility);
     commentFiles.forEach((file) => formData.append("attachments", file));
 
     setIsSubmittingComment(true);
@@ -1049,9 +1058,14 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 <h4 className="text-sm font-semibold" style={{ color: "var(--color-text-secondary)" }}>
                   Comments
                 </h4>
+                {task.jiraIssue && <div className="my-3 space-y-2 text-sm">
+                  {task.jiraIssue.issueKey ? <a href={`${task.jiraIssue.siteUrl}/browse/${task.jiraIssue.issueKey}`} target="_blank" rel="noreferrer" className="underline">Jira {task.jiraIssue.issueKey} · {task.jiraIssue.jiraProjectName ?? task.jiraIssue.jiraProjectKey} · {task.jiraIssue.syncState}</a> : <span>Jira export: {task.jiraIssue.syncState}</span>}
+                  {task.jiraIssue.lastError && <Alert variant="danger">{task.jiraIssue.lastError}</Alert>}
+                  {!task.jiraIssue.issueKey && ["failed", "uncertain"].includes(task.jiraIssue.syncState) && <div className="flex gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { const issueKey = window.prompt("Enter the existing Jira issue key (for example SUPPORT-123)"); if (issueKey) resolveJiraIssue.mutate({ taskId, issueKey }); }}>Link existing Jira issue</Button><Button type="button" size="sm" variant="outline" onClick={() => { if (window.confirm("Confirm Jira did not create this issue, then retry?")) resolveJiraIssue.mutate({ taskId, confirmedNotCreated: true }); }}>Retry creation</Button></div>}
+                </div>}
                 <div className="mt-3 space-y-2">
                   {task.comments.map((comment) => {
-                      const canEditComment = currentUser?.id === comment.authorId;
+                      const canEditComment = currentUser?.id === comment.authorId && !comment.externalAuthor && !comment.jiraSyncState;
                       const isEditingComment = editingCommentId === comment.id;
                       const commentBody = getCommentBody(comment.content, comment.attachments);
                       const canSaveComment = comment.attachments?.length
@@ -1071,7 +1085,7 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                             className="flex items-start justify-between gap-3 text-xs"
                             style={{ color: "var(--color-text-muted)" }}
                           >
-                            <span>{comment.author.name ?? "User"}</span>
+                            <span>{comment.externalAuthor ? `${comment.externalAuthor} (Jira)` : comment.author.name ?? "User"} · <strong>{comment.visibility === "public" ? "Public" : "Internal"}</strong>{comment.jiraSyncState && ` · Jira: ${comment.jiraSyncState}`}</span>
                             <div className="flex items-center gap-2">
                               <span>
                                 {new Date(comment.createdAt).toLocaleDateString()}
@@ -1090,6 +1104,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                               )}
                             </div>
                           </div>
+                          {comment.jiraSyncError && <Alert variant="danger">{comment.jiraSyncError}</Alert>}
+                          {currentUser?.id === comment.authorId && ["failed", "uncertain"].includes(comment.jiraSyncState ?? "") && <Button type="button" size="sm" variant="outline" onClick={() => { const confirmedNotSent = comment.jiraSyncState !== "uncertain" || window.confirm("Check Jira first. Confirm this comment and its attachments were NOT posted, then retry?"); if (confirmedNotSent) retryJiraComment.mutate({ commentId: comment.id, confirmedNotSent }); }}>Retry Jira delivery</Button>}
                           {isEditingComment ? (
                             <div className="mt-2 space-y-2">
                               {editingCommentError && (
@@ -1181,6 +1197,8 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                   )}
                 </div>
                 <form onSubmit={handleAddComment} className="mt-3 space-y-2">
+                  <label className="block text-sm">Comment visibility<Select value={commentVisibility} onChange={e => setCommentVisibility(e.target.value as "internal" | "public")}><option value="internal">Internal — team only in Jira Service Management</option><option value="public">Public — visible to Jira request participants</option></Select></label>
+                  {task.jiraIssue && <p className="text-xs">This comment and its attachments will be sent to Jira using your connected account.{!task.jiraIssue.serviceDeskId && " Standard Jira issues accept public comments only."}</p>}
                   {commentError && (
                     <Alert variant="danger">{commentError}</Alert>
                   )}
@@ -1515,6 +1533,10 @@ export function TaskDetail({ taskId, statuses, onClose }: TaskDetailProps) {
                 </button>
                 {showActivity && (
                   <div className="mt-3 space-y-2" id={activityBodyId}>
+                    {task.jiraIssue && <div className="space-y-2">
+                      <p className="font-semibold">Jira history</p>
+                      {(Array.isArray(task.jiraIssue.history) ? task.jiraIssue.history as Array<{ id: string; created: string; author?: { displayName?: string }; items?: Array<{ field: string; fromString?: string; toString?: string }> }> : []).map(event => <div key={event.id} className="rounded border p-2 text-xs"><p>{event.author?.displayName ?? "Jira"} · {new Date(event.created).toLocaleString()}</p>{event.items?.map((item, index) => <p key={index}>{item.field}: {item.fromString || "Empty"} → {item.toString || "Empty"}</p>)}</div>)}
+                    </div>}
                     {activityEvents.map((event) => (
                       <div
                         key={event.id}

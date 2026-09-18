@@ -32,6 +32,7 @@ model User {
   groupMemberships             GroupMember[]
   projectPermissionGrants      UserProjectPermissionGrant[]
   comments                     Comment[]
+  jiraConnection               JiraConnection?
   activityEvents               ActivityEvent[]
   watchingTasks                TaskWatcher[]
   notifications                Notification[]               @relation("NotificationRecipient")
@@ -153,6 +154,7 @@ model Project {
   updatedAt   DateTime @updatedAt
 
   statuses              WorkflowStatus[]
+  jiraConnections       JiraConnection[]
   transitions           WorkflowTransition[]
   tasks                 Task[]
   tags                  Tag[]
@@ -445,6 +447,7 @@ model Task {
   sourceLinks           TaskLink[]             @relation("SourceTask")
   targetLinks           TaskLink[]             @relation("TargetTask")
   comments              Comment[]
+  jiraIssue             JiraIssue?
   activityEvents        ActivityEvent[]
   watchers              TaskWatcher[]
   participants          TaskParticipant[]
@@ -793,6 +796,12 @@ model Comment {
   taskId    String
   authorId  String
   content   String
+  visibility String @default("internal")
+  jiraCommentId String?
+  externalAuthor String?
+  jiraSyncState String?
+  jiraSyncError String?
+  jiraAttemptAt DateTime?
   createdAt DateTime @default(now())
 
   task        Task                @relation(fields: [taskId], references: [id], onDelete: Cascade)
@@ -800,6 +809,7 @@ model Comment {
   attachments CommentAttachment[]
 
   @@index([taskId, createdAt])
+  @@unique([taskId, jiraCommentId])
 }
 
 model CommentAttachment {
@@ -812,12 +822,66 @@ model CommentAttachment {
   storageProvider StorageProvider @default(local)
   storageBucket   String?
   storageKey      String?
+  jiraAttachmentId String?
   createdAt       DateTime        @default(now())
 
   comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
   @@index([commentId, createdAt])
   @@index([storageProvider])
+  @@unique([commentId, jiraAttachmentId])
+}
+
+model JiraConnection {
+  id String @id @default(cuid())
+  userId String @unique
+  projectId String
+  siteUrl String
+  email String
+  encryptedApiToken String
+  accountId String
+  participantFieldId String?
+  enabled Boolean @default(true)
+  intervalMinutes Int @default(5)
+  defaultDueDays Int @default(7)
+  statusMapping Json @default("{}")
+  lastSyncedAt DateTime?
+  nextSyncAt DateTime @default(now())
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issues JiraIssue[]
+  @@index([enabled, nextSyncAt])
+}
+
+model JiraIssue {
+  id String @id @default(cuid())
+  taskId String @unique
+  connectionId String
+  siteUrl String
+  issueId String?
+  issueKey String?
+  serviceDeskId String?
+  requestTypeId String?
+  jiraProjectKey String?
+  jiraProjectName String?
+  issueTypeId String?
+  outboundFields String[] @default([])
+  outboundStatus Boolean @default(false)
+  outboundUserId String?
+  outboundVersion Int @default(0)
+  sentVersion Int @default(0)
+  syncState String @default("pending")
+  lastError String?
+  lastSyncedAt DateTime?
+  attemptAt DateTime?
+  remoteUpdatedAt DateTime?
+  history Json @default("[]")
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  connection JiraConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  @@unique([connectionId, issueId])
 }
 
 // ─── Custom Fields ───────────────────────────────────────

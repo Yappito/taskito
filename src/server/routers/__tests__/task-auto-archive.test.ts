@@ -107,6 +107,7 @@ describe("task router auto-archive", () => {
 
   it("applies auto-archive when create resolves the initial status from project defaults", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     prisma.user.findUnique.mockResolvedValue({ id: USER_ID, role: "admin", projectMemberships: [] });
     prisma.project.findUniqueOrThrow.mockResolvedValue({
       id: PROJECT_ID,
@@ -150,6 +151,7 @@ describe("task router auto-archive", () => {
 
   it("stores participants when creating a task", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     const participantId = "cmab8yxxp0014i7p4k8n2v3qh";
     prisma.user.findUnique
       .mockResolvedValueOnce({ id: USER_ID, role: "admin", projectMemberships: [] })
@@ -192,6 +194,7 @@ describe("task router auto-archive", () => {
 
   it("leaves archivedAt null on create when the selected status does not auto-archive", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     prisma.user.findUnique.mockResolvedValue({ id: USER_ID, role: "admin", projectMemberships: [] });
     prisma.task.findFirst.mockResolvedValue({ taskNumber: 10 });
     prisma.task.create.mockResolvedValue({
@@ -236,6 +239,7 @@ describe("task router auto-archive", () => {
 
   it("recomputes archivedAt from the duplicated status instead of copying the source archive state", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     prisma.task.findFirst.mockResolvedValue({ taskNumber: 7 });
     prisma.task.findUniqueOrThrow.mockResolvedValue({
       id: SOURCE_TASK_ID,
@@ -300,6 +304,7 @@ describe("task router auto-archive", () => {
 
   it("keeps duplicated tasks unarchived when their status does not auto-archive", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     prisma.task.findFirst.mockResolvedValue({ taskNumber: 18 });
     prisma.task.findUniqueOrThrow.mockResolvedValue({
       id: SOURCE_TASK_ID,
@@ -350,6 +355,7 @@ describe("task router auto-archive", () => {
 
   it("does not reset archivedAt on update when the status stays the same", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     prisma.task.findUniqueOrThrow.mockResolvedValue({
       assigneeId: USER_ID,
       closedAt: null,
@@ -383,6 +389,7 @@ describe("task router auto-archive", () => {
 
   it("replaces task participants on update when participantIds are provided", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     const previousParticipantId = "cmab8yxxp0016i7p4k8n2v3qj";
     const nextParticipantId = "cmab8yxxp0017i7p4k8n2v3qk";
     prisma.user.findUnique.mockResolvedValue({ id: nextParticipantId, role: "admin", projectMemberships: [] });
@@ -416,6 +423,7 @@ describe("task router auto-archive", () => {
 
   it("only applies status-derived auto-archive to bulk-updated tasks whose status actually changes", async () => {
     const prisma = createPrismaMock();
+    prisma.jiraIssue.findMany.mockResolvedValue([]);
     const unchangedTaskId = "cmab8yxxp0008i7p4k8n2v3qb";
     const changedTaskId = "cmab8yxxp0009i7p4k8n2v3qc";
 

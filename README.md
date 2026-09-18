@@ -531,3 +531,9 @@ If you want to run the Next.js dev server outside Docker, you can still use the 
 ## License
 
 [MIT](LICENSE)
+
+## Jira Cloud
+
+Connect a personal Jira Cloud account in **Settings → Jira** to import unresolved assigned/request-participant tickets, comments, attachments, and history. Imported tasks carry a Jira project tag. The task creation dialog can export to a selected Jira project; titles, descriptions, due dates, statuses, and new comments synchronize back to Jira. Public and internal comments are explicitly labelled.
+
+See [Jira setup and synchronization behavior](JIRA.md) for deployment, permissions, workflow mapping, polling/cron, and delivery recovery.

@@ -284,6 +284,7 @@ export interface ReencryptTransactionClient {
   oidcProviderConnection: ReencryptDelegate;
   storageSettings: ReencryptDelegate;
   webhook: ReencryptDelegate;
+  jiraConnection: ReencryptDelegate;
 }
 
 export interface ReencryptDelegate {
@@ -438,6 +439,11 @@ export async function reencryptAiSecrets(
           },
           updateRow: (tx, id, encrypted) =>
             tx.webhook.update({ where: { id }, data: { encryptedSecret: encrypted } }),
+        },
+        {
+          label: "JiraConnection.encryptedApiToken",
+          readRows: async tx => (await tx.jiraConnection.findMany({ select: { id: true, encryptedApiToken: true } })).map(row => ({ id: row.id, encrypted: row.encryptedApiToken as string })),
+          updateRow: (tx, id, encrypted) => tx.jiraConnection.update({ where: { id }, data: { encryptedApiToken: encrypted } }),
         },
       ];
 

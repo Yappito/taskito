@@ -27,6 +27,8 @@ export async function POST(
 
   const { taskId } = await context.params;
   const formData = await request.formData();
+  const visibility = formData.get("visibility") ?? "internal";
+  if (visibility !== "internal" && visibility !== "public") return NextResponse.json({ error: "Invalid comment visibility" }, { status: 400 });
   const content = String(formData.get("content") ?? "");
   const files = formData
     .getAll("attachments")
@@ -48,6 +50,7 @@ export async function POST(
       taskId,
       authorId: session.user.id,
       content,
+      visibility,
       attachments: storedAttachments,
     });
 

@@ -54,6 +54,7 @@ describe("comment service", () => {
       attachments: [],
     };
     const prisma = {
+      jiraIssue: { findUnique: vi.fn().mockResolvedValue(null) },
       comment: {
         create: vi.fn().mockResolvedValue(createdComment),
       },

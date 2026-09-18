@@ -1,3 +1,4 @@
+import { usableConnection, exportJiraTask, deliverJiraFields } from "../services/jira/sync";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
@@ -502,6 +503,7 @@ export const taskRouter = createTRPCRouter({
           sprint: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           timeLogs: { include: { user: { select: { id: true, name: true, email: true, image: true } } }, orderBy: { startedAt: "desc" } },
           recurrenceRule: true,
+          jiraIssue: true,
           watchers: { select: { userId: true } },
           tags: { include: { tag: true } },
           sourceLinks: {
@@ -575,6 +577,7 @@ export const taskRouter = createTRPCRouter({
   create: protectedProcedure
     .input(
       z.object({
+        jira: z.object({ projectKey: z.string().regex(/^[A-Z][A-Z0-9_]*$/), issueTypeId: z.string().regex(/^\d+$/), serviceDeskId: z.string().regex(/^\d+$/).optional(), requestTypeId: z.string().regex(/^\d+$/).optional() }).refine(value => Boolean(value.serviceDeskId) === Boolean(value.requestTypeId), "Select a service desk request type").optional(),
         projectId: z.string().cuid(),
         title: z.string().min(1).max(200),
         description: z.unknown().optional(),
@@ -591,7 +594,8 @@ export const taskRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { tagIds, description, body, assigneeId, participantIds, customFieldValues, sprintId, ...data } = input;
+      const { jira, tagIds, description, body, assigneeId, participantIds, customFieldValues, sprintId, ...data } = input;
+      const jiraConnection = jira ? await usableConnection(ctx.session.user.id, data.projectId) : null;
       const effectiveAssigneeId = assigneeId ?? ctx.session.user.id;
       await requireProjectAccess(ctx.prisma, ctx.session.user.id, data.projectId, { permission: "task_create" });
       await validateAssigneeAccess(ctx, data.projectId, effectiveAssigneeId);
@@ -654,6 +658,7 @@ export const taskRouter = createTRPCRouter({
           data: {
             ...data,
             taskNumber,
+            ...(jiraConnection && jira ? { jiraIssue: { create: { connectionId: jiraConnection.id, siteUrl: jiraConnection.siteUrl, jiraProjectKey: jira.projectKey, issueTypeId: jira.issueTypeId, serviceDeskId: jira.serviceDeskId, requestTypeId: jira.requestTypeId, outboundFields: ["dueDate"], outboundVersion: 1, outboundStatus: true, outboundUserId: ctx.session.user.id } } } : {}),
             creatorId: ctx.session.user.id,
             assigneeId: effectiveAssigneeId,
             sprintId: sprintId ?? null,
@@ -731,6 +736,7 @@ export const taskRouter = createTRPCRouter({
         actorId: ctx.session.user.id,
       }).catch(() => {});
 
+      if (jiraConnection) { await exportJiraTask(task.id).catch(() => undefined); await deliverJiraFields(task.id).catch(() => undefined); }
       return task;
     }),
 
@@ -878,6 +884,12 @@ export const taskRouter = createTRPCRouter({
         ...(archivedAt !== undefined && { archivedAt }),
       };
 
+      const jiraLink = await ctx.prisma.jiraIssue.findUnique({ where: { taskId: input.id } });
+      const jiraFieldsChanged = title !== undefined || body !== undefined || description !== undefined || statusId !== undefined || dueDate !== undefined;
+      if (jiraLink && jiraFieldsChanged) {
+        const connection = await usableConnection(ctx.session.user.id, currentTask.projectId);
+        if (connection.siteUrl !== jiraLink.siteUrl) throw new Error("Your Jira connection must match this ticket's site");
+      }
       const updated = await ctx.prisma.$transaction(async (tx) => {
         if (participantIds !== undefined) {
           await tx.taskParticipant.deleteMany({ where: { taskId: id } });
@@ -936,8 +948,10 @@ export const taskRouter = createTRPCRouter({
           },
         });
 
+        if (jiraLink && jiraFieldsChanged) await tx.jiraIssue.update({ where: { id: jiraLink.id }, data: { syncState: "pending", outboundVersion: { increment: 1 }, outboundUserId: ctx.session.user.id, outboundFields: { push: [...(title !== undefined ? ["title"] : []), ...(body !== undefined || description !== undefined ? ["body"] : []), ...(dueDate !== undefined ? ["dueDate"] : [])] }, ...(statusId !== undefined ? { outboundStatus: true } : {}) } });
         return task;
       });
+      if (jiraLink && jiraFieldsChanged) await deliverJiraFields(updated.id).catch(() => undefined);
       createTaskActivity({
         taskId: updated.id,
         actorId: ctx.session.user.id,
@@ -1214,7 +1228,14 @@ export const taskRouter = createTRPCRouter({
         }
       }
 
+      const jiraLinks = input.statusId ? await ctx.prisma.jiraIssue.findMany({ where: { taskId: { in: input.taskIds } } }) : [];
+      for (const link of jiraLinks) {
+        const task = await ctx.prisma.task.findUniqueOrThrow({ where: { id: link.taskId } });
+        const connection = await usableConnection(ctx.session.user.id, task.projectId);
+        if (connection.siteUrl !== link.siteUrl) throw new Error("Your Jira connection must match this ticket's site");
+      }
       await ctx.prisma.$transaction(async (tx) => {
+        for (const link of jiraLinks) await tx.jiraIssue.update({ where: { id: link.id }, data: { syncState: "pending", outboundVersion: { increment: 1 }, outboundUserId: ctx.session.user.id, outboundStatus: true } });
         if (input.statusId !== undefined || input.assigneeId !== undefined || input.sprintId !== undefined || archivedAt !== undefined) {
           await Promise.all(
             tasks.map((task) => {
@@ -1261,6 +1282,7 @@ export const taskRouter = createTRPCRouter({
         }
       });
 
+      for (const link of jiraLinks) await deliverJiraFields(link.taskId).catch(() => undefined);
       const updatedTasks = await ctx.prisma.task.findMany({
         where: { id: { in: input.taskIds } },
         include: {
@@ -1510,6 +1532,7 @@ export const taskRouter = createTRPCRouter({
     .input(
       z.object({
         taskId: z.string().cuid(),
+        visibility: z.enum(["internal", "public"]).default("internal"),
         content: z.string().min(1).max(5000),
       })
     )
@@ -1518,6 +1541,7 @@ export const taskRouter = createTRPCRouter({
         taskId: input.taskId,
         authorId: ctx.session.user.id,
         content: input.content,
+        visibility: input.visibility,
       });
       if (!isAutomationExecutionActive()) {
         const task = await ctx.prisma.task.findUnique({ where: { id: input.taskId }, select: { projectId: true, statusId: true, assigneeId: true, priority: true } });

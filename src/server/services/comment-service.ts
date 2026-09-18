@@ -1,3 +1,4 @@
+import { prepareJiraComment, deliverJiraComment } from "./jira/sync";
 import { createTaskActivity } from "@/server/services/task-activity";
 import { dispatchNotification, notifyTaskWatchers, resolveMentionedUserIds } from "@/server/services/notifications";
 import { emitTaskWebhookEvent } from "@/server/services/webhooks/dispatcher";
@@ -15,9 +16,11 @@ export async function createTaskComment(
     authorId: string;
     content: string;
     attachments?: StoredCommentAttachmentInput[];
+    visibility?: "internal" | "public";
   }
 ) {
   const task = await requireTaskAccess(prisma, input.authorId, input.taskId, { permission: "task_comment" });
+  const syncToJira = await prepareJiraComment(input.authorId, input.taskId, input.visibility ?? "internal", prisma);
   const attachments = input.attachments ?? [];
   const finalContent = normalizeCommentContent(input.content);
 
@@ -39,6 +42,8 @@ export async function createTaskComment(
         taskId: input.taskId,
         authorId: input.authorId,
         content: finalContent,
+        visibility: input.visibility ?? "internal",
+        jiraSyncState: syncToJira ? "pending" : null,
         ...(attachments.length > 0
         ? {
             attachments: {
@@ -115,6 +120,7 @@ export async function createTaskComment(
     ))
     .catch(() => {});
 
+  if (syncToJira) await deliverJiraComment(comment.id).catch(() => undefined);
   return comment;
 }
 
@@ -135,6 +141,8 @@ export async function updateTaskComment(
       taskId: true,
       authorId: true,
       content: true,
+      jiraSyncState: true,
+      externalAuthor: true,
       attachments: {
         select: {
           originalName: true,
@@ -147,6 +155,8 @@ export async function updateTaskComment(
   if (!existingComment || existingComment.taskId !== input.taskId) {
     throw new Error("Comment not found");
   }
+
+  if (existingComment.jiraSyncState || existingComment.externalAuthor) throw new Error("Edit Jira-linked comments in Jira; changes will be imported on the next sync.");
 
   if (existingComment.authorId !== input.actorId) {
     throw new Error("You can only edit your own comments");
@@ -231,7 +241,7 @@ export async function deleteTaskComment(
   await requireTaskAccess(prisma, input.actorId, input.taskId, { permission: "task_comment" });
   const existingComment = await prisma.comment.findUnique({
     where: { id: input.commentId },
-    select: { id: true, taskId: true, authorId: true },
+    select: { id: true, taskId: true, authorId: true, jiraSyncState: true, externalAuthor: true },
   });
 
   if (!existingComment || existingComment.taskId !== input.taskId) {
@@ -241,6 +251,8 @@ export async function deleteTaskComment(
   if (existingComment.authorId !== input.actorId) {
     throw new Error("You can only delete your own comments");
   }
+
+  if (existingComment.jiraSyncState || existingComment.externalAuthor) throw new Error("Delete Jira-linked comments in Jira.");
 
   // CITADEL-e10 (finding 5): the comment-thread version bump commits
   // atomically with the delete, so the AI summary cache compare-and-swap can

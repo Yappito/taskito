@@ -1,3 +1,4 @@
+import { jiraRouter } from "./jira";
 import { createTRPCRouter } from "../trpc";
 import { projectRouter } from "./project";
 import { taskRouter } from "./task";
@@ -22,6 +23,7 @@ import { importExportRouter } from "./import-export";
 
 /** Root tRPC router — all sub-routers mounted here */
 export const appRouter = createTRPCRouter({
+  jira: jiraRouter,
   project: projectRouter,
   task: taskRouter,
   tag: tagRouter,

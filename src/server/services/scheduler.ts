@@ -1,3 +1,4 @@
+import { processJiraSync } from "./jira/sync";
 import { prisma } from "@/lib/prisma";
 import { processDueDateAutomationRules } from "@/server/services/automation-evaluator";
 import { runDailyDigestJob } from "@/server/services/email/digest";
@@ -288,6 +289,7 @@ export async function runScheduledJobs() {
         () => runDigestJob(new Date(), deadline),
         () => runSprintSnapshotJob(deadline),
         () => runWebhookDeliveryJob(deadline),
+        () => processJiraSync(deadline),
       ]) {
         try {
           await job();

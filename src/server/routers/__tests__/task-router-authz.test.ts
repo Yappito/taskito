@@ -44,6 +44,7 @@ const TASK_IN_B_ID = "cmab8yxxp0004t0a0s0k0i0n0b0b0b0";
 const STATUS_ID = "cmab8yxxp0004s0t0a0t0u0s0s0t0a0";
 
 function callerFor(fixedActor: ReturnType<typeof memberOf>) {
+  fixedActor.prisma.jiraIssue.findMany.mockResolvedValue([]);
   return createCaller({
     prisma: fixedActor.prisma as never,
     session: { user: fixedActor.sessionUser } as never,
@@ -81,6 +82,14 @@ function taskRow(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+it("includes Jira status and history in task detail", async () => {
+  const actor = memberOf({ userId: "user-1", projects: { [PROJECT_A]: "member" } });
+  actor.prisma.task.findUnique.mockResolvedValue(taskRow());
+  actor.prisma.task.findUniqueOrThrow.mockResolvedValue(taskRow());
+  await callerFor(actor).byId({ id: TASK_ID });
+  expect(actor.prisma.task.findUniqueOrThrow).toHaveBeenCalledWith(expect.objectContaining({ include: expect.objectContaining({ jiraIssue: true }) }));
+});
 
 describe("task router cross-project authorization", () => {
   it("denies byId for a task whose findUnique reports another project", async () => {
