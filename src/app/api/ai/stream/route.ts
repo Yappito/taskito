@@ -5,6 +5,7 @@ import { auth } from "@/lib/auth";
 import { normalizeAiPermissions } from "@/lib/ai-permissions";
 import { AI_PERMISSION_PRESETS, AI_PERMISSION_VALUES } from "@/lib/ai-types";
 import { consumeRateLimit } from "@/lib/rate-limit";
+import { isTrustedRequestUrl } from "@/lib/request-origin";
 import { prisma } from "@/lib/prisma";
 import { requireProjectAccess } from "@/server/authz";
 import { runAiAssistantTurn } from "@/server/services/ai/orchestrator";
@@ -14,13 +15,15 @@ function sse(data: unknown) {
 }
 
 function assertSameOrigin(request: Request) {
-  const requestOrigin = new URL(request.url).origin;
   const origin = request.headers.get("origin");
-  if (origin && origin !== requestOrigin) {
-    throw new Error("Invalid request origin");
+  if (origin) {
+    if (!isTrustedRequestUrl(request, origin)) {
+      throw new Error("Invalid request origin");
+    }
+    return;
   }
   const referer = request.headers.get("referer");
-  if (!origin && referer && new URL(referer).origin !== requestOrigin) {
+  if (referer && !isTrustedRequestUrl(request, referer)) {
     throw new Error("Invalid request referer");
   }
 }
