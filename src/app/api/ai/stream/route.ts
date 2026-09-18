@@ -32,6 +32,10 @@ async function getEffectiveConversation(conversationId: string, userId: string) 
     throw new Error("You do not have access to this conversation");
   }
 
+  if (!conversation.providerId) {
+    throw new Error("The AI provider used by this conversation is no longer available. Start a new conversation to continue.");
+  }
+
   const provider = await prisma.aiProviderConnection.findUniqueOrThrow({ where: { id: conversation.providerId } });
   if (!provider.isEnabled) {
     throw new Error("Selected provider is disabled");

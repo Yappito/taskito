@@ -971,6 +971,9 @@ export const aiRouter = createTRPCRouter({
       if (conversation.createdByUserId !== ctx.session.user.id) {
         throw new Error("You do not have access to this conversation");
       }
+      if (!conversation.providerId) {
+        throw new Error("The AI provider used by this conversation is no longer available. Start a new conversation to continue.");
+      }
 
       const selectedTaskIds = await normalizeSelectedTaskIdsOrThrow(
         ctx.prisma,
@@ -1022,6 +1025,9 @@ export const aiRouter = createTRPCRouter({
       if (conversation.createdByUserId !== ctx.session.user.id) {
         throw new Error("You do not have access to this conversation");
       }
+      if (!conversation.providerId) {
+        throw new Error("The AI provider used by this conversation is no longer available. Start a new conversation to continue.");
+      }
 
       if (conversation.messages.length === 0) {
         throw new Error("Conversation must have messages before a title can be generated");
@@ -1033,6 +1039,9 @@ export const aiRouter = createTRPCRouter({
         mode: conversation.mode,
       });
       const effectivePermissions = getEffectiveConversationPermissions(policy, conversation.grantedPermissions);
+      if (!conversation.provider) {
+        throw new Error("The AI provider used by this conversation is no longer available. Start a new conversation to continue.");
+      }
       const provider = resolveAiProvider(conversation.provider);
       const summarizationMessages = [
         {

@@ -449,7 +449,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
       return;
     }
 
-    setProviderId(conversation.providerId);
+    setProviderId(conversation.providerId ?? "");
     setMode(conversation.mode === "yolo" && canUseYolo ? "yolo" : "approval");
     const conversationPermissions = Array.isArray(conversation.grantedPermissions)
       ? (conversation.grantedPermissions as AiPermission[])
@@ -487,7 +487,7 @@ export function AiChatPanel({ projectId, taskId, selectedTaskIds = [], title, on
 
   function getConversationLabel(item: (typeof conversations)[number]) {
     const baseTitle = item.title?.trim() || `Conversation from ${new Date(item.updatedAt).toLocaleString()}`;
-    return `${baseTitle} · ${item.provider.label}`;
+    return item.provider ? `${baseTitle} · ${item.provider.label}` : baseTitle;
   }
 
   function renderMessageContent(role: string, content: string) {

@@ -70,6 +70,10 @@ export async function buildAiAssistantTurnRequest(
     requestedByUserId: string;
   }
 ) {
+  if (!input.conversation.providerId) {
+    throw new Error("The AI provider used by this conversation is no longer available. Start a new conversation to continue.");
+  }
+
   const providerRecord = await prisma.aiProviderConnection.findUniqueOrThrow({
     where: { id: input.conversation.providerId },
   });

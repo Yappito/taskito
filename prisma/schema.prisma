@@ -1071,7 +1071,7 @@ model AiConversation {
   projectId          String
   taskId             String?
   createdByUserId    String
-  providerId         String
+  providerId         String?
   mode               AiConversationMode @default(approval)
   title              String?
   grantedPermissions Json               @default("[]")
@@ -1084,7 +1084,7 @@ model AiConversation {
   project          Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   task             Task?                @relation(fields: [taskId], references: [id], onDelete: SetNull)
   createdByUser    User                 @relation("CreatedAiConversations", fields: [createdByUserId], references: [id], onDelete: Cascade)
-  provider         AiProviderConnection @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  provider         AiProviderConnection? @relation(fields: [providerId], references: [id], onDelete: SetNull)
   messages         AiMessage[]
   actionExecutions AiActionExecution[]
 
