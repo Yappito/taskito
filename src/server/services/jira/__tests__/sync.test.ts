@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   lock: vi.fn(),
   end: vi.fn(),
   readAttachment: vi.fn(),
+  storeAttachment: vi.fn(),
 }));
 vi.mock("@/server/authz", () => ({
   requireProjectAccess: mocks.access,
@@ -24,11 +25,12 @@ vi.mock("@/server/services/scheduler-lock-connection", () => ({
 }));
 vi.mock("@/server/services/comment-attachments", () => ({
   readStoredCommentAttachment: mocks.readAttachment,
-  storeCommentAttachment: vi.fn(),
+  storeCommentAttachment: mocks.storeAttachment,
   removeStoredCommentAttachments: vi.fn(),
 }));
 import { prisma } from "@/lib/prisma";
 import {
+  jiraError,
   deliverJiraComment,
   deliverJiraFields,
   exportJiraTask,
@@ -112,9 +114,117 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("Jira delivery safety", () => {
+  it("logs a safe diagnostic for database failures without exposing query arguments", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = new Error(
+      "Invalid prisma call: apiToken=secret-token, private comment",
+    );
+    error.name = "PrismaClientValidationError";
+    const message = jiraError(error);
+    expect(message).toContain("internal database error");
+    expect(message).toContain("reference");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret-token");
+    expect(message).not.toContain("private comment");
+    expect(jiraError(error)).toBe(message);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+  it.each(["missing-id", "missing-file", "wrong-file"])(
+    "does not replay an accepted attachment write with %s",
+    async (invalid) => {
+      comment.attachments = [
+        { id: "file", originalName: "private.txt", sizeBytes: 3 },
+      ];
+      vi.spyOn(JiraClient.prototype, "upload").mockResolvedValue({
+        temporaryAttachments: [{ temporaryAttachmentId: "temp" }],
+      });
+      request.mockResolvedValue({
+        comment: { id: "remote-comment" },
+        attachments: {
+          values:
+            invalid === "missing-file"
+              ? []
+              : [
+                  {
+                    filename:
+                      invalid === "wrong-file" ? "other.txt" : "private.txt",
+                    size: 3,
+                    _links:
+                      invalid === "missing-id"
+                        ? {}
+                        : {
+                            jiraRest:
+                              "https://team.atlassian.net/rest/api/2/attachment/279743",
+                          },
+                  },
+                ],
+        },
+      });
+      await deliverJiraComment("comment");
+      expect(comment.jiraSyncState).toBe("uncertain");
+      expect(comment.jiraSyncError).toContain("Jira attachment response");
+      expect(db.commentAttachment.update).not.toHaveBeenCalled();
+      await deliverJiraComment("comment");
+      expect(request).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("does not publish a comment without its files when temporary upload IDs are missing", async () => {
+    comment.attachments = [
+      { id: "file", originalName: "private.txt", sizeBytes: 3 },
+    ];
+    vi.spyOn(JiraClient.prototype, "upload").mockResolvedValue({
+      temporaryAttachments: [],
+    });
+    await deliverJiraComment("comment");
+    expect(request).not.toHaveBeenCalled();
+    expect(comment.jiraSyncState).toBe("failed");
+    expect(comment.jiraSyncError).toContain(
+      "temporary upload did not return a file ID",
+    );
+  });
+  it("matches uploaded attachments by metadata when JSM returns them in reverse order", async () => {
+    comment.attachments = [
+      { id: "one", originalName: "one.txt", sizeBytes: 3 },
+      { id: "two", originalName: "two.txt", sizeBytes: 3 },
+    ];
+    vi.spyOn(JiraClient.prototype, "upload").mockResolvedValue({
+      temporaryAttachments: [{ temporaryAttachmentId: "temp" }],
+    });
+    request.mockResolvedValue({
+      comment: { id: "remote-comment" },
+      attachments: {
+        values: [
+          {
+            filename: "two.txt",
+            size: 3,
+            _links: {
+              jiraRest: "https://team.atlassian.net/rest/api/2/attachment/2",
+            },
+          },
+          {
+            filename: "one.txt",
+            size: 3,
+            _links: {
+              jiraRest: "https://team.atlassian.net/rest/api/2/attachment/1",
+            },
+          },
+        ],
+      },
+    });
+    await deliverJiraComment("comment");
+    expect(db.commentAttachment.update).toHaveBeenCalledWith({
+      where: { id: "one" },
+      data: { jiraAttachmentId: "1" },
+    });
+    expect(db.commentAttachment.update).toHaveBeenCalledWith({
+      where: { id: "two" },
+      data: { jiraAttachmentId: "2" },
+    });
+    expect(comment.jiraSyncState).toBe("synced");
+  });
   it("sends internal comments through JSM with public=false and deduplicates subsequent delivery", async () => {
     await deliverJiraComment("comment");
     expect(request).toHaveBeenCalledWith(
@@ -130,31 +240,49 @@ describe("Jira delivery safety", () => {
     await deliverJiraComment("comment");
     expect(request).toHaveBeenCalledTimes(1);
   });
-  it("sends attachments and the internal comment in the same JSM visibility operation", async () => {
-    comment.attachments = [{ id: "file", originalName: "private.txt" }];
-    vi.spyOn(JiraClient.prototype, "upload").mockResolvedValue({
-      temporaryAttachments: [{ temporaryAttachmentId: "temp" }],
-    });
-    request.mockResolvedValue({
-      comment: { id: "remote-comment" },
-      attachments: { values: [{ id: "attachment" }] },
-    });
-    await deliverJiraComment("comment");
-    expect(request).toHaveBeenCalledWith(
-      "/rest/servicedeskapi/request/HELP-1/attachment",
-      expect.objectContaining({
-        body: JSON.stringify({
-          public: false,
-          additionalComment: { body: "Internal note" },
-          temporaryAttachmentIds: ["temp"],
+  it.each(["internal", "public"])(
+    "sends attachments with %s visibility and records JSM link IDs",
+    async (visibility) => {
+      comment.visibility = visibility;
+      comment.attachments = [
+        { id: "file", originalName: "private.txt", sizeBytes: 3 },
+      ];
+      vi.spyOn(JiraClient.prototype, "upload").mockResolvedValue({
+        temporaryAttachments: [{ temporaryAttachmentId: "temp" }],
+      });
+      request.mockResolvedValue({
+        comment: { id: "remote-comment" },
+        attachments: {
+          values: [
+            {
+              filename: "private.txt",
+              size: 3,
+              mimeType: "text/plain",
+              _links: {
+                jiraRest:
+                  "https://team.atlassian.net/rest/api/2/attachment/279743",
+              },
+            },
+          ],
+        },
+      });
+      await deliverJiraComment("comment");
+      expect(request).toHaveBeenCalledWith(
+        "/rest/servicedeskapi/request/HELP-1/attachment",
+        expect.objectContaining({
+          body: JSON.stringify({
+            public: visibility === "public",
+            additionalComment: { body: "Internal note" },
+            temporaryAttachmentIds: ["temp"],
+          }),
         }),
-      }),
-    );
-    expect(db.commentAttachment.update).toHaveBeenCalledWith({
-      where: { id: "file" },
-      data: { jiraAttachmentId: "attachment" },
-    });
-  });
+      );
+      expect(db.commentAttachment.update).toHaveBeenCalledWith({
+        where: { id: "file" },
+        data: { jiraAttachmentId: "279743" },
+      });
+    },
+  );
   it("never retries an ambiguous non-idempotent comment write automatically", async () => {
     request.mockRejectedValue(new TypeError("fetch failed"));
     await deliverJiraComment("comment");
@@ -255,9 +383,31 @@ describe("Jira delivery safety", () => {
 });
 
 describe("Jira imports", () => {
-  it.each([false, true])(
-    "imports comments and history even with an oversized attachment: %s",
-    async (oversized) => {
+  it.each(["empty", "oversized", "valid", "malformed"])(
+    "imports JSM comments, history and attachments: %s",
+    async (mode) => {
+      const failed = mode === "oversized" || mode === "malformed";
+      const download = vi
+        .spyOn(JiraClient.prototype, "download")
+        .mockResolvedValue(new Uint8Array([1, 2, 3]));
+      mocks.storeAttachment.mockResolvedValue({
+        originalName: "private.txt",
+        sizeBytes: 3,
+        storagePath: "file",
+      });
+      const stored = new Map();
+      db.commentAttachment.findUnique.mockImplementation(async ({ where }) => {
+        expect(where.commentId_jiraAttachmentId.jiraAttachmentId).toMatch(
+          /^\d+$/,
+        );
+        return (
+          stored.get(where.commentId_jiraAttachmentId.jiraAttachmentId) ?? null
+        );
+      });
+      db.commentAttachment.create.mockImplementation(async ({ data }) => {
+        stored.set(data.jiraAttachmentId, data);
+        return data;
+      });
       Object.assign(link, { outboundVersion: 0, sentVersion: 0 });
       const remote = {
         id: "100",
@@ -331,22 +481,40 @@ describe("Jira imports", () => {
                     author: { displayName: "Agent" },
                   },
                 ]
-              : oversized && path.includes("/comment/public/attachment")
+              : mode !== "empty" && path.includes("/comment/public/attachment")
                 ? [
                     {
-                      id: "big",
-                      filename: "too-large.zip",
+                      _links: {
+                        jiraRest:
+                          mode === "malformed"
+                            ? undefined
+                            : "https://team.atlassian.net/rest/api/2/attachment/279743",
+                      },
+                      filename: "private.txt",
                       mimeType: "application/zip",
-                      size: 21 * 1024 * 1024,
+                      size: mode === "oversized" ? 21 * 1024 * 1024 : 3,
                     },
                   ]
                 : [],
       );
       const result = await syncJiraConnection("connection");
       expect(result).toMatchObject({
-        imported: oversized ? 0 : 1,
-        errors: oversized ? 1 : 0,
+        imported: failed ? 0 : 1,
+        errors: failed ? 1 : 0,
       });
+      if (mode === "valid") {
+        expect(download).toHaveBeenCalledWith("279743");
+        expect(db.commentAttachment.create).toHaveBeenCalledTimes(1);
+        // Force another full refresh, proving that stable IDs prevent duplicates.
+        link.lastSyncedAt = null;
+        await syncJiraConnection("connection");
+        expect(download).toHaveBeenCalledTimes(1);
+        expect(db.commentAttachment.create).toHaveBeenCalledTimes(1);
+      } else {
+        expect(download).not.toHaveBeenCalled();
+        if (mode === "malformed")
+          expect(link.lastError).toContain("no valid attachment ID");
+      }
       expect(db.comment.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
           create: expect.objectContaining({

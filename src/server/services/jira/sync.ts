@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   Prisma,
   type JiraConnection,
@@ -25,16 +25,70 @@ import {
   type JiraIssueData,
 } from "./client";
 
-export const jiraError = (error: unknown) =>
-  error instanceof JiraApiError
-    ? error.message
-    : error instanceof Error &&
-        (error.name === "TRPCError" ||
-          /^(Configure|Linked task|Jira attachment|Internal comments|Your Jira connection)/.test(
-            error.message,
-          ))
-      ? error.message
-      : "Sync failed. Check connectivity, Jira permissions, and server configuration.";
+import {
+  JiraAttachmentError,
+  normalizeJiraAttachment,
+  type JiraServiceDeskAttachment,
+} from "./attachments";
+
+const reportedErrors = new WeakMap<Error, string>();
+export function jiraError(error: unknown): string {
+  if (
+    error instanceof JiraApiError ||
+    error instanceof JiraAttachmentError ||
+    (error instanceof Error &&
+      (error.name === "TRPCError" ||
+        /^(Configure|Linked task|Jira attachment|Internal comments|Your Jira connection)/.test(
+          error.message,
+        )))
+  )
+    return error.message;
+  if (error instanceof Error && reportedErrors.has(error))
+    return reportedErrors.get(error)!;
+  const reference = randomUUID();
+  const databaseError =
+    error instanceof Error && error.name.startsWith("PrismaClient");
+  // Do not log raw errors: Prisma messages can contain query arguments, and
+  // network errors can contain credentials. Keep a safe diagnostic reference.
+  console.error("Jira sync failure", {
+    reference,
+    category: databaseError ? "database" : "unexpected",
+    type:
+      error instanceof Error &&
+      [
+        "PrismaClientValidationError",
+        "PrismaClientKnownRequestError",
+        "PrismaClientUnknownRequestError",
+        "PrismaClientInitializationError",
+        "TypeError",
+        "SyntaxError",
+        "AbortError",
+        "TimeoutError",
+      ].includes(error.name)
+        ? error.name
+        : "Error",
+    locations:
+      error instanceof Error
+        ? [
+            ...(error.stack ?? "").matchAll(
+              /(?:src|\.next)\/[\w/.[\]-]+:\d+:\d+/g,
+            ),
+          ]
+            .slice(0, 5)
+            .map((match) => match[0])
+        : [],
+    code:
+      error instanceof Error &&
+      "code" in error &&
+      typeof error.code === "string" &&
+      /^P\d{4}$/.test(error.code)
+        ? error.code
+        : undefined,
+  });
+  const message = `${databaseError ? "An internal database error interrupted Jira sync." : "An unexpected error interrupted Jira sync."} Check server logs using reference ${reference}.`;
+  if (error instanceof Error) reportedErrors.set(error, message);
+  return message;
+}
 async function locked<T>(key: string, fn: () => Promise<T>) {
   const lock = createSchedulerLockConnection();
   try {
@@ -85,8 +139,9 @@ export async function prepareJiraComment(
 async function saveAttachment(
   client: JiraClient,
   commentId: string,
-  attachment: JiraAttachment,
+  rawAttachment: unknown,
 ) {
+  const attachment = normalizeJiraAttachment(rawAttachment, client.site);
   if (
     await prisma.commentAttachment.findUnique({
       where: {
@@ -125,12 +180,14 @@ async function importComments(
   const attachmentErrors: string[] = [];
   const importAttachment = async (
     commentId: string,
-    attachment: JiraAttachment,
+    attachment: JiraAttachment | JiraServiceDeskAttachment,
   ) => {
     try {
       await saveAttachment(client, commentId, attachment);
     } catch (error) {
-      attachmentErrors.push(`${attachment.filename}: ${jiraError(error)}`);
+      attachmentErrors.push(
+        `${attachment?.filename ?? "Unknown file"}: ${jiraError(error)}`,
+      );
     }
   };
   const issueKey = encodeURIComponent(remote.key);
@@ -199,7 +256,7 @@ async function importComments(
         data: { commentThreadVersion: { increment: 1 } },
       });
     if (link.serviceDeskId) {
-      const attachments = await client.pages<JiraAttachment>(
+      const attachments = await client.pages<JiraServiceDeskAttachment>(
         `/rest/servicedeskapi/request/${issueKey}/comment/${encodeURIComponent(comment.id)}/attachment`,
         "values",
         true,
@@ -229,16 +286,23 @@ async function importComments(
       },
       update: {},
     });
-    for (const attachment of remote.fields.attachment) {
-      if (
-        !(await prisma.commentAttachment.findFirst({
-          where: {
-            comment: { taskId: link.taskId },
-            jiraAttachmentId: attachment.id,
-          },
-        }))
-      )
-        await importAttachment(holder.id, attachment);
+    for (const rawAttachment of remote.fields.attachment) {
+      try {
+        const attachment = normalizeJiraAttachment(rawAttachment, client.site);
+        if (
+          !(await prisma.commentAttachment.findFirst({
+            where: {
+              comment: { taskId: link.taskId },
+              jiraAttachmentId: attachment.id,
+            },
+          }))
+        )
+          await saveAttachment(client, holder.id, attachment);
+      } catch (error) {
+        attachmentErrors.push(
+          `${rawAttachment?.filename ?? "Unknown file"}: ${jiraError(error)}`,
+        );
+      }
     }
   }
   if (attachmentErrors.length)
@@ -511,6 +575,15 @@ export async function deliverJiraComment(
           )) as {
             temporaryAttachments: Array<{ temporaryAttachmentId: string }>;
           };
+          if (
+            uploaded.temporaryAttachments?.length !== 1 ||
+            typeof uploaded.temporaryAttachments[0].temporaryAttachmentId !==
+              "string" ||
+            !uploaded.temporaryAttachments[0].temporaryAttachmentId
+          )
+            throw new JiraAttachmentError(
+              "Jira attachment temporary upload did not return a file ID. Retry delivery.",
+            );
           temporaryAttachmentIds.push(
             ...uploaded.temporaryAttachments.map(
               (a) => a.temporaryAttachmentId,
@@ -530,7 +603,12 @@ export async function deliverJiraComment(
           )) as JiraAttachment[];
           await prisma.commentAttachment.update({
             where: { id: attachment.id },
-            data: { jiraAttachmentId: uploaded[0].id },
+            data: {
+              jiraAttachmentId: normalizeJiraAttachment(
+                uploaded[0],
+                client.site,
+              ).id,
+            },
           });
           sending = false;
         }
@@ -544,7 +622,7 @@ export async function deliverJiraComment(
       if (link.serviceDeskId && temporaryAttachmentIds.length) {
         const result = await client.request<{
           comment: { id: string };
-          attachments: { values: JiraAttachment[] };
+          attachments: { values: JiraServiceDeskAttachment[] };
         }>(`/rest/servicedeskapi/request/${key}/attachment`, {
           method: "POST",
           body: JSON.stringify({
@@ -554,13 +632,38 @@ export async function deliverJiraComment(
           }),
         });
         id = result.comment.id;
-        for (let index = 0; index < comment.attachments.length; index++) {
-          if (result.attachments?.values[index])
-            await prisma.commentAttachment.update({
-              where: { id: comment.attachments[index].id },
-              data: { jiraAttachmentId: result.attachments.values[index].id },
-            });
-        }
+        const remaining = (result.attachments?.values ?? []).map((attachment) =>
+          normalizeJiraAttachment(attachment, client.site),
+        );
+        if (
+          remaining.length !== comment.attachments.length ||
+          new Set(remaining.map((attachment) => attachment.id)).size !==
+            remaining.length
+        )
+          throw new JiraAttachmentError(
+            "Jira attachment response did not identify every uploaded file.",
+          );
+        // JSM does not promise the result uses the upload order.
+        const mappings = comment.attachments.map((attachment) => {
+          const index = remaining.findIndex(
+            (remote) =>
+              remote.filename === attachment.originalName &&
+              remote.size === attachment.sizeBytes,
+          );
+          if (index < 0)
+            throw new JiraAttachmentError(
+              "Jira attachment response did not match the uploaded files.",
+            );
+          return {
+            localId: attachment.id,
+            remoteId: remaining.splice(index, 1)[0].id,
+          };
+        });
+        for (const mapping of mappings)
+          await prisma.commentAttachment.update({
+            where: { id: mapping.localId },
+            data: { jiraAttachmentId: mapping.remoteId },
+          });
       } else {
         const body = link.serviceDeskId
           ? { body: comment.content, public: comment.visibility === "public" }
@@ -580,6 +683,10 @@ export async function deliverJiraComment(
         );
         id = result.id;
       }
+      if (typeof id !== "string" || !id)
+        throw new JiraAttachmentError(
+          "Jira attachment or comment response did not include a comment ID.",
+        );
       await prisma.comment.update({
         where: { id: commentId },
         data: {
@@ -589,14 +696,15 @@ export async function deliverJiraComment(
         },
       });
     } catch (error) {
+      const message = jiraError(error);
       await prisma.comment.update({
         where: { id: commentId },
         data: {
           jiraSyncState: sending && uncertain(error) ? "uncertain" : "failed",
           jiraSyncError:
             sending && uncertain(error)
-              ? "Jira may have accepted this comment or attachment. Check Jira before retrying to avoid duplicates."
-              : jiraError(error),
+              ? `${message} Jira may have accepted this comment or attachment. Check Jira before retrying to avoid duplicates.`
+              : message,
         },
       });
     }

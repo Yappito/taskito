@@ -46,6 +46,10 @@ Failed deliveries remain visible on the comment or ticket. Known rejected writes
 
 Per-connection and per-task PostgreSQL advisory locks prevent concurrent manual, scheduled, and multi-replica sync operations. Separate database connections hold those locks; ordinary database queries do not use their pools. Task/import IDs and remote comment/attachment IDs provide durable deduplication.
 
+Taskito opts into experimental Service Management APIs for comment attachment listings. JSM attachment IDs are resolved from the same site's `_links.jiraRest` URL on both import and upload; downloads use Jira's platform attachment endpoint. Invalid or incomplete attachment responses produce a visible error. If Jira already accepted an upload, an incomplete response requires review before retrying to avoid duplicates.
+
+HTTP errors include Jira's JSON or plain-text explanation where available, including experimental API errors (HTTP 412). Unexpected internal failures include a reference for the server's `Jira sync failure` log entry. Diagnostics include the error category and source locations without raw Prisma query arguments or credentials. A connection's last-sync timestamp records the last attempt; check its error and each ticket's sync state to confirm success.
+
 Pausing disables outbound and inbound work. Disconnect removes the stored token and Jira links (including the link's history snapshot), while retaining local tasks, comments, and files. Moving a linked task outside its configured Taskito project suspends its sync. Deleting a Taskito task does not delete its Jira issue.
 
 ## External cron

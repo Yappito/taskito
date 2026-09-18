@@ -27,12 +27,10 @@ export function jiraDocument(text: string) {
   return {
     type: "doc",
     version: 1,
-    content: text
-      .split("\n")
-      .map((line) => ({
-        type: "paragraph",
-        content: line ? [{ type: "text", text: line }] : [],
-      })),
+    content: text.split("\n").map((line) => ({
+      type: "paragraph",
+      content: line ? [{ type: "text", text: line }] : [],
+    })),
   };
 }
 export function normalizeJiraSite(value: string) {
@@ -59,8 +57,20 @@ export class JiraApiError extends Error {
     public retryAfter: number = 60,
     details = "",
   ) {
+    const hint =
+      status === 401
+        ? "Check your email and API token."
+        : status === 403
+          ? "Your Jira account lacks permission for this operation."
+          : status === 429
+            ? "Rate limited; sync will retry later."
+            : details
+              ? ""
+              : "The Jira request failed.";
     super(
-      `Jira returned HTTP ${status}. ${status === 401 ? "Check your email and API token." : status === 403 ? "Your Jira account lacks permission for this operation." : status === 429 ? "Rate limited; sync will retry later." : "Check Jira permissions and required fields."}${details ? ` ${details}` : ""}`,
+      [`Jira returned HTTP ${status}.`, hint, details]
+        .filter(Boolean)
+        .join(" "),
     );
   }
 }
@@ -79,17 +89,7 @@ export interface JiraComment {
   created?: string | { iso8601: string };
   properties?: Array<{ key: string; value: unknown }>;
   visibility?: unknown;
-  _expanded?: {
-    attachment?: {
-      values: Array<{
-        id: string;
-        filename: string;
-        mimeType: string;
-        size: number;
-        _links: { content: string };
-      }>;
-    };
-  };
+  attachments?: { values: import("./attachments").JiraServiceDeskAttachment[] };
 }
 export interface JiraIssueData {
   id: string;
@@ -112,12 +112,14 @@ export interface JiraIssueData {
 export class JiraClient {
   readonly site: string;
   private authorization: string;
+  private apiToken: string;
   constructor(
     connection: { siteUrl: string; email: string; encryptedApiToken: string },
     private signal?: AbortSignal,
   ) {
     this.site = normalizeJiraSite(connection.siteUrl);
-    this.authorization = `Basic ${Buffer.from(`${connection.email}:${decryptSecret(connection.encryptedApiToken)}`).toString("base64")}`;
+    this.apiToken = decryptSecret(connection.encryptedApiToken);
+    this.authorization = `Basic ${Buffer.from(`${connection.email}:${this.apiToken}`).toString("base64")}`;
   }
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!path.startsWith("/rest/")) throw new Error("Invalid Jira API path");
@@ -133,33 +135,80 @@ export class JiraClient {
         ...(init.body && !(init.body instanceof FormData)
           ? { "Content-Type": "application/json" }
           : {}),
-        ...init.headers,
+        ...Object.fromEntries(new Headers(init.headers).entries()),
+        ...(path.startsWith("/rest/servicedeskapi/")
+          ? { "X-ExperimentalApi": "opt-in" }
+          : {}),
       },
     });
-    if (!response.ok) {
-      const details =
-        response.status === 400
-          ? ((await response.json().catch(() => ({}))) as {
-              errorMessages?: string[];
-              errors?: Record<string, string>;
-            })
-          : {};
-      throw new JiraApiError(
-        response.status,
-        Number(response.headers.get("retry-after")) || 60,
-        [
-          ...(details.errorMessages ?? []),
-          ...Object.entries(details.errors ?? {}).map(
-            ([field, message]) => `${field}: ${message}`,
-          ),
-        ]
-          .join("; ")
-          .slice(0, 1000),
-      );
-    }
+    if (!response.ok) throw await this.responseError(response);
     return response.status === 204
       ? (undefined as T)
       : ((await response.json()) as T);
+  }
+  private async responseError(response: Response): Promise<JiraApiError> {
+    // Jira and JSM use different JSON envelopes; experimental endpoints can
+    // return plain text. Bound reads and omit proxy-generated HTML pages.
+    let body = "";
+    const reader = response.body?.getReader();
+    if (reader) {
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (length < 16384) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = value.subarray(0, 16384 - length);
+          chunks.push(chunk);
+          length += chunk.length;
+        }
+        body = Buffer.concat(chunks).toString("utf8");
+      } catch {
+        // Preserve the HTTP status even if the error body cannot be read.
+      } finally {
+        await reader.cancel().catch(() => {});
+      }
+    }
+    let details = "";
+    try {
+      const parsed = JSON.parse(body);
+      const messages: string[] = [];
+      if (typeof parsed?.errorMessage === "string")
+        messages.push(parsed.errorMessage);
+      if (Array.isArray(parsed?.errorMessages))
+        messages.push(
+          ...parsed.errorMessages.filter(
+            (item: unknown) => typeof item === "string",
+          ),
+        );
+      if (parsed?.errors && typeof parsed.errors === "object")
+        for (const [field, message] of Object.entries(parsed.errors))
+          if (typeof message === "string")
+            messages.push(`${field}: ${message}`);
+      details = messages.join("; ");
+    } catch {
+      if (
+        !/^\s*[<{[]/.test(body) &&
+        !response.headers.get("content-type")?.includes("html")
+      )
+        details = body;
+    }
+    // An upstream error must not echo our credentials into stored sync errors.
+    for (const secret of [
+      this.authorization,
+      this.authorization.slice(6),
+      this.apiToken,
+    ])
+      if (secret) details = details.split(secret).join("[redacted]");
+    details = details
+      .replace(/[\x00-\x1f\x7f]/g, " ")
+      .trim()
+      .slice(0, 1000);
+    return new JiraApiError(
+      response.status,
+      Number(response.headers.get("retry-after")) || 60,
+      details,
+    );
   }
   async *search(jql: string): AsyncGenerator<JiraIssueData> {
     let nextPageToken: string | undefined;
@@ -249,7 +298,7 @@ export class JiraClient {
           : AbortSignal.timeout(30000),
       },
     );
-    if (!response.ok) throw new JiraApiError(response.status);
+    if (!response.ok) throw await this.responseError(response);
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Empty Jira attachment response");
     const chunks: Uint8Array[] = [];

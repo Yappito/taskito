@@ -141,4 +141,94 @@ describe("Jira Cloud client", () => {
       new JiraClient(connection()).requestInfo("HELP-1"),
     ).rejects.toBeInstanceOf(JiraApiError);
   });
+  it("opts in on every JSM attachment page and preserves multipart headers", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ values: [{ filename: "one" }], isLastPage: false }),
+      )
+      .mockResolvedValueOnce(json({ values: [], isLastPage: true }))
+      .mockResolvedValueOnce(json({ temporaryAttachments: [] }))
+      .mockResolvedValueOnce(json({ accountId: "me" }));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new JiraClient(connection());
+    await client.pages(
+      "/rest/servicedeskapi/request/HELP-1/comment/12/attachment",
+      "values",
+      true,
+    );
+    await client.upload(
+      "/rest/servicedeskapi/servicedesk/1/attachTemporaryFile",
+      "file.txt",
+      new Uint8Array([1]),
+    );
+    await client.request("/rest/api/3/myself");
+    for (const [, init] of fetcher.mock.calls.slice(0, 3))
+      expect(new Headers(init.headers).get("X-ExperimentalApi")).toBe("opt-in");
+    const uploadHeaders = new Headers(fetcher.mock.calls[2][1].headers);
+    expect(uploadHeaders.get("X-Atlassian-Token")).toBe("no-check");
+    expect(uploadHeaders.has("Content-Type")).toBe(false);
+    expect(
+      new Headers(fetcher.mock.calls[3][1].headers).has("X-ExperimentalApi"),
+    ).toBe(false);
+  });
+  it.each([
+    [412, JSON.stringify({ errorMessage: "Set X-ExperimentalApi: opt-in" })],
+    [412, "Set X-ExperimentalApi: opt-in"],
+    [400, JSON.stringify({ errorMessage: "Set X-ExperimentalApi: opt-in" })],
+    [403, JSON.stringify({ errorMessages: ["Set X-ExperimentalApi: opt-in"] })],
+  ])(
+    "preserves actionable JSON and plain-text errors for HTTP %s",
+    async (status, body) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(body, { status })),
+      );
+      await expect(
+        new JiraClient(connection()).request(
+          "/rest/servicedeskapi/request/HELP-1",
+        ),
+      ).rejects.toThrow("Set X-ExperimentalApi: opt-in");
+    },
+  );
+  it("bounds error details and redacts echoed credentials", async () => {
+    const authorization = Buffer.from(
+      "person@example.com:secret-token",
+    ).toString("base64");
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            `secret-token Basic ${authorization} ${"x".repeat(20000)}`,
+            { status: 412 },
+          ),
+        ),
+    );
+    const error = await new JiraClient(connection())
+      .request("/rest/api/3/myself")
+      .catch((error) => error);
+    expect(error).toBeInstanceOf(JiraApiError);
+    if (!(error instanceof JiraApiError))
+      throw new Error("Expected Jira HTTP error");
+    expect(error.message).toContain("[redacted]");
+    expect(error.message).not.toContain("secret-token");
+    expect(error.message).not.toContain(authorization);
+    expect(error.message.length).toBeLessThan(1100);
+  });
+  it.each(["<html>proxy failure</html>", "{broken JSON"])(
+    "keeps HTTP status without exposing invalid error bodies",
+    async (body) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(body, { status: 502 })),
+      );
+      const error = await new JiraClient(connection())
+        .download("279743")
+        .catch((error) => error);
+      expect(error.status).toBe(502);
+      expect(error.message).not.toContain(body);
+    },
+  );
 });
